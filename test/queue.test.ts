@@ -1,7 +1,8 @@
 import { env, runDurableObjectAlarm } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
-import { createQueue, executorFor } from '../packages/world-cloudflare/src/queue.js';
+import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
+import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
 
 const queue = createQueue(env);
 const queueName = `${getQueueTopicPrefix('workflow')}demo` as ValidQueueName;

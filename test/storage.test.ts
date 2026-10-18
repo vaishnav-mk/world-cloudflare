@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'devalue';
 import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY, workflowRunIdSchema } from '@workflow/world';
 import { EntityConflictError, HookNotFoundError, RunExpiredError } from '@workflow/errors';
-import { createStorage } from '../packages/world-cloudflare/src/storage.js';
-import { createQueue } from '../packages/world-cloudflare/src/queue.js';
+import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
+import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 
 const store = createStorage(env);
 const bytes = (value: string) => new TextEncoder().encode(value);

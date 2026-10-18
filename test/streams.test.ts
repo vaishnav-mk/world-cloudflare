@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { createStreamer } from '../packages/world-cloudflare/src/streams.js';
+import { createStreamer } from '../packages/world-cloudflare/src/streams/streamer.js';
 
 const streams = createStreamer(env);
 describe('run-scoped live streams', () => {
