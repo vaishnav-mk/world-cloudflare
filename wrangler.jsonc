@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "workflow-sdk-cloudflare",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "DEPLOYMENT_ID": "dev-v1", "WORKFLOW_VM": "quickjs" },
+  "durable_objects": { "bindings": [
+    { "name": "WORLD_STORE", "class_name": "WorldStore" },
+    { "name": "QUEUE_SHARD", "class_name": "QueueShard" },
+    { "name": "RUN_STREAMS", "class_name": "RunStreams" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldStore", "QueueShard", "RunStreams"] }],
+  "r2_buckets": [{ "binding": "DLQ", "bucket_name": "workflow-sdk-dlq" }],
+  "services": [{ "binding": "CONSUMER", "service": "workflow-sdk-cloudflare", "entrypoint": "QueueConsumer" }],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true }
+}

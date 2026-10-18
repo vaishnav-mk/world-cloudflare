@@ -1,0 +1,19 @@
+{
+  // Template for one immutable executor per deployment. Upload it to the dispatch namespace bound as
+  // EXECUTORS on the main Worker, then add its DEPLOYMENT_ID to that Worker's EXECUTOR_ROUTES.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "workflow-sdk-executor-v1",
+  "main": "src/executor.ts",
+  "workers_dev": false,
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "DEPLOYMENT_ID": "v1", "WORKFLOW_VM": "quickjs" },
+  "durable_objects": { "bindings": [
+    { "name": "WORLD_STORE", "class_name": "WorldStore", "script_name": "workflow-sdk-cloudflare" },
+    { "name": "QUEUE_SHARD", "class_name": "QueueShard", "script_name": "workflow-sdk-cloudflare" },
+    { "name": "RUN_STREAMS", "class_name": "RunStreams", "script_name": "workflow-sdk-cloudflare" }
+  ] },
+  "r2_buckets": [{ "binding": "DLQ", "bucket_name": "workflow-sdk-dlq" }],
+  "services": [{ "binding": "CONSUMER", "service": "workflow-sdk-cloudflare", "entrypoint": "QueueConsumer" }],
+  "observability": { "enabled": true }
+}
