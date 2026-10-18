@@ -1,0 +1,17 @@
+{
+  "name": "worlds-test",
+  "workers_dev": false,
+  "main": "src/test-worker.ts",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "DEPLOYMENT_ID": "test-v1", "QUEUE_MAX_ATTEMPTS": "2" },
+  "durable_objects": { "bindings": [
+    { "name": "RUN_STREAMS", "class_name": "RunStreams" },
+    { "name": "QUEUE_SHARD", "class_name": "QueueShard" },
+    { "name": "SINK", "class_name": "Sink" },
+    { "name": "WORLD_STORE", "class_name": "WorldStore" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunStreams", "QueueShard", "Sink", "WorldStore"] }],
+  "r2_buckets": [{ "binding": "DLQ", "bucket_name": "worlds-test-dlq" }],
+  "services": [{ "binding": "CONSUMER", "service": "worlds-test", "entrypoint": "QueueConsumer" }]
+}
