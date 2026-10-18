@@ -1,0 +1,28 @@
+{
+  "name": "world-cloudflare-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.app.config.ts",
+    "build:workflow": "workflow build --target cloudflare-workers",
+    "typecheck": "wrangler types --config wrangler.test.jsonc worker-configuration.d.ts && tsc --noEmit",
+    "build": "pnpm run build:workflow && wrangler deploy --dry-run --outdir /tmp/worlds-cloudflare-build"
+  },
+  "dependencies": {
+    "@workflow/cli": "link:.vendor/workflow-sdk/packages/cli",
+    "@workflow/errors": "5.0.4",
+    "@workflow/world": "5.0.4",
+    "@workflow/world-cloudflare": "workspace:*",
+    "workflow": "5.2.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.4",
+    "@types/node": "^24.19.2",
+    "devalue": "6.0.3",
+    "typescript": "6.0.3",
+    "vitest": "4.1.5",
+    "wrangler": "4.151.1"
+  }
+}
