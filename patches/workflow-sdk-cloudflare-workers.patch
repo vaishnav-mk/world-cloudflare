@@ -1,0 +1,517 @@
+diff --git a/packages/builders/src/base-builder.ts b/packages/builders/src/base-builder.ts
+index 7db06d5..2873398 100644
+--- a/packages/builders/src/base-builder.ts
++++ b/packages/builders/src/base-builder.ts
+@@ -1,5 +1,6 @@
+ import { randomUUID } from 'node:crypto';
+ import {
++  copyFile,
+   mkdir,
+   readFile,
+   realpath,
+@@ -367,6 +368,7 @@ export abstract class BaseBuilder {
+       '**/.nuxt/**',
+       '**/.output/**',
+       '**/.vercel/**',
++      '**/.vendor/**',
+       '**/.workflow-data/**',
+       '**/.workflow-vitest/**',
+       '**/.well-known/workflow/**',
+@@ -1769,16 +1771,47 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+       routeModuleBodyStartedAt: 'workflowRouteModuleBodyStartedAt',
+     });
+ 
++    let workerWasmImports = '';
++    let workerWasmRegistration = '';
++    const workerWasmFiles = [
++      ['runtime', 'quickjs.wasm'],
++      ['encoding', 'encoding.so'],
++      ['headers', 'headers.so'],
++      ['url', 'url.so'],
++      ['structuredClone', 'structured-clone.so'],
++    ] as const;
++    if (this.config.buildTarget === 'cloudflare-workers') {
++      const coreRequire = createRequire(
++        require.resolve('@workflow/core/runtime')
++      );
++      for (const [name, specifier] of workerWasmFiles) {
++        await copyFile(
++          coreRequire.resolve(`quickjs-wasi/${specifier}`),
++          join(dirname(flowOutfile), `__quickjs_${name}.wasm`)
++        );
++        workerWasmImports += `import __quickjs_${name} from './__quickjs_${name}.wasm';\n`;
++      }
++      workerWasmRegistration = `globalThis[Symbol.for('@workflow/core//quickjsWorkerAssets')] = {
++  wasm: __quickjs_runtime,
++  extensions: [
++    { name: 'encoding', wasm: __quickjs_encoding },
++    { name: 'headers', wasm: __quickjs_headers },
++    { name: 'url', wasm: __quickjs_url },
++    { name: 'structured-clone', wasm: __quickjs_structuredClone, initFn: 'qjs_ext_structured_clone_init' },
++  ],
++};`;
++    }
++
+     const combinedFunctionCode = `// biome-ignore-all lint: generated file
+ /* eslint-disable */
+-import { __steps_registered } from '${stepsRelativePath}';
++${workerWasmImports}import { __steps_registered } from '${stepsRelativePath}';
+ import { workflowEntrypoint } from 'workflow/runtime';
+ 
+ const workflowRouteModuleBodyStartedAt = Date.now();
+ 
+ // Prevent rollup from tree-shaking the steps side-effect import
+ void __steps_registered;
+-
++${workerWasmRegistration}
+ const workflowCode = \`${escapedVMCode}\`;
+ 
+ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntrypointOptionsCode})`)}`;
+@@ -1790,10 +1823,12 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+       const bundleStartTime = Date.now();
+       const { banner: importMetaBanner, define: importMetaDefine } =
+         this.getCjsImportMetaPolyfill(format);
+-      // ESM banner provides `require` via createRequire(import.meta.url) so
+-      // CJS dependencies that call require() for Node.js builtins keep working
+-      // in the ESM output produced by bundleFinalOutput: true.
+-      const finalEsmRequireBanner = this.getEsmRequireBanner(format);
++      // workerd has no file-backed import.meta.url or synchronous require.
++      // Keep the Node banner for existing standalone and framework builds.
++      const finalEsmRequireBanner =
++        this.config.buildTarget === 'cloudflare-workers'
++          ? ''
++          : this.getEsmRequireBanner(format);
+       const finalResult = await esbuild.build({
+         banner: {
+           js: `// biome-ignore-all lint: generated file\n/* eslint-disable */\n${importMetaBanner}${finalEsmRequireBanner}`,
+@@ -1817,6 +1852,9 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+         define: importMetaDefine,
+         external: [
+           '@aws-sdk/credential-provider-web-identity',
++          ...(this.config.buildTarget === 'cloudflare-workers'
++            ? workerWasmFiles.map(([name]) => `./__quickjs_${name}.wasm`)
++            : []),
+           ...(this.config.externalPackages || []),
+         ],
+       });
+diff --git a/packages/builders/src/cloudflare-workers.test.ts b/packages/builders/src/cloudflare-workers.test.ts
+new file mode 100644
+index 0000000..48c1e57
+--- /dev/null
++++ b/packages/builders/src/cloudflare-workers.test.ts
+@@ -0,0 +1,66 @@
++import {
++  existsSync,
++  mkdtempSync,
++  readFileSync,
++  rmSync,
++  writeFileSync,
++} from 'node:fs';
++import { join, resolve } from 'node:path';
++import { afterEach, expect, it } from 'vitest';
++import { StandaloneBuilder } from './standalone.js';
++import type { StandaloneConfig } from './types.js';
++
++const repoRoot = resolve(import.meta.dirname, '../../..');
++const outputDirs: string[] = [];
++
++afterEach(() => {
++  for (const dir of outputDirs) rmSync(dir, { recursive: true, force: true });
++});
++
++it.each([
++  'standalone',
++  'cloudflare-workers',
++] as const)('%s emits the appropriate banner and static WASM imports', async (buildTarget) => {
++  // Put the fixture inside the workflow package so self-referencing imports resolve.
++  const workingDir = mkdtempSync(
++    join(repoRoot, 'packages/workflow/.workers-builder-')
++  );
++  outputDirs.push(workingDir);
++  writeFileSync(
++    join(workingDir, 'example.ts'),
++    'export async function run() { "use workflow"; return 1; }'
++  );
++  const config: StandaloneConfig = {
++    buildTarget,
++    workingDir,
++    dirs: ['.'],
++    sourcemap: false,
++    stepsBundlePath: '.well-known/workflow/v1/__step_registrations.mjs',
++    workflowsBundlePath: '.well-known/workflow/v1/flow.mjs',
++    webhookBundlePath: '.well-known/workflow/v1/webhook.mjs',
++  };
++  await new StandaloneBuilder(config).build();
++  const bundle = readFileSync(
++    join(workingDir, config.workflowsBundlePath),
++    'utf8'
++  );
++  expect(
++    bundle.includes('var require = __createRequire(import.meta.url)')
++  ).toBe(buildTarget === 'standalone');
++  for (const name of [
++    'runtime',
++    'encoding',
++    'headers',
++    'url',
++    'structuredClone',
++  ]) {
++    expect(bundle.includes(`./__quickjs_${name}.wasm`)).toBe(
++      buildTarget === 'cloudflare-workers'
++    );
++    expect(
++      existsSync(
++        join(workingDir, '.well-known/workflow/v1', `__quickjs_${name}.wasm`)
++      )
++    ).toBe(buildTarget === 'cloudflare-workers');
++  }
++});
+diff --git a/packages/builders/src/types.ts b/packages/builders/src/types.ts
+index de8c423..ebeb006 100644
+--- a/packages/builders/src/types.ts
++++ b/packages/builders/src/types.ts
+@@ -2,6 +2,7 @@ import type { WorkflowAfterTransformHook } from './swc-esbuild-plugin.js';
+ 
+ export const validBuildTargets = [
+   'standalone',
++  'cloudflare-workers',
+   'vercel-build-output-api',
+   'next',
+   'nest',
+@@ -141,7 +142,7 @@ interface BaseWorkflowConfig {
+  * Configuration for standalone (CLI-based) builds.
+  */
+ export interface StandaloneConfig extends BaseWorkflowConfig {
+-  buildTarget: 'standalone';
++  buildTarget: 'standalone' | 'cloudflare-workers';
+   stepsBundlePath: string;
+   workflowsBundlePath: string;
+   webhookBundlePath: string;
+diff --git a/packages/cli/src/commands/build.ts b/packages/cli/src/commands/build.ts
+index 61c1366..7ba1dc0 100644
+--- a/packages/cli/src/commands/build.ts
++++ b/packages/cli/src/commands/build.ts
+@@ -13,6 +13,7 @@ export default class Build extends BaseCommand {
+   static examples = [
+     '$ workflow build',
+     '$ workflow build --target vercel-build-output-api',
++    '$ workflow build --target cloudflare-workers',
+     '$ workflow build standalone',
+   ];
+ 
+@@ -20,7 +21,7 @@ export default class Build extends BaseCommand {
+     target: Flags.string({
+       char: 't',
+       description: 'build target',
+-      options: ['standalone', 'vercel-build-output-api'],
++      options: ['standalone', 'cloudflare-workers', 'vercel-build-output-api'],
+       default: 'standalone',
+     }),
+     'workflow-manifest': Flags.string({
+@@ -63,7 +64,9 @@ export default class Build extends BaseCommand {
+       this.logWarn(
+         `Invalid target "${buildTarget}". Using default "standalone".`
+       );
+-      this.logWarn('Valid targets: standalone, vercel-build-output-api');
++      this.logWarn(
++        'Valid targets: standalone, cloudflare-workers, vercel-build-output-api'
++      );
+       buildTarget = 'standalone';
+     }
+ 
+@@ -76,7 +79,10 @@ export default class Build extends BaseCommand {
+ 
+     try {
+       // Build using appropriate builder
+-      if (config.buildTarget === 'standalone') {
++      if (
++        config.buildTarget === 'standalone' ||
++        config.buildTarget === 'cloudflare-workers'
++      ) {
+         this.logInfo('Building with StandaloneBuilder');
+         const builder = new StandaloneBuilder(config);
+         await builder.build();
+diff --git a/packages/core/src/runtime.ts b/packages/core/src/runtime.ts
+index e88087d..93ce658 100644
+--- a/packages/core/src/runtime.ts
++++ b/packages/core/src/runtime.ts
+@@ -49,7 +49,7 @@ import { type StepInvocationQueueItem, WorkflowSuspension } from './global.js';
+ import { type Logger, runtimeLogger } from './logger.js';
+ import { getStepFunction } from './private.js';
+ import { ReplayPayloadCache } from './replay-payload-cache.js';
+-import { COMPUTE_INSTANCE_ID } from './runtime/compute-instance.js';
++import { getComputeInstanceId } from './runtime/compute-instance.js';
+ import {
+   DYNAMIC_WORKFLOWS_ENV,
+   getMaxEventsOverride,
+@@ -5651,7 +5651,7 @@ export function workflowEntrypoint(
+         kind: spanKind,
+         attributes: {
+           ...Attribute.WorkflowRouteType('flow'),
+-          ...Attribute.FaasInstance(COMPUTE_INSTANCE_ID),
++          ...Attribute.FaasInstance(getComputeInstanceId()),
+           ...Attribute.WorkflowRouteHandlerCached(handlerCached),
+           ...Attribute.WorkflowRouteInvocationCount(invocationCount),
+           ...Attribute.WorkflowRouteEntrypointAgeMs(
+diff --git a/packages/core/src/runtime/compute-instance.test.ts b/packages/core/src/runtime/compute-instance.test.ts
+new file mode 100644
+index 0000000..f43e4b9
+--- /dev/null
++++ b/packages/core/src/runtime/compute-instance.test.ts
+@@ -0,0 +1,10 @@
++import { describe, expect, it } from 'vitest';
++import { getComputeInstanceId } from './compute-instance.js';
++
++describe('compute instance ID', () => {
++  it('creates one ID lazily and reuses it across requests', () => {
++    const id = getComputeInstanceId();
++    expect(id).toMatch(/^cinst_[0-9A-HJKMNP-TV-Z]{26}$/);
++    expect(getComputeInstanceId()).toBe(id);
++  });
++});
+diff --git a/packages/core/src/runtime/compute-instance.ts b/packages/core/src/runtime/compute-instance.ts
+index 0c40f16..84a9116 100644
+--- a/packages/core/src/runtime/compute-instance.ts
++++ b/packages/core/src/runtime/compute-instance.ts
+@@ -1,14 +1,9 @@
+ import { ulid } from 'ulid';
+ 
+-/**
+- * Identifier for the compute instance (microVM) this module was loaded into.
+- *
+- * Vercel exposes no native per-instance ID under Fluid compute (`AWS_LAMBDA_*`
+- * is blocked), so we synthesize one at module load: a prefixed ULID
+- * (`cinst_<ulid>`, per the `wrun_`/`step_` convention) whose timestamp is the
+- * instance's birth time. Stable for the instance's life and shared by every
+- * invocation it handles, including the concurrent ones Fluid packs onto it;
+- * cold starts mint fresh IDs. Emitted as the OpenTelemetry `faas.instance`
+- * attribute.
+- */
+-export const COMPUTE_INSTANCE_ID = `cinst_${ulid()}`;
++/** Stable per-instance telemetry ID. Workers prohibit random generation at module load. */
++let computeInstanceId: string | undefined;
++
++export function getComputeInstanceId(): string {
++  computeInstanceId ??= `cinst_${ulid()}`;
++  return computeInstanceId;
++}
+diff --git a/packages/core/src/runtime/quickjs-runtime.ts b/packages/core/src/runtime/quickjs-runtime.ts
+index 65d4835..4959eeb 100644
+--- a/packages/core/src/runtime/quickjs-runtime.ts
++++ b/packages/core/src/runtime/quickjs-runtime.ts
+@@ -1140,23 +1140,37 @@ const quickjsAssets = globalSingleton(
+   })
+ );
+ 
++const WorkerAssetsKey = Symbol.for('@workflow/core//quickjsWorkerAssets');
++
+ function getCompiledAssets() {
+   if (!quickjsAssets.promise) {
+-    quickjsAssets.promise = (async () => {
+-      const [wasm, ...extensionModules] = await Promise.all([
+-        WebAssemblyGlobal.compile(quickjsWasm),
+-        ...quickjsExtensions.map((ext) =>
+-          WebAssemblyGlobal.compile(ext.wasm as Uint8Array)
+-        ),
+-      ]);
+-      return {
+-        wasm,
+-        extensions: quickjsExtensions.map((ext, i) => ({
+-          ...ext,
+-          wasm: extensionModules[i] as ExtensionDescriptor['wasm'],
+-        })),
+-      };
+-    })();
++    // Wrangler's static WASM imports arrive precompiled; workerd forbids
++    // WebAssembly.compile() at request time. Node keeps its existing cache.
++    const workerAssets = (
++      globalThis as {
++        [WorkerAssetsKey]?: {
++          wasm: object;
++          extensions: CompiledExtension[];
++        };
++      }
++    )[WorkerAssetsKey];
++    quickjsAssets.promise = workerAssets
++      ? Promise.resolve(workerAssets)
++      : (async () => {
++          const [wasm, ...extensionModules] = await Promise.all([
++            WebAssemblyGlobal.compile(quickjsWasm),
++            ...quickjsExtensions.map((ext) =>
++              WebAssemblyGlobal.compile(ext.wasm as Uint8Array)
++            ),
++          ]);
++          return {
++            wasm,
++            extensions: quickjsExtensions.map((ext, i) => ({
++              ...ext,
++              wasm: extensionModules[i] as ExtensionDescriptor['wasm'],
++            })),
++          };
++        })();
+     // On failure, clear the cache so a later invocation can retry rather
+     // than being stuck with a rejected promise forever.
+     quickjsAssets.promise.catch(() => {
+diff --git a/packages/core/src/runtime/step-executor.test.ts b/packages/core/src/runtime/step-executor.test.ts
+index 5344ff1..3c24e08 100644
+--- a/packages/core/src/runtime/step-executor.test.ts
++++ b/packages/core/src/runtime/step-executor.test.ts
+@@ -14,7 +14,7 @@ import { dehydrateStepArguments, hydrateStepError } from '../serialization.js';
+ import { contextStorage } from '../step/context-storage.js';
+ import { getWritable } from '../step/writable-stream.js';
+ import { STREAM_NAME_SYMBOL, STREAM_SERVER_RUN_ID_SYMBOL } from '../symbols.js';
+-import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
++import { getComputeInstanceId } from './compute-instance.js';
+ import { executeStep } from './step-executor.js';
+ import {
+   UNSERIALIZABLE_STEP_INPUT_MARKER,
+@@ -827,7 +827,7 @@ describe('executeStep — compute instance stamping', () => {
+     expect(started).toHaveLength(1);
+     expect(started[0]?.[2]).toMatchObject({
+       requestId: 'req_step_executor',
+-      computeInstanceId: COMPUTE_INSTANCE_ID,
++      computeInstanceId: getComputeInstanceId(),
+     });
+     // An executor write names no log position: it has no log to merge a
+     // skipped-slot report into, so it must not ask the World to read one.
+@@ -864,7 +864,7 @@ describe('executeStep — compute instance stamping', () => {
+     );
+     expect(started?.[2]).toMatchObject({
+       requestId: 'req_unregistered',
+-      computeInstanceId: COMPUTE_INSTANCE_ID,
++      computeInstanceId: getComputeInstanceId(),
+     });
+   });
+ 
+@@ -917,7 +917,7 @@ describe('executeStep — compute instance stamping', () => {
+       ([, data]) => data.eventType === 'step_started'
+     );
+     expect(started?.[2]).toMatchObject({
+-      computeInstanceId: COMPUTE_INSTANCE_ID,
++      computeInstanceId: getComputeInstanceId(),
+     });
+     expect(started?.[2]?.requestId).toBeUndefined();
+   });
+diff --git a/packages/core/src/runtime/step-executor.ts b/packages/core/src/runtime/step-executor.ts
+index 746489d..5584b06 100644
+--- a/packages/core/src/runtime/step-executor.ts
++++ b/packages/core/src/runtime/step-executor.ts
+@@ -51,7 +51,7 @@ import {
+   normalizeUnknownError,
+   promoteAbortErrorToFatal,
+ } from '../types.js';
+-import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
++import { getComputeInstanceId } from './compute-instance.js';
+ import {
+   isOptimisticInlineStartEnabled,
+   isOptimisticInlineStartExplicitlyDisabled,
+@@ -403,7 +403,7 @@ export async function executeStep(
+   // requestId as analytics `vercelId`, while computeInstanceId identifies the
+   // worker that executed the step.
+   const stepStartedEventParams: CreateEventParams = {
+-    computeInstanceId: COMPUTE_INSTANCE_ID,
++    computeInstanceId: getComputeInstanceId(),
+     ...(params.requestId ? { requestId: params.requestId } : {}),
+   };
+ 
+diff --git a/packages/core/src/runtime/suspension-handler.test.ts b/packages/core/src/runtime/suspension-handler.test.ts
+index c82489c..24ab730 100644
+--- a/packages/core/src/runtime/suspension-handler.test.ts
++++ b/packages/core/src/runtime/suspension-handler.test.ts
+@@ -22,7 +22,7 @@ import {
+   hydrateStepError,
+ } from '../serialization.js';
+ import { runWorkflow } from '../workflow.js';
+-import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
++import { getComputeInstanceId } from './compute-instance.js';
+ import { maxEventSlot, stepDispatchIdempotencyKey } from './helpers.js';
+ import { FORCE_CLAIM_WAKE_REPUBLISH_WINDOW_MS } from './hook-wake.js';
+ import { ReplayRecoveryReporter } from './replay-recovery-reporter.js';
+@@ -2557,7 +2557,7 @@ describe('handleSuspension batched fan-out', () => {
+       expect(s1Created.eventData.input).toBeDefined();
+       expect(s1Started.eventData.input).toBeUndefined();
+       expect(s1Started.eventData.ownerMessageId).toBe('msg_owner_1');
+-      expect(events[1].computeInstanceId).toBe(COMPUTE_INSTANCE_ID);
++      expect(events[1].computeInstanceId).toBe(getComputeInstanceId());
+       expect(events[0].computeInstanceId).toBeUndefined();
+       // Claims: both inline steps owned, running attempt 1, input attached
+       // (batch responses return refs lazily — the body hydrates local bytes).
+diff --git a/packages/core/src/runtime/suspension-handler.ts b/packages/core/src/runtime/suspension-handler.ts
+index f3bcf5b..fde6c2c 100644
+--- a/packages/core/src/runtime/suspension-handler.ts
++++ b/packages/core/src/runtime/suspension-handler.ts
+@@ -43,7 +43,7 @@ import {
+ } from '../serialization.js';
+ import * as Attribute from '../telemetry/semantic-conventions.js';
+ import { getAbortStreamIdFromToken } from '../util.js';
+-import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
++import { getComputeInstanceId } from './compute-instance.js';
+ import {
+   getMaxInlineSteps,
+   isBatchTransitionsEnabled,
+@@ -1605,7 +1605,7 @@ export async function handleSuspension({
+               // the compute-instance attribution the single claim sends via
+               // CreateEventParams.
+               ...(entry.kind === 'inline-started'
+-                ? { computeInstanceId: COMPUTE_INSTANCE_ID }
++                ? { computeInstanceId: getComputeInstanceId() }
+                 : {}),
+             })),
+             // Per-write request attribution, same as the single path's
+diff --git a/packages/core/src/runtime/world.ts b/packages/core/src/runtime/world.ts
+index ca4ae08..2653b57 100644
+--- a/packages/core/src/runtime/world.ts
++++ b/packages/core/src/runtime/world.ts
+@@ -5,18 +5,10 @@ import {
+   resolveWorkflowTargetWorld,
+ } from '@workflow/utils';
+ import type { World } from '@workflow/world';
+-// Static imports, so these two are compiled into the host application's server
+-// build. A bundler keys module identity on (resource, layer) and Next.js alone
+-// builds `instrument`, app-route, `ssr` and `edge` layers, so one process holds
+-// one copy of each of their modules *per layer*. Custom worlds below load
+-// through `getRuntimeRequire()` and are deduped by Node's module cache instead.
+-//
+-// Neither package may therefore keep mutable state at module scope; both hold
+-// it on `globalThis` via `globalSingleton()` from `@workflow/utils`, enforced
+-// by `scripts/lint/module-scope-state.mjs`. See that helper's doc comment, and
+-// `docs/content/worlds/*/building-a-world.mdx` for the rule world authors get.
+-import { createWorld as createLocalWorld } from '@workflow/world-local';
+-import { createWorld as createVercelWorld } from '@workflow/world-vercel';
++// Load built-in worlds only when selected. Bundled Workers must not evaluate
++// world-local's filesystem dependencies (or world-vercel's Node dependencies)
++// just to register getWorld. Both worlds keep state on globalThis so bundler
++// module copies across Next.js layers still share their state.
+ import { assertWorldSupportsRuntimeProtocol } from './world-compatibility.js';
+ 
+ function getRuntimeRequire() {
+@@ -162,10 +154,16 @@ export const createWorld = async (): Promise<World> => {
+       );
+     }
+ 
++    const { createWorld: createVercelWorld } = await import(
++      '@workflow/world-vercel'
++    );
+     return createVercelWorld();
+   }
+ 
+   if (targetWorld === 'local') {
++    const { createWorld: createLocalWorld } = await import(
++      '@workflow/world-local'
++    );
+     return createLocalWorld({
+       dataDir: process.env.WORKFLOW_LOCAL_DATA_DIR,
+     });
+diff --git a/packages/core/src/telemetry/semantic-conventions.ts b/packages/core/src/telemetry/semantic-conventions.ts
+index e5e0521..57b21a0 100644
+--- a/packages/core/src/telemetry/semantic-conventions.ts
++++ b/packages/core/src/telemetry/semantic-conventions.ts
+@@ -331,7 +331,7 @@ export const WorkflowRouteModuleBodyInitMs = SemanticConvention<number>(
+ );
+ 
+ /**
+- * Compute instance handling this route: the synthesized `COMPUTE_INSTANCE_ID`.
++ * Compute instance handling this route: the synthesized compute instance ID.
+  * Uses OTEL `faas.instance` (execution-environment id, reused across
+  * invocations to the same function):
+  * https://opentelemetry.io/docs/specs/semconv/attributes-registry/faas/
