@@ -1,0 +1,49 @@
+import { EventType } from './enums.js';
+import type { DispatchKind } from './types.js';
+
+/** Durable Object names. One store and one queue shard serve every run. */
+export const STORE_NAME = 'global';
+export const QUEUE_SHARD_NAME = 'flow';
+
+/** Fanout target the queue shard delivers to. */
+export const FLOW_TARGET = 'flow';
+export const FLOW_PATH = '/.well-known/workflow/v1/flow';
+export const FLOW_URL = `https://internal${FLOW_PATH}`;
+
+/** Pagination. */
+export const DEFAULT_PAGE_LIMIT = 100;
+export const MAX_PAGE_LIMIT = 1000;
+/** `events.list` without a limit returns the whole log, up to this many events. */
+export const FULL_EVENT_LOG_LIMIT = 100_000;
+/** Events returned with `sinceCursor` on `events.create`. */
+export const SINCE_CURSOR_LIMIT = 1000;
+
+/** Long polls. */
+export const EVENT_POLL_MS = 15_000;
+export const EVENT_POLL_BATCH = 100;
+export const STREAM_POLL_MS = 15_000;
+export const STREAM_READ_BATCH = 100;
+export const MAX_TERMINAL_WAIT_MS = 30_000;
+
+/** Events whose commit owes a queue message. */
+export const DISPATCH_KINDS: ReadonlySet<string> = new Set<DispatchKind>([
+  EventType.RunCreated, EventType.HookReceived, EventType.StepCreated, EventType.WaitCreated,
+]);
+
+/** Dispatch outbox recovery. */
+export const OUTBOX_DRAIN_BATCH = 50;
+export const DISPATCH_RECOVERY_DELAY_MS = 5_000;
+export const REDRIVE_DELAY_MS = 10_000;
+export const WAIT_RETRY_DELAY_MS = 1_000;
+export const MIN_ALARM_DELAY_MS = 1_000;
+export const MAX_PUBLISH_BACKOFF_MS = 60_000;
+
+/** Queue delivery. */
+export const DEFAULT_QUEUE_MAX_ATTEMPTS = 64;
+export const MAX_QUEUE_RETRY_DELAY_MS = 30_000;
+
+/** Workers for Platforms script names in `EXECUTOR_ROUTES`. */
+export const EXECUTOR_SCRIPT_PATTERN = /^[a-zA-Z0-9_-]{1,63}$/;
+
+/** Prefix that marks the devalue encoding, as opposed to rows written by the original JSON codec. */
+export const ENCODING_PREFIX = 'dv1:';
