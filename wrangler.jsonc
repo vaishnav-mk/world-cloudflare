@@ -16,6 +16,7 @@
   "r2_buckets": [{ "binding": "DLQ", "bucket_name": "workflow-sdk-dlq" }],
   "services": [{ "binding": "CONSUMER", "service": "workflow-sdk-cloudflare", "entrypoint": "QueueConsumer" }],
   "triggers": { "crons": ["* * * * *"] },
-  "limits": { "cpu_ms": 300000 },
+  // The SDK makes about one Durable Object call per event; the 10,000 default ends long inline invocations.
+  "limits": { "cpu_ms": 300000, "subrequests": 1000000 },
   "observability": { "enabled": true }
 }
