@@ -13,6 +13,7 @@ import {
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { EventType, RunStatus, WaitStatus } from '../enums.js';
+import { toJson } from '../lib/json.js';
 import { Waiters } from '../lib/waiters.js';
 import type { DispatchKind, ResolveDataMode, WorldEnv } from '../types.js';
 import { Db } from './db.js';
@@ -139,7 +140,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
       const nextCursor = rows.at(-1)?.slot ?? cursor;
       return {
         events: rows.filter((row) => !filter || filter.includes(row.kind)).map((row) => ({
-          eventId: slotToEventId(row.slot), eventType: row.kind, data: JSON.stringify(toEvent(row)),
+          eventId: slotToEventId(row.slot), eventType: row.kind, data: toJson(toEvent(row)),
         })),
         cursor: nextCursor,
         done: isTerminalWorkflowRunStatus(this.#db.getRun(runId).status) && nextCursor >= this.#db.lastSlot(runId),

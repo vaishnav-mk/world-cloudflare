@@ -1,4 +1,5 @@
 import { getRun, start } from 'workflow/api';
+import { toJson } from '@workflow/world-cloudflare';
 import { HttpError, readJson } from '../http.js';
 import type { RouteContext } from '../router.js';
 import { world } from '../world.js';
@@ -16,8 +17,11 @@ export async function startRun({ request }: RouteContext): Promise<Response> {
   return Response.json({ runId: run.runId }, { status: 202 });
 }
 
+const json = (value: unknown) => new Response(toJson(value), { headers: { 'content-type': 'application/json' } });
+
+/** The run, with binary input and output as base64. */
 export async function getRunStatus({ params }: RouteContext): Promise<Response> {
-  return Response.json(await world.runs.get(params.runId));
+  return json(await world.runs.get(params.runId));
 }
 
 /** Waits for the run to finish, then returns its decoded result. */
@@ -26,5 +30,5 @@ export async function getRunResult({ params }: RouteContext): Promise<Response> 
 }
 
 export async function listRunHooks({ params }: RouteContext): Promise<Response> {
-  return Response.json(await world.hooks.list({ runId: params.runId }));
+  return json(await world.hooks.list({ runId: params.runId }));
 }
