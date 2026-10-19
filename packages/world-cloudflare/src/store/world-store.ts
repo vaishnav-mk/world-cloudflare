@@ -7,10 +7,12 @@ import {
   type ListWorkflowRunsParams, type PaginatedResponse, type Step, type StepWithoutData, type WorkflowRun,
   type WorkflowRunWithoutData,
 } from '@workflow/world';
+import migrations from '../../drizzle/store/migrations.js';
 import {
   DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS, MIN_ALARM_DELAY_MS,
   QUEUE_SHARD_NAME, REDRIVE_DELAY_MS,
 } from '../constants.js';
+import { migrateOnStart } from '../db/migrate.js';
 import { EventType, RunStatus, WaitStatus } from '../enums.js';
 import { Waiters } from '../lib/waiters.js';
 import type { DispatchKind, ResolveDataMode, WorldEnv } from '../types.js';
@@ -20,7 +22,6 @@ import { applyEvent } from './events/apply.js';
 import { Outbox } from './outbox.js';
 import { listEvents, listRecords } from './pages.js';
 import { toEvent } from './rows.js';
-import { migrate } from './schema.js';
 import { hookView, runView, stepView } from './views.js';
 
 // shortcut: one object for all runs; shard per run with a token index once writes bottleneck.
@@ -39,7 +40,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     super(ctx, env);
     this.#db = new Db(ctx.storage.sql);
     this.#outbox = new Outbox(ctx.storage.sql);
-    ctx.blockConcurrencyWhile(async () => migrate(ctx.storage.sql));
+    migrateOnStart(ctx, migrations);
   }
 
   // Runs.

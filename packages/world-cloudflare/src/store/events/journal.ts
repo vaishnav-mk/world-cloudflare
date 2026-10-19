@@ -30,10 +30,11 @@ export function appendEvent(
     created_at: (params?.occurredAt ?? now).getTime(),
     occurred_at: params?.occurredAt?.getTime() ?? null,
     resume_id: params?.resumeId ?? null,
+    resume_digest: params?.resumePayloadDigest ?? null,
     data: metadata === undefined ? null : encode(metadata),
     payload: payload instanceof Uint8Array ? new Uint8Array(payload).buffer : null,
   };
-  db.insertEvent(row, params?.resumePayloadDigest ?? null);
+  db.insertEvent(row);
   return toEvent(row);
 }
 

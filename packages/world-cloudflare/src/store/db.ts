@@ -1,69 +1,94 @@
 import type { Hook, Step, Wait, WorkflowRun } from '@workflow/world';
+import { DOQB, FetchTypes, OrderTypes, Raw } from 'workers-qb';
 import { decode, encode } from '../lib/codec.js';
 import type { EventRow, RecordRow } from './rows.js';
+import type { StoreSchema } from './tables.js';
 
 export type RecordTable = 'runs' | 'steps' | 'hooks';
 
-/** Typed reads and writes over the store's SQLite tables. Callers own transactions. */
+/** Upserts replace the encoded entity and keep the row's identity columns. */
+const replaceData = { data: new Raw('excluded.data') };
+
+/** Typed reads and writes over the store's tables. Callers own transactions. */
 export class Db {
-  constructor(private readonly sql: SqlStorage) {}
+  readonly #qb: DOQB<StoreSchema>;
+
+  constructor(sql: SqlStorage) {
+    this.#qb = new DOQB<StoreSchema>(sql);
+  }
 
   // Runs, steps, hooks and waits.
 
   run(id: string): WorkflowRun | undefined {
-    return this.entity<WorkflowRun>('SELECT data FROM runs WHERE id = ?', id);
+    const row = this.#qb.fetchOne({ tableName: 'runs', fields: ['data'], where: { conditions: 'id = ?', params: [id] } });
+    return decodeRow(row.execute().results);
   }
 
   step(runId: string, stepId: string): Step | undefined {
-    return this.entity<Step>('SELECT data FROM steps WHERE run_id = ? AND id = ?', runId, stepId);
+    const row = this.#qb.fetchOne({
+      tableName: 'steps', fields: ['data'],
+      where: { conditions: ['run_id = ?', 'id = ?'], params: [runId, stepId] },
+    });
+    return decodeRow(row.execute().results);
   }
 
   hook(hookId: string): Hook | undefined {
-    return this.entity<Hook>('SELECT data FROM hooks WHERE id = ?', hookId);
+    const row = this.#qb.fetchOne({ tableName: 'hooks', fields: ['data'], where: { conditions: 'id = ?', params: [hookId] } });
+    return decodeRow(row.execute().results);
   }
 
   hookByToken(token: string): Hook | undefined {
-    return this.entity<Hook>('SELECT data FROM hooks WHERE token = ?', token);
+    const row = this.#qb.fetchOne({ tableName: 'hooks', fields: ['data'], where: { conditions: 'token = ?', params: [token] } });
+    return decodeRow(row.execute().results);
   }
 
   wait(runId: string, correlationId: string): Wait | undefined {
-    return this.entity<Wait>('SELECT data FROM waits WHERE run_id = ? AND id = ?', runId, correlationId);
+    const row = this.#qb.fetchOne({
+      tableName: 'waits', fields: ['data'],
+      where: { conditions: ['run_id = ?', 'id = ?'], params: [runId, correlationId] },
+    });
+    return decodeRow(row.execute().results);
   }
 
   putRun(run: WorkflowRun): void {
-    this.sql.exec(
-      `INSERT INTO runs(id, data, created_at, status, workflow_name) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET data = excluded.data, status = excluded.status`,
-      run.runId, encode(run), run.createdAt.getTime(), run.status, run.workflowName,
-    );
+    this.#qb.insert({
+      tableName: 'runs',
+      data: {
+        id: run.runId, data: encode(run), created_at: run.createdAt.getTime(),
+        status: run.status, workflow_name: run.workflowName,
+      },
+      onConflict: { column: 'id', data: { ...replaceData, status: new Raw('excluded.status') } },
+    }).execute();
   }
 
   putStep(step: Step): void {
-    this.sql.exec(
-      `INSERT INTO steps(run_id, id, data, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(run_id, id) DO UPDATE SET data = excluded.data`,
-      step.runId, step.stepId, encode(step), step.createdAt.getTime(),
-    );
+    this.#qb.insert({
+      tableName: 'steps',
+      data: { run_id: step.runId, id: step.stepId, data: encode(step), created_at: step.createdAt.getTime() },
+      onConflict: { column: ['run_id', 'id'], data: replaceData },
+    }).execute();
   }
 
   insertHook(hook: Hook): void {
-    this.sql.exec(
-      'INSERT INTO hooks(id, run_id, token, data, created_at) VALUES (?, ?, ?, ?, ?)',
-      hook.hookId, hook.runId, hook.token, encode(hook), hook.createdAt.getTime(),
-    );
+    this.#qb.insert({
+      tableName: 'hooks',
+      data: { id: hook.hookId, run_id: hook.runId, token: hook.token, data: encode(hook), created_at: hook.createdAt.getTime() },
+    }).execute();
   }
 
   deleteHook(hookId: string): void {
-    this.sql.exec('DELETE FROM hooks WHERE id = ?', hookId);
+    this.#qb.delete({ tableName: 'hooks', where: { conditions: 'id = ?', params: [hookId] } }).execute();
   }
 
   deleteRunHook(runId: string, hookId: string): void {
-    this.sql.exec('DELETE FROM hooks WHERE id = ? AND run_id = ?', hookId, runId);
+    this.#qb.delete({ tableName: 'hooks', where: { conditions: ['id = ?', 'run_id = ?'], params: [hookId, runId] } }).execute();
   }
 
   /** Frees a finished run's hook tokens, except those still inside their retention window. */
   releaseHooks(runId: string, now: Date): void {
-    const rows = this.sql.exec<{ id: string; data: string }>('SELECT id, data FROM hooks WHERE run_id = ?', runId).toArray();
+    const rows = this.#qb.fetchAll<'hooks', 'id' | 'data'>({
+      tableName: 'hooks', fields: ['id', 'data'], where: { conditions: 'run_id = ?', params: [runId] },
+    }).execute().results ?? [];
     for (const row of rows) {
       const retainedUntil = decode<Hook>(row.data).tokenRetentionUntil;
       if (!retainedUntil || retainedUntil.getTime() <= now.getTime()) this.deleteHook(row.id);
@@ -71,74 +96,76 @@ export class Db {
   }
 
   putWait(runId: string, correlationId: string, wait: Wait): void {
-    this.sql.exec(
-      `INSERT INTO waits(run_id, id, data) VALUES (?, ?, ?)
-       ON CONFLICT(run_id, id) DO UPDATE SET data = excluded.data`,
-      runId, correlationId, encode(wait),
-    );
+    this.#qb.insert({
+      tableName: 'waits',
+      data: { run_id: runId, id: correlationId, data: encode(wait) },
+      onConflict: { column: ['run_id', 'id'], data: replaceData },
+    }).execute();
   }
 
   deleteWaits(runId: string): void {
-    this.sql.exec('DELETE FROM waits WHERE run_id = ?', runId);
+    this.#qb.delete({ tableName: 'waits', where: { conditions: 'run_id = ?', params: [runId] } }).execute();
   }
 
   // Events.
 
   event(runId: string, slot: number): EventRow | undefined {
-    return this.sql.exec<EventRow>('SELECT * FROM events WHERE run_id = ? AND slot = ?', runId, slot).toArray()[0];
+    return this.#qb.fetchOne({
+      tableName: 'events', where: { conditions: ['run_id = ?', 'slot = ?'], params: [runId, slot] },
+    }).execute().results;
   }
 
-  eventByResumeId(runId: string, resumeId: string): (EventRow & { resume_digest: string }) | undefined {
-    return this.sql.exec<EventRow & { resume_digest: string }>(
-      'SELECT * FROM events WHERE run_id = ? AND resume_id = ?', runId, resumeId,
-    ).toArray()[0];
+  eventByResumeId(runId: string, resumeId: string): EventRow | undefined {
+    return this.#qb.fetchOne({
+      tableName: 'events', where: { conditions: ['run_id = ?', 'resume_id = ?'], params: [runId, resumeId] },
+    }).execute().results;
   }
 
   /** Events after (or, descending, before) `slot`, optionally for one correlation ID. */
   events(runId: string, slot: number, limit: number, options: { correlationId?: string; descending?: boolean } = {}): EventRow[] {
     const { correlationId, descending = false } = options;
-    const correlation = correlationId === undefined ? '' : ' AND correlation_id = ?';
-    const query = `SELECT * FROM events WHERE run_id = ? AND slot ${descending ? '<' : '>'} ?${correlation}
-                   ORDER BY slot ${descending ? 'DESC' : 'ASC'} LIMIT ?`;
-    const values = correlationId === undefined ? [runId, slot, limit] : [runId, slot, correlationId, limit];
-    return this.sql.exec<EventRow>(query, ...values).toArray();
+    const conditions = ['run_id = ?', descending ? 'slot < ?' : 'slot > ?'];
+    const params: (string | number)[] = [runId, slot];
+    if (correlationId !== undefined) {
+      conditions.push('correlation_id = ?');
+      params.push(correlationId);
+    }
+    return this.#qb.fetchAll<'events'>({
+      tableName: 'events', where: { conditions, params },
+      orderBy: { slot: descending ? OrderTypes.DESC : OrderTypes.ASC }, limit,
+    }).execute().results ?? [];
   }
 
   eventsBetween(runId: string, afterSlot: number, beforeSlot: number): EventRow[] {
-    return this.sql.exec<EventRow>(
-      'SELECT * FROM events WHERE run_id = ? AND slot > ? AND slot < ? ORDER BY slot ASC', runId, afterSlot, beforeSlot,
-    ).toArray();
+    return this.#qb.fetchAll<'events'>({
+      tableName: 'events',
+      where: { conditions: ['run_id = ?', 'slot > ?', 'slot < ?'], params: [runId, afterSlot, beforeSlot] },
+      orderBy: { slot: OrderTypes.ASC },
+    }).execute().results ?? [];
   }
 
   lastSlot(runId: string): number {
-    return this.sql.exec<{ slot: number }>(
-      'SELECT COALESCE(MAX(slot), 0) AS slot FROM events WHERE run_id = ?', runId,
-    ).one().slot;
+    const row = this.#qb.raw<{ slot: number }>({
+      query: 'SELECT COALESCE(MAX(slot), 0) AS slot FROM events WHERE run_id = ?', args: [runId], fetchType: FetchTypes.ONE,
+    }).execute().results;
+    return row?.slot ?? 0;
   }
 
-  insertEvent(row: EventRow, resumeDigest: string | null): void {
-    this.sql.exec(
-      `INSERT INTO events(run_id, slot, kind, correlation_id, spec_version, created_at, occurred_at,
-                          resume_id, resume_digest, data, payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      row.run_id, row.slot, row.kind, row.correlation_id, row.spec_version, row.created_at, row.occurred_at,
-      row.resume_id, resumeDigest, row.data, row.payload,
-    );
+  insertEvent(row: EventRow): void {
+    this.#qb.insert({ tableName: 'events', data: row }).execute();
   }
 
   // Lists.
 
-  records(table: RecordTable, where: string[], values: (string | number)[], descending: boolean, limit: number): RecordRow[] {
-    const filter = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-    const order = descending ? 'DESC' : 'ASC';
-    return this.sql.exec<RecordRow>(
-      `SELECT id, data, created_at FROM ${table}${filter} ORDER BY created_at ${order}, id ${order} LIMIT ?`,
-      ...values, limit,
-    ).toArray();
+  records(table: RecordTable, conditions: string[], params: (string | number)[], descending: boolean, limit: number): RecordRow[] {
+    const order = descending ? OrderTypes.DESC : OrderTypes.ASC;
+    return this.#qb.fetchAll<RecordTable, 'id' | 'data' | 'created_at'>({
+      tableName: table, fields: ['id', 'data', 'created_at'],
+      where: { conditions, params }, orderBy: { created_at: order, id: order }, limit,
+    }).execute().results ?? [];
   }
+}
 
-  private entity<T>(query: string, ...values: string[]): T | undefined {
-    const row = this.sql.exec<{ data: string }>(query, ...values).toArray()[0];
-    return row ? decode<T>(row.data) : undefined;
-  }
+function decodeRow<T>(row: { data: string } | undefined): T | undefined {
+  return row ? decode<T>(row.data) : undefined;
 }

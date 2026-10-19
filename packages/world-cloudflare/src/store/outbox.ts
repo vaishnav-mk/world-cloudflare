@@ -1,12 +1,17 @@
+import { DOQB, FetchTypes } from 'workers-qb';
 import { EventType, OutboxStatus } from '../enums.js';
 import type { DispatchKind } from '../types.js';
 import type { OutboxRow } from './rows.js';
+import type { StoreSchema } from './tables.js';
 
-/** Restricts a query to outbox rows whose event has this kind, and optionally this correlation ID. */
-function eventFilter(kind: DispatchKind, correlationId?: string): { clause: string; values: string[] } {
+/** Restricts outbox rows to those whose event has this kind, and optionally this correlation ID. */
+function eventFilter(runId: string, kind: DispatchKind, correlationId?: string): { condition: string; params: string[] } {
   return correlationId === undefined
-    ? { clause: 'kind = ?', values: [kind] }
-    : { clause: 'kind = ? AND correlation_id = ?', values: [kind, correlationId] };
+    ? { condition: 'slot IN (SELECT slot FROM events WHERE run_id = ? AND kind = ?)', params: [runId, kind] }
+    : {
+      condition: 'slot IN (SELECT slot FROM events WHERE run_id = ? AND kind = ? AND correlation_id = ?)',
+      params: [runId, kind, correlationId],
+    };
 }
 
 function assertSlot(slot: number, min: number): void {
@@ -15,48 +20,44 @@ function assertSlot(slot: number, min: number): void {
 
 /**
  * Queue messages owed by committed events. A row is written in the same transaction as its event
- * and stays `pending` until the message is accepted by the queue or is no longer needed.
+ * and stays pending until the queue accepts the message or the message is no longer needed.
  */
 export class Outbox {
-  constructor(private readonly sql: SqlStorage) {}
+  readonly #qb: DOQB<StoreSchema>;
+
+  constructor(sql: SqlStorage) {
+    this.#qb = new DOQB<StoreSchema>(sql);
+  }
 
   add(runId: string, slot: number, queueName: string, deploymentId: string, nextAt: number): void {
-    this.sql.exec(
-      'INSERT INTO dispatch_outbox (run_id, slot, queue_name, deployment_id, next_at) VALUES (?, ?, ?, ?, ?)',
-      runId, slot, queueName, deploymentId, nextAt,
-    );
+    this.#qb.insert({
+      tableName: 'dispatch_outbox',
+      data: { run_id: runId, slot, queue_name: queueName, deployment_id: deploymentId, next_at: nextAt },
+    }).execute();
   }
 
   /** Highest pending slot for this kind, or 0. */
   pendingSlot(runId: string, kind: DispatchKind, correlationId?: string): number {
-    const { clause, values } = eventFilter(kind, correlationId);
-    return this.sql.exec<{ slot: number }>(
-      `SELECT COALESCE(MAX(slot), 0) AS slot FROM dispatch_outbox
-       WHERE run_id = ? AND status = '${OutboxStatus.Pending}' AND slot IN (SELECT slot FROM events WHERE run_id = ? AND ${clause})`,
-      runId, runId, ...values,
-    ).one().slot;
+    const filter = eventFilter(runId, kind, correlationId);
+    const row = this.#qb.raw<{ slot: number }>({
+      query: `SELECT COALESCE(MAX(slot), 0) AS slot FROM dispatch_outbox
+              WHERE run_id = ? AND status = ? AND ${filter.condition}`,
+      args: [runId, OutboxStatus.Pending, ...filter.params],
+      fetchType: FetchTypes.ONE,
+    }).execute().results;
+    return row?.slot ?? 0;
   }
 
   /** Marks every pending row of this kind up to `upToSlot` published. */
   publishThrough(runId: string, upToSlot: number, kind: DispatchKind): void {
     assertSlot(upToSlot, 0);
-    this.sql.exec(
-      `UPDATE dispatch_outbox SET status = '${OutboxStatus.Published}'
-       WHERE run_id = ? AND slot <= ? AND status = '${OutboxStatus.Pending}'
-         AND slot IN (SELECT slot FROM events WHERE run_id = ? AND kind = ?)`,
-      runId, upToSlot, runId, kind,
-    );
+    this.#publish(runId, kind, ['slot <= ?'], [upToSlot]);
   }
 
   /** Marks exactly one row published. */
   publishSlot(runId: string, slot: number, kind: DispatchKind): void {
     assertSlot(slot, 1);
-    this.sql.exec(
-      `UPDATE dispatch_outbox SET status = '${OutboxStatus.Published}'
-       WHERE run_id = ? AND slot = ? AND status = '${OutboxStatus.Pending}'
-         AND slot IN (SELECT slot FROM events WHERE run_id = ? AND kind = ?)`,
-      runId, slot, runId, kind,
-    );
+    this.#publish(runId, kind, ['slot = ?'], [slot]);
   }
 
   /** Starts and wakes settle every earlier row too; steps and waits settle only their own row. */
@@ -73,19 +74,21 @@ export class Outbox {
 
   /** Marks an entity's rows published once it no longer needs a message, such as a step that started. */
   settle(runId: string, kind: DispatchKind, correlationId: string): void {
-    this.sql.exec(
-      `UPDATE dispatch_outbox SET status = '${OutboxStatus.Published}'
-       WHERE run_id = ? AND slot IN (SELECT slot FROM events WHERE run_id = ? AND kind = ? AND correlation_id = ?)`,
-      runId, runId, kind, correlationId,
-    );
+    const filter = eventFilter(runId, kind, correlationId);
+    this.#qb.update({
+      tableName: 'dispatch_outbox',
+      data: { status: OutboxStatus.Published },
+      where: { conditions: ['run_id = ?', filter.condition], params: [runId, ...filter.params] },
+    }).execute();
   }
 
   /** A finished run owes nothing. */
   settleRun(runId: string): void {
-    this.sql.exec(
-      `UPDATE dispatch_outbox SET status = '${OutboxStatus.Published}' WHERE run_id = ? AND status = '${OutboxStatus.Pending}'`,
-      runId,
-    );
+    this.#qb.update({
+      tableName: 'dispatch_outbox',
+      data: { status: OutboxStatus.Published },
+      where: { conditions: ['run_id = ?', 'status = ?'], params: [runId, OutboxStatus.Pending] },
+    }).execute();
   }
 
   /**
@@ -93,43 +96,61 @@ export class Outbox {
    * publish a fresh idempotency key, because the queue keeps the spent one forever.
    */
   reopen(runId: string, nextAt: number, kind: DispatchKind, correlationId?: string): number {
-    const { clause, values } = eventFilter(kind, correlationId);
-    return this.sql.exec(
-      `UPDATE dispatch_outbox SET status = '${OutboxStatus.Pending}', redrive = redrive + 1, next_at = ?
-       WHERE run_id = ? AND status = '${OutboxStatus.Published}'
-         AND slot IN (SELECT slot FROM events WHERE run_id = ? AND ${clause})
-       RETURNING slot`,
-      nextAt, runId, runId, ...values,
-    ).toArray().length;
+    const filter = eventFilter(runId, kind, correlationId);
+    const rows = this.#qb.raw<{ slot: number }>({
+      query: `UPDATE dispatch_outbox SET status = ?, redrive = redrive + 1, next_at = ?
+              WHERE run_id = ? AND status = ? AND ${filter.condition}
+              RETURNING slot`,
+      args: [OutboxStatus.Pending, nextAt, runId, OutboxStatus.Published, ...filter.params],
+      fetchType: FetchTypes.ALL,
+    }).execute().results;
+    return rows?.length ?? 0;
   }
 
   due(now: number, limit: number): OutboxRow[] {
-    return this.sql.exec<OutboxRow>(
-      `SELECT o.run_id, o.slot, o.queue_name, o.deployment_id, o.attempts, o.redrive, o.next_at, e.kind, e.correlation_id
-       FROM dispatch_outbox o JOIN events e ON e.run_id = o.run_id AND e.slot = o.slot
-       WHERE o.status = '${OutboxStatus.Pending}' AND o.next_at <= ? ORDER BY o.next_at LIMIT ?`,
-      now, limit,
-    ).toArray();
+    return this.#qb.raw<OutboxRow>({
+      query: `SELECT o.run_id, o.slot, o.queue_name, o.deployment_id, o.attempts, o.redrive, o.next_at,
+                     e.kind, e.correlation_id
+              FROM dispatch_outbox o JOIN events e ON e.run_id = o.run_id AND e.slot = o.slot
+              WHERE o.status = ? AND o.next_at <= ? ORDER BY o.next_at LIMIT ?`,
+      args: [OutboxStatus.Pending, now, limit],
+      fetchType: FetchTypes.ALL,
+    }).execute().results ?? [];
   }
 
   postpone(row: OutboxRow, nextAt: number): void {
-    this.sql.exec(
-      `UPDATE dispatch_outbox SET next_at = ? WHERE run_id = ? AND slot = ? AND status = '${OutboxStatus.Pending}'`,
-      nextAt, row.run_id, row.slot,
-    );
+    this.#qb.update({
+      tableName: 'dispatch_outbox',
+      data: { next_at: nextAt },
+      where: { conditions: ['run_id = ?', 'slot = ?', 'status = ?'], params: [row.run_id, row.slot, OutboxStatus.Pending] },
+    }).execute();
   }
 
   recordFailure(row: OutboxRow, nextAt: number): void {
-    this.sql.exec(
-      `UPDATE dispatch_outbox SET attempts = attempts + 1, next_at = ?
-       WHERE run_id = ? AND slot = ? AND status = '${OutboxStatus.Pending}'`,
-      nextAt, row.run_id, row.slot,
-    );
+    this.#qb.raw({
+      query: 'UPDATE dispatch_outbox SET attempts = attempts + 1, next_at = ? WHERE run_id = ? AND slot = ? AND status = ?',
+      args: [nextAt, row.run_id, row.slot, OutboxStatus.Pending],
+    }).execute();
   }
 
   nextDueAt(): number | null {
-    return this.sql.exec<{ next_at: number | null }>(
-      `SELECT MIN(next_at) AS next_at FROM dispatch_outbox WHERE status = '${OutboxStatus.Pending}'`,
-    ).one().next_at;
+    const row = this.#qb.raw<{ next_at: number | null }>({
+      query: 'SELECT MIN(next_at) AS next_at FROM dispatch_outbox WHERE status = ?',
+      args: [OutboxStatus.Pending],
+      fetchType: FetchTypes.ONE,
+    }).execute().results;
+    return row?.next_at ?? null;
+  }
+
+  #publish(runId: string, kind: DispatchKind, conditions: string[], params: number[]): void {
+    const filter = eventFilter(runId, kind);
+    this.#qb.update({
+      tableName: 'dispatch_outbox',
+      data: { status: OutboxStatus.Published },
+      where: {
+        conditions: ['run_id = ?', ...conditions, 'status = ?', filter.condition],
+        params: [runId, ...params, OutboxStatus.Pending, ...filter.params],
+      },
+    }).execute();
   }
 }

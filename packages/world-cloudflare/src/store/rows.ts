@@ -2,47 +2,31 @@ import { getEventDataPayloadField, slotToEventId, stripEventDataRefs, type Event
 import { ResolveData } from '../enums.js';
 import { decode } from '../lib/codec.js';
 import type { DispatchKind } from '../types.js';
+import type { StoreSchema } from './tables.js';
 
 /** A run, step or hook row: the entity is encoded in `data`. */
-export type RecordRow = { id: string; data: string; created_at: number };
+export type RecordRow = Pick<StoreSchema['runs'], 'id' | 'data' | 'created_at'>;
 
 /** One event. The event's payload field (input, output, result...) is a BLOB beside its metadata. */
-export type EventRow = {
-  run_id: string;
-  slot: number;
-  kind: Event['eventType'];
-  correlation_id: string | null;
-  spec_version: number;
-  created_at: number;
-  occurred_at: number | null;
-  resume_id: string | null;
-  data: string | null;
-  payload: ArrayBuffer | null;
-};
+export type EventRow = StoreSchema['events'];
 
 /** A due outbox row joined with its event. */
-export type OutboxRow = {
-  run_id: string;
-  slot: number;
+export type OutboxRow = Omit<StoreSchema['dispatch_outbox'], 'status'> & {
   kind: DispatchKind;
   correlation_id: string | null;
-  queue_name: string;
-  deployment_id: string;
-  attempts: number;
-  redrive: number;
-  next_at: number;
 };
 
 /** `resolveData` is the SDK's events mode; only `none` changes the result. */
 export function toEvent(row: EventRow, resolveData?: string): Event {
+  const eventType = row.kind as Event['eventType'];
   const eventData = row.data === null ? undefined : decode<Record<string, unknown>>(row.data);
-  const field = getEventDataPayloadField(row.kind);
+  const field = getEventDataPayloadField(eventType);
   if (field && row.payload !== null) {
     if (!eventData) throw new Error('Corrupt event: payload without metadata');
     eventData[field] = new Uint8Array(row.payload);
   }
   const event = {
-    eventType: row.kind,
+    eventType,
     runId: row.run_id,
     eventId: slotToEventId(row.slot),
     createdAt: new Date(row.created_at),
