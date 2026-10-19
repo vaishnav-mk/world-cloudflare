@@ -5,11 +5,12 @@ import { subscribeEvents } from './routes/events.js';
 import { resumeHookByToken } from './routes/hooks.js';
 import { getRunResult, getRunStatus, listRunHooks, startRun } from './routes/runs.js';
 import { listStreams, readStream } from './routes/streams.js';
+import { worldRpc } from './routes/world.js';
 
 export type RouteContext = {
   request: Request;
   url: URL;
-  env: WorldEnv;
+  env: WorldEnv & { WORLD_RPC_TOKEN?: string };
   /** Named path segments, such as `runId`. */
   params: Record<string, string>;
 };
@@ -32,6 +33,7 @@ const routes: Route[] = [
   route('GET', '/runs/:runId/streams', listStreams),
   route('GET', '/runs/:runId/streams/:namespace', readStream),
   route('POST', '/hooks/:token', resumeHookByToken),
+  route('POST', '/world/rpc', worldRpc),
 ];
 
 export async function handleRequest(request: Request, env: WorldEnv): Promise<Response> {
