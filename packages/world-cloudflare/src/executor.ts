@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { FLOW_PATH } from './constants.js';
+import { withRequestContext } from './lib/request-context.js';
 import type { ExecutorProps, FlowHandler, WorldEnv } from './types.js';
 
 /** Default export for an immutable executor uploaded to the `EXECUTORS` dispatch namespace. */
@@ -14,7 +15,7 @@ export function createExecutor(flow: FlowHandler) {
       if (this.ctx.props.targetDeployment !== this.env.DEPLOYMENT_ID) {
         return new Response('Deployment mismatch', { status: 409 });
       }
-      return flow(request);
+      return withRequestContext(this.ctx, () => flow(request));
     }
   };
 }

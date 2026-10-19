@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { FLOW_URL } from '../constants.js';
+import { withRequestContext } from '../lib/request-context.js';
 import type { Delivery, ExecutorProps, FlowHandler, WorldEnv } from '../types.js';
 import { executorFor } from './routes.js';
 
@@ -29,7 +30,7 @@ export function createQueueConsumer(flow: FlowHandler) {
       const { EXECUTORS: executors, DEPLOYMENT_ID: current } = this.env;
       if (!executors) {
         if (deployment !== current) throw new Error(`Deployment ${deployment} is unavailable`);
-        return flow(request);
+        return withRequestContext(this.ctx, () => flow(request));
       }
       const script = executorFor(this.env, deployment);
       if (!script) throw new Error(`Deployment ${deployment} is unavailable`);
