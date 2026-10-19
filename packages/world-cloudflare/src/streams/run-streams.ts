@@ -1,10 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
+import { DOQB, OrderTypes } from 'workers-qb';
+import migrations from '../../drizzle/streams/migrations.js';
 import { STREAM_POLL_MS, STREAM_READ_BATCH } from '../constants.js';
+import { migrateOnStart } from '../db/migrate.js';
 import { Waiters } from '../lib/waiters.js';
 import type { WorldEnv } from '../types.js';
-
-type StreamRow = { tail: number; closed: number };
-type ChunkRow = { position: number; bytes: ArrayBuffer };
+import type { StreamsSchema } from './tables.js';
 
 export type StreamInfo = { tailIndex: number; done: boolean };
 export type ChunkPage = {
@@ -14,20 +15,18 @@ export type ChunkPage = {
   done: boolean;
 };
 
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS streams (
-    name TEXT PRIMARY KEY, tail INTEGER NOT NULL DEFAULT -1, closed INTEGER NOT NULL DEFAULT 0);
-  CREATE TABLE IF NOT EXISTS chunks (
-    name TEXT NOT NULL, position INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (name, position));
-`;
+/** Copies a view into its own `ArrayBuffer`, the BLOB type Durable Object SQLite binds. */
+const toBuffer = (bytes: Uint8Array): ArrayBuffer => new Uint8Array(bytes).buffer;
 
 /** One object per run. Stream names and chunk positions are scoped to that run. */
 export class RunStreams extends DurableObject<WorldEnv> {
+  readonly #qb: DOQB<StreamsSchema>;
   readonly #waiters = new Waiters();
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
-    ctx.storage.sql.exec(SCHEMA);
+    this.#qb = new DOQB<StreamsSchema>(ctx.storage.sql);
+    migrateOnStart(ctx, migrations);
   }
 
   write(name: string, bytes: Uint8Array): void {
@@ -37,43 +36,46 @@ export class RunStreams extends DurableObject<WorldEnv> {
   /** Appends chunks in order, atomically. */
   writeMulti(name: string, chunks: Uint8Array[]): void {
     if (!chunks.length) return;
-    const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
-      sql.exec('INSERT OR IGNORE INTO streams (name) VALUES (?)', name);
-      const stream = sql.exec<StreamRow>('SELECT tail, closed FROM streams WHERE name = ?', name).one();
+      this.#ensureStream(name);
+      const stream = this.#qb.fetchOne({
+        tableName: 'streams', fields: ['tail', 'closed'], where: { conditions: 'name = ?', params: [name] },
+      }).execute().results!;
       if (stream.closed) throw new Error('Stream is closed');
       let position = stream.tail;
       for (const bytes of chunks) {
         position++;
-        sql.exec('INSERT INTO chunks (name, position, bytes) VALUES (?, ?, ?)', name, position, bytes);
+        this.#qb.insert({ tableName: 'chunks', data: { name, position, bytes: toBuffer(bytes) } }).execute();
       }
-      sql.exec('UPDATE streams SET tail = ? WHERE name = ?', position, name);
+      this.#qb.update({ tableName: 'streams', data: { tail: position }, where: { conditions: 'name = ?', params: [name] } }).execute();
     });
     this.#waiters.wake(name);
   }
 
   close(name: string): void {
-    const sql = this.ctx.storage.sql;
-    sql.exec('INSERT OR IGNORE INTO streams (name) VALUES (?)', name);
-    sql.exec('UPDATE streams SET closed = 1 WHERE name = ?', name);
+    this.#ensureStream(name);
+    this.#qb.update({ tableName: 'streams', data: { closed: 1 }, where: { conditions: 'name = ?', params: [name] } }).execute();
     this.#waiters.wake(name);
   }
 
   list(): string[] {
-    return this.ctx.storage.sql.exec<{ name: string }>('SELECT name FROM streams ORDER BY name').toArray()
-      .map(({ name }) => name);
+    const rows = this.#qb.fetchAll<'streams', 'name'>({ tableName: 'streams', fields: ['name'], orderBy: { name: OrderTypes.ASC } }).execute().results;
+    return (rows ?? []).map(({ name }) => name);
   }
 
   info(name: string): StreamInfo {
-    const row = this.ctx.storage.sql.exec<StreamRow>('SELECT tail, closed FROM streams WHERE name = ?', name).toArray()[0];
+    const row = this.#qb.fetchOne({
+      tableName: 'streams', fields: ['tail', 'closed'], where: { conditions: 'name = ?', params: [name] },
+    }).execute().results;
     return { tailIndex: row?.tail ?? -1, done: Boolean(row?.closed) };
   }
 
   chunks(name: string, start: number, limit: number): ChunkPage {
-    const rows = this.ctx.storage.sql.exec<ChunkRow>(
-      'SELECT position, bytes FROM chunks WHERE name = ? AND position >= ? ORDER BY position LIMIT ?',
-      name, start, limit + 1,
-    ).toArray();
+    const rows = this.#qb.fetchAll<'chunks', 'position' | 'bytes'>({
+      tableName: 'chunks', fields: ['position', 'bytes'],
+      where: { conditions: ['name = ?', 'position >= ?'], params: [name, start] },
+      orderBy: { position: OrderTypes.ASC }, limit: limit + 1,
+    }).execute().results ?? [];
     const data = rows.slice(0, limit).map(({ position, bytes }) => ({ index: position, data: new Uint8Array(bytes) }));
     const hasMore = rows.length > limit;
     const last = data.at(-1);
@@ -89,5 +91,9 @@ export class RunStreams extends DurableObject<WorldEnv> {
       return info.tailIndex >= start || info.done;
     });
     return this.chunks(name, start, STREAM_READ_BATCH);
+  }
+
+  #ensureStream(name: string): void {
+    this.#qb.insert({ tableName: 'streams', data: { name }, onConflict: 'IGNORE' }).execute();
   }
 }
