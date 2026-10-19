@@ -19,9 +19,8 @@ export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS'>): Streamer {
       close: (runId, name) => streamsOf(runId).close(name),
       list: (runId) => streamsOf(runId).list(),
       getInfo: (runId, name) => streamsOf(runId).info(name),
-      getChunks: async (runId, name, options?: GetChunksOptions) => {
-        const limit = options?.limit ?? DEFAULT_PAGE_LIMIT;
-        const start = options?.cursor === undefined ? 0 : Number(options.cursor);
+      getChunks: async (runId, name, { limit = DEFAULT_PAGE_LIMIT, cursor = '0' }: GetChunksOptions = {}) => {
+        const start = Number(cursor);
         if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT) {
           throw new RangeError('Invalid stream cursor or limit');
         }

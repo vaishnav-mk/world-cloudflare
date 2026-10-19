@@ -14,8 +14,7 @@ export type RecordFilter = {
   status?: string | string[];
 };
 
-export function pageLimit(options?: PaginationOptions): number {
-  const limit = options?.limit ?? DEFAULT_PAGE_LIMIT;
+export function pageLimit(limit = DEFAULT_PAGE_LIMIT): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT) {
     throw new RangeError(`Pagination limit must be between 1 and ${MAX_PAGE_LIMIT}`);
   }
@@ -24,9 +23,9 @@ export function pageLimit(options?: PaginationOptions): number {
 
 /** Runs, steps or hooks, newest first by default. The cursor is the encoded `[createdAt, id]` of the last row. */
 export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter): PaginatedResponse<T> {
-  const { pagination } = filter;
-  const limit = pageLimit(pagination);
-  const descending = pagination?.sortOrder !== SortOrder.Asc;
+  const { limit: requestedLimit, sortOrder, cursor: rawCursor } = filter.pagination ?? {};
+  const limit = pageLimit(requestedLimit);
+  const descending = sortOrder !== SortOrder.Asc;
   const where: string[] = [];
   const values: (string | number)[] = [];
   if (filter.runId !== undefined) {
@@ -43,7 +42,7 @@ export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter)
     where.push(statuses.length ? `status IN (${statuses.map(() => '?').join(',')})` : '0');
     values.push(...statuses);
   }
-  const cursor = parseRecordCursor(pagination?.cursor);
+  const cursor = parseRecordCursor(rawCursor);
   if (cursor) {
     where.push(`(created_at, id) ${descending ? '<' : '>'} (?, ?)`);
     values.push(...cursor);
@@ -63,13 +62,13 @@ export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter)
 export function listEvents(
   db: Db, params: ListEventsParams | ListEventsByCorrelationIdParams,
 ): PaginatedResponse<Event> {
-  const { runId, pagination, resolveData } = params;
+  const { runId, resolveData } = params;
+  const { limit: requestedLimit, sortOrder, cursor: raw } = params.pagination ?? {};
   const correlationId = 'correlationId' in params ? params.correlationId : undefined;
-  const descending = pagination?.sortOrder === SortOrder.Desc;
-  const raw = pagination?.cursor;
+  const descending = sortOrder === SortOrder.Desc;
   const after = parseEventCursor(raw, descending);
   // The SDK replays a run by listing its events without a limit.
-  const limit = pagination?.limit === undefined && correlationId === undefined ? FULL_EVENT_LOG_LIMIT : pageLimit(pagination);
+  const limit = requestedLimit === undefined && correlationId === undefined ? FULL_EVENT_LOG_LIMIT : pageLimit(requestedLimit);
   const rows = db.events(runId, after, limit + 1, { correlationId, descending });
   const data = rows.slice(0, limit).map((row) => toEvent(row, resolveData));
   const last = data.at(-1);

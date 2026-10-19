@@ -22,16 +22,14 @@ export function createQueue(env: QueueEnv): Queue {
   return {
     getDeploymentId: async () => env.DEPLOYMENT_ID,
 
-    queue: async (queueName, message, opts) => {
+    queue: async (queueName, message, { deploymentId: target, delaySeconds: delay = 0, idempotencyKey } = {}) => {
       ValidQueueName.parse(queueName);
-      const target = opts?.deploymentId;
       if (target && target !== env.DEPLOYMENT_ID && !executorFor(env, target)) {
         throw new Error(`Deployment ${target} is unavailable`);
       }
-      const delay = opts?.delaySeconds ?? 0;
       if (!Number.isFinite(delay) || delay < 0) throw new RangeError('Invalid queue delay');
 
-      const key = opts?.idempotencyKey ? `${queueName}:${opts.idempotencyKey}` : undefined;
+      const key = idempotencyKey ? `${queueName}:${idempotencyKey}` : undefined;
       const encoded = stringify(message);
       const store = env.WORLD_STORE.getByName(STORE_NAME);
       const claim = outboxClaim(message);
