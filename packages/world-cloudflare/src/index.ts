@@ -10,6 +10,7 @@ export { WorldStore } from './store/world-store.js';
 export { RunStreams } from './streams/run-streams.js';
 export { EventType, ResolveData, RunStatus, StepStatus, WaitStatus } from './enums.js';
 export { toJson } from './lib/json.js';
+export { handleWorldRpc } from './remote/server.js';
 export type { Delivery, FlowHandler, WorldEnv } from './types.js';
 
 /** Publishes dispatches whose alarm was lost. Call it from a `scheduled` handler. */
