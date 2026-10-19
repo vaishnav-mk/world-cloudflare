@@ -25,6 +25,9 @@ export const STREAM_POLL_MS = 15_000;
 export const STREAM_READ_BATCH = 100;
 export const MAX_TERMINAL_WAIT_MS = 30_000;
 
+/** VM snapshots are stored in parts under Durable Object SQLite's documented 2 MB value limit. */
+export const SNAPSHOT_PART_BYTES = 1_900_000;
+
 /** Events whose commit owes a queue message. */
 export const DISPATCH_KINDS: ReadonlySet<string> = new Set<DispatchKind>([
   EventType.RunCreated, EventType.HookReceived, EventType.StepCreated, EventType.WaitCreated,

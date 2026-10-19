@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DOQB, FetchTypes, OrderTypes } from 'workers-qb';
 import migrations from '../../drizzle/streams/migrations.js';
-import { STREAM_POLL_MS, STREAM_READ_BATCH } from '../constants.js';
+import { SNAPSHOT_PART_BYTES, STREAM_POLL_MS, STREAM_READ_BATCH } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { allRows, findRow, requireRow } from '../lib/qb.js';
 import { Waiters } from '../lib/waiters.js';
@@ -19,7 +19,10 @@ export type ChunkPage = {
 /** Copies a view into its own `ArrayBuffer`, the BLOB type Durable Object SQLite binds. */
 const toBuffer = (bytes: Uint8Array): ArrayBuffer => new Uint8Array(bytes).buffer;
 
-/** One object per run. Stream names and chunk positions are scoped to that run. */
+/**
+ * One object per run: the run's streams and its VM snapshot. Stream names and chunk positions are
+ * scoped to that run.
+ */
 export class RunStreams extends DurableObject<WorldEnv> {
   readonly #qb: DOQB<StreamsSchema>;
   readonly #waiters = new Waiters();
@@ -90,6 +93,44 @@ export class RunStreams extends DurableObject<WorldEnv> {
       return info.tailIndex >= start || info.done;
     });
     return this.chunks(name, start, STREAM_READ_BATCH);
+  }
+
+  /**
+   * Replaces the run's snapshot envelope. It arrives as a stream because an envelope can pass the
+   * 32 MiB RPC message limit. Its parts and size are written in one transaction.
+   */
+  async saveSnapshot(envelope: ReadableStream<Uint8Array>): Promise<void> {
+    const buffer = await new Response(envelope).arrayBuffer();
+    this.ctx.storage.transactionSync(() => {
+      this.#clearSnapshot();
+      for (let part = 0; part * SNAPSHOT_PART_BYTES < buffer.byteLength; part++) {
+        const bytes = buffer.slice(part * SNAPSHOT_PART_BYTES, (part + 1) * SNAPSHOT_PART_BYTES);
+        this.#qb.insert({ tableName: 'snapshot_parts', data: { part, bytes } }).execute();
+      }
+      this.#qb.insert({ tableName: 'snapshot', data: { size: buffer.byteLength } }).execute();
+    });
+  }
+
+  /** The run's snapshot envelope as a stream, or `null` when it has none. */
+  loadSnapshot(): ReadableStream<Uint8Array> | null {
+    const snapshot = findRow(this.#qb.fetchOne<'snapshot', 'size'>({ tableName: 'snapshot', fields: ['size'] }));
+    if (snapshot === undefined) return null;
+    const parts = allRows(this.#qb.fetchAll<'snapshot_parts', 'bytes'>({
+      tableName: 'snapshot_parts', fields: ['bytes'], orderBy: { part: OrderTypes.ASC },
+    }));
+    const envelope = new Blob(parts.map(({ bytes }) => bytes));
+    if (envelope.size !== snapshot.size) throw new Error(`Snapshot has ${envelope.size} of ${snapshot.size} bytes`);
+    return envelope.stream();
+  }
+
+  deleteSnapshot(): void {
+    this.ctx.storage.transactionSync(() => this.#clearSnapshot());
+  }
+
+  #clearSnapshot(): void {
+    // No conditions: every row.
+    this.#qb.delete({ tableName: 'snapshot_parts', where: [] }).execute();
+    this.#qb.delete({ tableName: 'snapshot', where: [] }).execute();
   }
 
   /** Creates the stream if needed and returns its state. */
