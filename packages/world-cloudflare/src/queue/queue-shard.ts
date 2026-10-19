@@ -3,7 +3,7 @@ import { DurabilityFanout, DurabilityScheduler, type DurabilityFanoutMessage, ty
 import { parse } from 'devalue';
 import migrations from '../../drizzle/queue/migrations.js';
 import {
-  DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS, STORE_NAME,
+  DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, MessageKind } from '../enums.js';
@@ -29,7 +29,11 @@ export class QueueShard extends DurableObject<WorldEnv> {
       maxAttempts: Number(this.env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS),
       delay: (attempt) => Math.min(MAX_QUEUE_RETRY_DELAY_MS, attempt * 1000),
     },
-    targets: { [FLOW_TARGET]: { ackOnReturn: true, deliver: (messages) => this.#deliver(messages) } },
+    targets: {
+      [FLOW_TARGET]: {
+        ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages) => this.#deliver(messages),
+      },
+    },
     dlq: (message) => this.#deadLetter(message),
   });
 

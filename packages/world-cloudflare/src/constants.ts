@@ -44,6 +44,12 @@ export const MAX_PUBLISH_BACKOFF_MS = 60_000;
 /** Queue delivery. */
 export const DEFAULT_QUEUE_MAX_ATTEMPTS = 64;
 export const MAX_QUEUE_RETRY_DELAY_MS = 30_000;
+/**
+ * One flow delivery. The SDK runs inline steps in one invocation until its replay budget runs out,
+ * which can take minutes. Durability's 5 minute default cut those invocations off before they
+ * could suspend and save a VM snapshot. Stays under the 15 minute alarm wall time limit.
+ */
+export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
 
 /** Workers for Platforms script names in `EXECUTOR_ROUTES`. */
 export const EXECUTOR_SCRIPT_PATTERN = /^[a-zA-Z0-9_-]{1,63}$/;
