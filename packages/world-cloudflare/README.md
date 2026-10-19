@@ -72,3 +72,15 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 | `drainOutbox(env)` | Cron handler body |
 | `nextEvents(env, runId, cursor, types?)` | Long-polls a run's events, for a live subscription |
 | `EventType`, `RunStatus`, `StepStatus`, `WaitStatus`, `ResolveData` | Enums of the SDK's string values |
+| `handleWorldRpc(request, world, token)` | Serves the World over HTTP for the remote client |
+| `toJson(value)` | JSON with bytes as base64, for HTTP responses |
+
+## Remote client
+
+`@workflow/world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker. The SDK's tools load it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`.
+
+- **Configure it** with `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`.
+- **The Worker side:** mount `handleWorldRpc` at `POST /world/rpc` and keep the token in a secret.
+- **Build it** with `pnpm build`. Unlike the Worker entry, this entry ships as compiled JavaScript (`dist/remote/client.js`), because Node loads it directly.
+
+It reads and writes runs, steps, events, hooks and streams. It cannot receive queue deliveries; workflows still run on Cloudflare.

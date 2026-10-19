@@ -56,6 +56,21 @@ WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-e2e.mjs
 WORKFLOW_BASE_URL=https://<worker>.workers.dev WORKFLOW_LOAD_COUNT=50 node scripts/remote-load.mjs
 ```
 
+## Web UI
+
+The SDK's web UI (`workflow web`) runs locally against a deployed World through `@workflow/world-cloudflare/remote`, a Node client for the Worker's `/world/rpc` endpoint.
+
+1. Set a token on the Worker: `wrangler secret put WORLD_RPC_TOKEN`. Without it the endpoint does not exist. It can write events, so treat the token like a credential.
+2. Create `.dev.vars.remote-ui` (gitignored):
+
+   ```sh
+   WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote
+   WORKFLOW_CLOUDFLARE_URL=https://<worker>.workers.dev
+   WORKFLOW_CLOUDFLARE_TOKEN=<the same token>
+   ```
+
+3. Run `pnpm ui` and open http://localhost:3456.
+
 ## Limits
 
 - One Durable Object holds every run and one queue shard delivers every message, so both cap throughput.
