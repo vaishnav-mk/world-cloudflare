@@ -1,9 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DurabilityFanout, DurabilityScheduler, type DurabilityFanoutMessage, type StoredMessage } from 'durability';
 import { parse } from 'devalue';
+import migrations from '../../drizzle/queue/migrations.js';
 import {
   DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS, STORE_NAME,
 } from '../constants.js';
+import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, MessageKind } from '../enums.js';
 import type { Delivery, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
@@ -33,7 +35,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
-    this.#dedup.migrate();
+    migrateOnStart(ctx, migrations);
   }
 
   /** Enqueues a message. With a deduplication key, a repeat returns the first accepted message's ID. */
