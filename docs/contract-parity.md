@@ -82,7 +82,7 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | `writeMulti` | ✓ | ✓ | ✗ | Atomic and ordered |
 | `list`, `getInfo`, `getChunks` | ✓ | ✓ | ✗ | |
 | `get`: live reads and negative start | ✓ | ✓ | ✓ | Remote reader connected before the first write |
-| Chunks over 2 MB | ✗ | ✗ | ✗ | Limited by the Durable Object row size |
+| Chunks over 5 MiB | ✗ | ✗ | ✗ | 5 MiB works in production; 6 MiB hits `SQLITE_TOOBIG` ([limits](limits.md)) |
 
 ## Optional APIs and capabilities
 
@@ -109,6 +109,6 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | SDK patch upstreamed | ✗ | Pinned to one SDK commit |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World |
 | Retention and cleanup of finished runs | ✗ | Runs, outbox and dedup rows are kept forever |
-| Payloads over 2 MB | ✗ | No R2 offload |
+| Payloads over about 4–6 MiB | ✗ | No R2 offload; measured in [limits](limits.md) |
 | Sharding beyond one store and one queue shard | ✗ | |
 | Multi-region placement | ✗ | |

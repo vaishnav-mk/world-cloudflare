@@ -13,6 +13,7 @@ A [Workflow SDK](https://workflow-sdk.dev) v5 World that runs on Cloudflare Work
 | `test/` | workerd tests and SDK end-to-end tests |
 | `patches/` | SDK patch that adds a Workers build target |
 | [`docs/contract-parity.md`](docs/contract-parity.md) | What is implemented and what is tested |
+| [`docs/limits.md`](docs/limits.md) | Measured payload, step, CPU and concurrency limits |
 
 ## Run it
 
@@ -58,7 +59,8 @@ WORKFLOW_BASE_URL=https://<worker>.workers.dev WORKFLOW_LOAD_COUNT=50 node scrip
 ## Limits
 
 - One Durable Object holds every run and one queue shard delivers every message, so both cap throughput.
-- Payloads and stream chunks must fit in a 2 MB Durable Object row. HTTP bodies are capped at 1 MiB.
+- Step outputs up to about 5.75 MiB, run outputs up to 4 MiB and stream chunks up to 5 MiB fit; larger ones fail. HTTP bodies are capped at 1 MiB. Measurements are in [limits](docs/limits.md).
+- A step that exceeds the CPU limit is retried indefinitely and holds up the single queue shard. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
 - No snapshots, encryption, retention, batching or forced hook claims. See [contract parity](docs/contract-parity.md).
 - Steps run at least once, so give their side effects idempotency keys.
 - The SDK patch is pinned to one SDK commit; rebase it before upgrading the SDK.
