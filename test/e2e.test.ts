@@ -1,5 +1,6 @@
 import { SELF } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
+import { world } from '../src/world.js';
 
 const headers = {};
 
@@ -159,4 +160,36 @@ it('stores incompressible step output larger than 64 KiB', async () => {
   // Binary payloads stream as base64, not as JSON index maps about 12 times their size.
   const events = await (await SELF.fetch(`https://local/runs/${runId}/events`, { headers })).text();
   expect(events.length).toBeLessThan(2 * 256 * 1024);
+});
+
+it('saves a VM snapshot and restores the next invocation from it', async () => {
+  const snapshots = world.experimental_snapshots!;
+  using saves = vi.spyOn(snapshots, 'save');
+  using loads = vi.spyOn(snapshots, 'load');
+  using lists = vi.spyOn(world.events, 'list');
+  const response = await SELF.fetch('https://local/runs', {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'delayed', value: 15 }),
+  });
+  const { runId } = await response.json() as { runId: string };
+  await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${runId}`, { headers })).json() as { status: string }).status,
+    { interval: 100, timeout: 15_000 }).toBe('completed');
+  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 30 });
+
+  // The first invocation saved a snapshot when it suspended on the sleep.
+  const saved = saves.mock.calls.find(([id]) => id === runId);
+  expect(saved?.[1].length).toBeGreaterThan(0);
+  expect(saved?.[2].eventCount).toBeGreaterThanOrEqual(2);
+  // The second invocation loaded it back, metadata intact.
+  const loadIndex = loads.mock.calls.findIndex(([id]) => id === runId);
+  const loaded = await loads.mock.results[loadIndex]?.value;
+  expect(loaded?.metadata).toEqual(saved?.[2]);
+  // Then it read only the events after the snapshot's cursor and never replayed the whole log.
+  const readsAfterLoad = lists.mock.calls.flatMap(([params], index) =>
+    params.runId === runId && lists.mock.invocationCallOrder[index] > loads.mock.invocationCallOrder[loadIndex]
+      ? [params.pagination?.cursor] : []);
+  expect(readsAfterLoad[0]).toBe(saved?.[2].eventsCursor);
+  expect(readsAfterLoad).not.toContain(undefined);
+  // The finished run's snapshot is deleted.
+  await expect.poll(() => snapshots.load(runId), { interval: 100, timeout: 5_000 }).toBeNull();
 });
