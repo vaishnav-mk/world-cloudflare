@@ -4,6 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-17",
   "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
   "vars": { "DEPLOYMENT_ID": "test-v1", "WORKFLOW_VM": "quickjs" },
   "durable_objects": { "bindings": [
     { "name": "WORLD_STORE", "class_name": "WorldStore" },
