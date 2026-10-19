@@ -1,4 +1,4 @@
-import { isTerminalWorkflowRunStatus, type Step, type Wait } from '@workflow/world';
+import { isTerminalWorkflowRunStatus, type Step } from '@workflow/world';
 import { stringify } from 'devalue';
 import { MAX_PUBLISH_BACKOFF_MS, OUTBOX_DRAIN_BATCH, WAIT_RETRY_DELAY_MS } from '../constants.js';
 import { DispatchAction, EventType, RunStatus, StepStatus, WaitStatus } from '../enums.js';
@@ -8,14 +8,24 @@ import type { Db } from './db.js';
 import type { Outbox } from './outbox.js';
 import type { OutboxRow } from './rows.js';
 
+type Message = { key: string; body: unknown };
+
 type Plan =
   | { action: DispatchAction.Settle }
   | { action: DispatchAction.Postpone }
-  | { action: DispatchAction.Publish; step?: Step; wait?: Wait };
+  | {
+    action: DispatchAction.Publish;
+    message: Message;
+    /** Rechecked after the hashing awaits, because other requests may run in between. */
+    stillOwed: () => boolean;
+  };
+
+const SETTLE = { action: DispatchAction.Settle } as const;
+const POSTPONE = { action: DispatchAction.Postpone } as const;
 
 export function isPendingStep(db: Db, runId: string, stepId: string, stepName: string): boolean {
-  if (db.run(runId)?.status !== RunStatus.Running) return false;
-  const step = db.step(runId, stepId);
+  if (db.findRun(runId)?.status !== RunStatus.Running) return false;
+  const step = db.findStep(runId, stepId);
   return step?.status === StepStatus.Pending && step.stepName === stepName;
 }
 
@@ -27,8 +37,8 @@ export function pendingStepSlot(db: Db, outbox: Outbox, runId: string, stepId: s
 
 /** Pending `wait_created` slot for a wait that still needs a wake, or 0. */
 export function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlationId: string): number {
-  if (db.run(runId)?.status !== RunStatus.Running) return 0;
-  if (db.wait(runId, correlationId)?.status !== WaitStatus.Waiting) return 0;
+  if (db.findRun(runId)?.status !== RunStatus.Running) return 0;
+  if (db.findWait(runId, correlationId)?.status !== WaitStatus.Waiting) return 0;
   return outbox.pendingSlot(runId, EventType.WaitCreated, correlationId);
 }
 
@@ -36,7 +46,7 @@ export function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlati
 export async function drainOutbox(db: Db, outbox: Outbox, shard: DurableObjectStub<QueueShard>): Promise<number> {
   const due = outbox.due(Date.now(), OUTBOX_DRAIN_BATCH);
   for (const row of due) {
-    const plan = planFor(db, row);
+    const plan = planFor(db, outbox, row);
     switch (plan.action) {
       case DispatchAction.Settle:
         outbox.publishRow(row);
@@ -45,42 +55,57 @@ export async function drainOutbox(db: Db, outbox: Outbox, shard: DurableObjectSt
         outbox.postpone(row, Date.now() + WAIT_RETRY_DELAY_MS);
         break;
       case DispatchAction.Publish:
-        await publish(db, outbox, shard, row, plan.step, plan.wait);
+        await publish(outbox, shard, row, plan.message, plan.stillOwed);
         break;
     }
   }
   return due.length;
 }
 
-/** Decides what a due outbox row still needs. */
-function planFor(db: Db, row: OutboxRow): Plan {
-  const settle = { action: DispatchAction.Settle } as const;
+/**
+ * Decides what a due row still needs. A wait row is due no earlier than its `resumeAt`: it is
+ * written with that time, and every reschedule only moves it later.
+ */
+function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
+  const runStatus = db.findRun(row.run_id)?.status;
   switch (row.kind) {
     case EventType.RunCreated:
-      return db.run(row.run_id)?.status === RunStatus.Pending ? { action: DispatchAction.Publish } : settle;
+      if (runStatus !== RunStatus.Pending) return SETTLE;
+      return { action: DispatchAction.Publish, message: wakeMessage(row, 'run-start'), stillOwed: () => true };
     case EventType.HookReceived:
-      return { action: DispatchAction.Publish };
+      return { action: DispatchAction.Publish, message: wakeMessage(row, 'hook-wake'), stillOwed: () => true };
     case EventType.StepCreated: {
-      const step = row.correlation_id ? db.step(row.run_id, row.correlation_id) : undefined;
-      const needed = step?.status === StepStatus.Pending && db.run(row.run_id)?.status === RunStatus.Running;
-      return needed ? { action: DispatchAction.Publish, step } : settle;
+      const step = db.findStep(row.run_id, row.correlation_id);
+      if (step?.status !== StepStatus.Pending || runStatus !== RunStatus.Running) return SETTLE;
+      return {
+        action: DispatchAction.Publish,
+        message: stepMessage(row, step),
+        stillOwed: () => pendingStepSlot(db, outbox, row.run_id, step.stepId, step.stepName) === row.slot,
+      };
     }
     case EventType.WaitCreated: {
-      const wait = row.correlation_id ? db.wait(row.run_id, row.correlation_id) : undefined;
-      const status = db.run(row.run_id)?.status;
-      if (wait?.status !== WaitStatus.Waiting || !status || isTerminalWorkflowRunStatus(status)) return settle;
-      return status === RunStatus.Running ? { action: DispatchAction.Publish, wait } : { action: DispatchAction.Postpone };
+      const wait = db.findWait(row.run_id, row.correlation_id);
+      if (wait?.status !== WaitStatus.Waiting || runStatus === undefined || isTerminalWorkflowRunStatus(runStatus)) {
+        return SETTLE;
+      }
+      if (runStatus !== RunStatus.Running) return POSTPONE;
+      return {
+        action: DispatchAction.Publish,
+        message: waitMessage(row, row.correlation_id),
+        stillOwed: () => pendingWaitSlot(db, outbox, row.run_id, row.correlation_id) === row.slot,
+      };
     }
   }
 }
 
 async function publish(
-  db: Db, outbox: Outbox, shard: DurableObjectStub<QueueShard>, row: OutboxRow, step?: Step, wait?: Wait,
+  outbox: Outbox, shard: DurableObjectStub<QueueShard>, row: OutboxRow, message: Message, stillOwed: () => boolean,
 ): Promise<void> {
-  const { key, body } = messageFor(row, step);
+  // A dead-lettered key is spent forever, so each redrive needs a new one.
+  const key = row.redrive ? `${message.key}:redrive-${row.redrive}` : message.key;
+  const body = stringify(message.body);
   const [id, digest] = await Promise.all([messageIdFor(key), sha256Hex(body)]);
-  // Other requests may have run during the awaits.
-  if (!stillOwed(db, outbox, row, step, wait)) return;
+  if (!stillOwed()) return;
   try {
     await shard.enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
     outbox.publishRow(row);
@@ -91,36 +116,21 @@ async function publish(
   }
 }
 
-/** The queue message for a row. Step keys match the SDK's own, so an SDK publish and ours dedupe. */
-function messageFor(row: OutboxRow, step?: Step): { key: string; body: string } {
-  const { run_id: runId, queue_name: queueName, slot } = row;
-  let key: string;
-  let body: unknown;
-  switch (row.kind) {
-    case EventType.StepCreated:
-      key = `${queueName}:${step!.stepId}:${fnv1a32Hex(step!.stepName)}`;
-      body = { runId, stepId: step!.stepId, stepName: step!.stepName };
-      break;
-    case EventType.WaitCreated:
-      key = `${queueName}:wait-backup:${runId}:${slot}`;
-      body = { runId, waitContinuation: { correlationId: row.correlation_id, attempt: row.redrive } };
-      break;
-    case EventType.HookReceived:
-      key = `hook-wake:${runId}:${slot}`;
-      body = { runId };
-      break;
-    case EventType.RunCreated:
-      key = `run-start:${runId}:${slot}`;
-      body = { runId };
-      break;
-  }
-  // A dead-lettered key is spent forever, so each redrive needs a new one.
-  return { key: row.redrive ? `${key}:redrive-${row.redrive}` : key, body: stringify(body) };
+/** Matches the SDK's own step key, so an SDK publish and ours deduplicate. */
+function stepMessage(row: OutboxRow, step: Step): Message {
+  return {
+    key: `${row.queue_name}:${step.stepId}:${fnv1a32Hex(step.stepName)}`,
+    body: { runId: row.run_id, stepId: step.stepId, stepName: step.stepName },
+  };
 }
 
-function stillOwed(db: Db, outbox: Outbox, row: OutboxRow, step?: Step, wait?: Wait): boolean {
-  if (step) return pendingStepSlot(db, outbox, row.run_id, step.stepId, step.stepName) === row.slot;
-  if (!wait) return true;
-  const due = Date.now() >= wait.resumeAt!.getTime();
-  return due && pendingWaitSlot(db, outbox, row.run_id, row.correlation_id!) === row.slot;
+function waitMessage(row: OutboxRow, correlationId: string): Message {
+  return {
+    key: `${row.queue_name}:wait-backup:${row.run_id}:${row.slot}`,
+    body: { runId: row.run_id, waitContinuation: { correlationId, attempt: row.redrive } },
+  };
+}
+
+function wakeMessage(row: OutboxRow, prefix: 'run-start' | 'hook-wake'): Message {
+  return { key: `${prefix}:${row.run_id}:${row.slot}`, body: { runId: row.run_id } };
 }
