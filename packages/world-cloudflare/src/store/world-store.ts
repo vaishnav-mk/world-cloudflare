@@ -1,5 +1,4 @@
 import { DurableObject } from 'cloudflare:workers';
-import { HookNotFoundError, WorkflowRunNotFoundError } from '@workflow/errors';
 import {
   isTerminalWorkflowRunStatus, slotToEventId,
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type GetWorkflowRunParams, type Hook,
@@ -49,15 +48,13 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async getRun(id: string, params?: GetWorkflowRunParams & { resolveData?: 'all' }): Promise<WorkflowRun>;
   async getRun(id: string, params?: GetWorkflowRunParams): Promise<WorkflowRun | WorkflowRunWithoutData>;
   async getRun(id: string, params?: GetWorkflowRunParams): Promise<WorkflowRun | WorkflowRunWithoutData> {
-    const run = this.#db.run(id);
-    if (!run) throw new WorkflowRunNotFoundError(id);
-    return runView(run, params?.resolveData);
+    return runView(this.#db.getRun(id), params?.resolveData);
   }
 
   getManyRuns(ids: readonly string[], resolveData?: ResolveDataMode): (WorkflowRun | WorkflowRunWithoutData | null)[] {
     return ids.map((id) => {
-      const run = this.#db.run(id);
-      return run ? runView(run, resolveData) : null;
+      const run = this.#db.findRun(id);
+      return run === undefined ? null : runView(run, resolveData);
     });
   }
 
@@ -66,15 +63,14 @@ export class WorldStore extends DurableObject<WorldEnv> {
     const current = await this.getRun(id, { resolveData });
     if (timeoutMs === 0 || isTerminalWorkflowRunStatus(current.status)) return current;
     await this.#waiters.wait(id, Math.min(timeoutMs, MAX_TERMINAL_WAIT_MS), () => {
-      const status = this.#db.run(id)?.status;
-      return Boolean(status && isTerminalWorkflowRunStatus(status));
+      return isTerminalWorkflowRunStatus(this.#db.getRun(id).status);
     });
     return this.getRun(id, { resolveData });
   }
 
-  async listRuns(params?: ListWorkflowRunsParams): Promise<PaginatedResponse<WorkflowRun | WorkflowRunWithoutData>> {
-    const page = listRecords<WorkflowRun>(this.#db, 'runs', params ?? {});
-    return { ...page, data: page.data.map((run) => runView(run, params?.resolveData)) };
+  async listRuns(params: ListWorkflowRunsParams = {}): Promise<PaginatedResponse<WorkflowRun | WorkflowRunWithoutData>> {
+    const page = listRecords<WorkflowRun>(this.#db, 'runs', params);
+    return { ...page, data: page.data.map((run) => runView(run, params.resolveData)) };
   }
 
   // Steps.
@@ -83,9 +79,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async getStep(runId: string, stepId: string, params?: { resolveData?: 'all' }): Promise<Step>;
   async getStep(runId: string, stepId: string, params?: { resolveData?: ResolveDataMode }): Promise<Step | StepWithoutData>;
   async getStep(runId: string, stepId: string, params?: { resolveData?: ResolveDataMode }): Promise<Step | StepWithoutData> {
-    const step = this.#db.step(runId, stepId);
-    if (!step) throw new Error(`Step ${stepId} in run ${runId} not found`);
-    return stepView(step, params?.resolveData);
+    return stepView(this.#db.getStep(runId, stepId), params?.resolveData);
   }
 
   async listSteps(params: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>> {
@@ -96,15 +90,11 @@ export class WorldStore extends DurableObject<WorldEnv> {
   // Hooks.
 
   async getHook(hookId: string, resolveData?: ResolveDataMode): Promise<Hook> {
-    const hook = this.#db.hook(hookId);
-    if (!hook) throw new HookNotFoundError(hookId);
-    return hookView(hook, resolveData);
+    return hookView(this.#db.getHook(hookId), resolveData);
   }
 
   async getHookByToken(token: string, resolveData?: ResolveDataMode): Promise<Hook> {
-    const hook = this.#db.hookByToken(token);
-    if (!hook) throw new HookNotFoundError(token);
-    return hookView(hook, resolveData);
+    return hookView(this.#db.getHookByToken(token), resolveData);
   }
 
   async listHooks(params: ListHooksParams): Promise<PaginatedResponse<Hook>> {
@@ -117,9 +107,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async getEvent(runId: string, eventId: string, resolveData?: ResolveDataMode): Promise<Event> {
     const slot = Number(eventId.replace(/^evnt_/, ''));
     if (!Number.isSafeInteger(slot) || slot < 1 || slotToEventId(slot) !== eventId) throw new Error('Invalid event ID');
-    const row = this.#db.event(runId, slot);
-    if (!row) throw new Error(`Event ${eventId} not found`);
-    return toEvent(row, resolveData);
+    return toEvent(this.#db.getEvent(runId, slot), resolveData);
   }
 
   async listEvents(params: ListEventsParams): Promise<PaginatedResponse<Event>> {
@@ -133,7 +121,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async createEvent(runId: string | null, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
     // No awaits inside: the slot, event, state and outbox row commit together.
     const result = this.ctx.storage.transactionSync(() => applyEvent(this.#db, this.#outbox, runId, request, params));
-    if (!result.event) return result;
+    if (result.event === undefined) return result;
     this.#waiters.wake(result.event.runId);
     if (DISPATCH_KINDS.has(request.eventType)) {
       const resumeAt = request.eventType === EventType.WaitCreated ? result.wait?.resumeAt : undefined;
@@ -146,7 +134,6 @@ export class WorldStore extends DurableObject<WorldEnv> {
   /** Replays events after `cursor` (a slot), or waits for the next commit. `done` once a finished run is drained. */
   async nextEvents(runId: string, cursor: number, filter?: string[]) {
     if (!Number.isSafeInteger(cursor) || cursor < 0) throw new RangeError('Invalid subscription cursor');
-    if (!this.#db.run(runId)) throw new WorkflowRunNotFoundError(runId);
     const read = () => {
       const rows = this.#db.events(runId, cursor, EVENT_POLL_BATCH);
       const nextCursor = rows.at(-1)?.slot ?? cursor;
@@ -155,7 +142,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
           eventId: slotToEventId(row.slot), eventType: row.kind, data: JSON.stringify(toEvent(row)),
         })),
         cursor: nextCursor,
-        done: isTerminalWorkflowRunStatus(this.#db.run(runId)!.status) && nextCursor >= this.#db.lastSlot(runId),
+        done: isTerminalWorkflowRunStatus(this.#db.getRun(runId).status) && nextCursor >= this.#db.lastSlot(runId),
       };
     };
     const page = read();
@@ -199,8 +186,8 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async reopenPublishedHookWakes(runId: string): Promise<number> {
-    const run = this.#db.run(runId);
-    if (!run || isTerminalWorkflowRunStatus(run.status)) return 0;
+    const run = this.#db.findRun(runId);
+    if (run === undefined || isTerminalWorkflowRunStatus(run.status)) return 0;
     // A run that never started lost its start message; a started one lost a hook wake.
     const kind = run.status === RunStatus.Pending ? EventType.RunCreated : EventType.HookReceived;
     return this.#reopen(runId, Date.now() + REDRIVE_DELAY_MS, kind);
@@ -212,8 +199,8 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async reopenPublishedWaitDispatch(runId: string, correlationId: string): Promise<number> {
-    const wait = this.#db.wait(runId, correlationId);
-    if (this.#db.run(runId)?.status !== RunStatus.Running || wait?.status !== WaitStatus.Waiting) return 0;
+    const wait = this.#db.findWait(runId, correlationId);
+    if (this.#db.findRun(runId)?.status !== RunStatus.Running || wait?.status !== WaitStatus.Waiting) return 0;
     const at = Math.max(Date.now() + REDRIVE_DELAY_MS, wait.resumeAt?.getTime() ?? 0);
     return this.#reopen(runId, at, EventType.WaitCreated, correlationId);
   }
