@@ -1,7 +1,6 @@
 import { getEventDataPayloadField, slotToEventId, stripEventDataRefs, type Event } from '@workflow/world';
-import { ResolveData } from '../enums.js';
+import { ResolveData, type EventType } from '../enums.js';
 import { decode } from '../lib/codec.js';
-import type { DispatchKind } from '../types.js';
 import type { StoreSchema } from './tables.js';
 
 /** A run, step or hook row: the entity is encoded in `data`. */
@@ -10,11 +9,16 @@ export type RecordRow = Pick<StoreSchema['runs'], 'id' | 'data' | 'created_at'>;
 /** One event. The event's payload field (input, output, result...) is a BLOB beside its metadata. */
 export type EventRow = StoreSchema['events'];
 
-/** A due outbox row joined with its event. */
-export type OutboxRow = Omit<StoreSchema['dispatch_outbox'], 'status'> & {
-  kind: DispatchKind;
-  correlation_id: string | null;
-};
+type OutboxColumns = Omit<StoreSchema['dispatch_outbox'], 'status'>;
+
+/**
+ * A due outbox row joined with its event. Step and wait events always carry a correlation ID,
+ * so their rows have one; starts and hook wakes are identified by run and slot alone.
+ */
+export type OutboxRow = OutboxColumns & (
+  | { kind: EventType.RunCreated | EventType.HookReceived; correlation_id: string | null }
+  | { kind: EventType.StepCreated | EventType.WaitCreated; correlation_id: string }
+);
 
 /** `resolveData` is the SDK's events mode; only `none` changes the result. */
 export function toEvent(row: EventRow, resolveData?: string): Event {

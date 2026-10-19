@@ -1,5 +1,6 @@
 import { DOQB, FetchTypes } from 'workers-qb';
 import { EventType, OutboxStatus } from '../enums.js';
+import { allRows, requireRow } from '../lib/qb.js';
 import type { DispatchKind } from '../types.js';
 import type { OutboxRow } from './rows.js';
 import type { StoreSchema } from './tables.js';
@@ -39,13 +40,12 @@ export class Outbox {
   /** Highest pending slot for this kind, or 0. */
   pendingSlot(runId: string, kind: DispatchKind, correlationId?: string): number {
     const filter = eventFilter(runId, kind, correlationId);
-    const row = this.#qb.raw<{ slot: number }>({
+    return requireRow(this.#qb.raw<{ slot: number }>({
       query: `SELECT COALESCE(MAX(slot), 0) AS slot FROM dispatch_outbox
               WHERE run_id = ? AND status = ? AND ${filter.condition}`,
       args: [runId, OutboxStatus.Pending, ...filter.params],
       fetchType: FetchTypes.ONE,
-    }).execute().results;
-    return row?.slot ?? 0;
+    })).slot;
   }
 
   /** Marks every pending row of this kind up to `upToSlot` published. */
@@ -97,25 +97,25 @@ export class Outbox {
    */
   reopen(runId: string, nextAt: number, kind: DispatchKind, correlationId?: string): number {
     const filter = eventFilter(runId, kind, correlationId);
-    const rows = this.#qb.raw<{ slot: number }>({
+    return allRows(this.#qb.raw<{ slot: number }>({
       query: `UPDATE dispatch_outbox SET status = ?, redrive = redrive + 1, next_at = ?
               WHERE run_id = ? AND status = ? AND ${filter.condition}
               RETURNING slot`,
       args: [OutboxStatus.Pending, nextAt, runId, OutboxStatus.Published, ...filter.params],
       fetchType: FetchTypes.ALL,
-    }).execute().results;
-    return rows?.length ?? 0;
+    })).length;
   }
 
   due(now: number, limit: number): OutboxRow[] {
-    return this.#qb.raw<OutboxRow>({
+    // SAFETY: only step and wait events, which always have a correlation ID, write those kinds.
+    return allRows(this.#qb.raw<OutboxRow>({
       query: `SELECT o.run_id, o.slot, o.queue_name, o.deployment_id, o.attempts, o.redrive, o.next_at,
                      e.kind, e.correlation_id
               FROM dispatch_outbox o JOIN events e ON e.run_id = o.run_id AND e.slot = o.slot
               WHERE o.status = ? AND o.next_at <= ? ORDER BY o.next_at LIMIT ?`,
       args: [OutboxStatus.Pending, now, limit],
       fetchType: FetchTypes.ALL,
-    }).execute().results ?? [];
+    }));
   }
 
   postpone(row: OutboxRow, nextAt: number): void {
@@ -134,12 +134,11 @@ export class Outbox {
   }
 
   nextDueAt(): number | null {
-    const row = this.#qb.raw<{ next_at: number | null }>({
+    return requireRow(this.#qb.raw<{ next_at: number | null }>({
       query: 'SELECT MIN(next_at) AS next_at FROM dispatch_outbox WHERE status = ?',
       args: [OutboxStatus.Pending],
       fetchType: FetchTypes.ONE,
-    }).execute().results;
-    return row?.next_at ?? null;
+    })).next_at;
   }
 
   #publish(runId: string, kind: DispatchKind, conditions: string[], params: number[]): void {
