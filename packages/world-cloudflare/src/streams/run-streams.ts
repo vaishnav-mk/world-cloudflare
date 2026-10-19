@@ -1,8 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DOQB, OrderTypes } from 'workers-qb';
+import { DOQB, FetchTypes, OrderTypes } from 'workers-qb';
 import migrations from '../../drizzle/streams/migrations.js';
 import { STREAM_POLL_MS, STREAM_READ_BATCH } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
+import { allRows, findRow, requireRow } from '../lib/qb.js';
 import { Waiters } from '../lib/waiters.js';
 import type { WorldEnv } from '../types.js';
 import type { StreamsSchema } from './tables.js';
@@ -37,10 +38,7 @@ export class RunStreams extends DurableObject<WorldEnv> {
   writeMulti(name: string, chunks: Uint8Array[]): void {
     if (!chunks.length) return;
     this.ctx.storage.transactionSync(() => {
-      this.#ensureStream(name);
-      const stream = this.#qb.fetchOne({
-        tableName: 'streams', fields: ['tail', 'closed'], where: { conditions: 'name = ?', params: [name] },
-      }).execute().results!;
+      const stream = this.#ensureStream(name);
       if (stream.closed) throw new Error('Stream is closed');
       let position = stream.tail;
       for (const bytes of chunks) {
@@ -59,23 +57,24 @@ export class RunStreams extends DurableObject<WorldEnv> {
   }
 
   list(): string[] {
-    const rows = this.#qb.fetchAll<'streams', 'name'>({ tableName: 'streams', fields: ['name'], orderBy: { name: OrderTypes.ASC } }).execute().results;
-    return (rows ?? []).map(({ name }) => name);
+    const rows = allRows(this.#qb.fetchAll<'streams', 'name'>({ tableName: 'streams', fields: ['name'], orderBy: { name: OrderTypes.ASC } }));
+    return rows.map(({ name }) => name);
   }
 
   info(name: string): StreamInfo {
-    const row = this.#qb.fetchOne({
+    const row = findRow(this.#qb.fetchOne({
       tableName: 'streams', fields: ['tail', 'closed'], where: { conditions: 'name = ?', params: [name] },
-    }).execute().results;
-    return { tailIndex: row?.tail ?? -1, done: Boolean(row?.closed) };
+    }));
+    // A stream nobody has written to yet is empty and open.
+    return row === undefined ? { tailIndex: -1, done: false } : { tailIndex: row.tail, done: Boolean(row.closed) };
   }
 
   chunks(name: string, start: number, limit: number): ChunkPage {
-    const rows = this.#qb.fetchAll<'chunks', 'position' | 'bytes'>({
+    const rows = allRows(this.#qb.fetchAll<'chunks', 'position' | 'bytes'>({
       tableName: 'chunks', fields: ['position', 'bytes'],
       where: { conditions: ['name = ?', 'position >= ?'], params: [name, start] },
       orderBy: { position: OrderTypes.ASC }, limit: limit + 1,
-    }).execute().results ?? [];
+    }));
     const data = rows.slice(0, limit).map(({ position, bytes }) => ({ index: position, data: new Uint8Array(bytes) }));
     const hasMore = rows.length > limit;
     const last = data.at(-1);
@@ -93,7 +92,12 @@ export class RunStreams extends DurableObject<WorldEnv> {
     return this.chunks(name, start, STREAM_READ_BATCH);
   }
 
-  #ensureStream(name: string): void {
-    this.#qb.insert({ tableName: 'streams', data: { name }, onConflict: 'IGNORE' }).execute();
+  /** Creates the stream if needed and returns its state. */
+  #ensureStream(name: string): { tail: number; closed: number } {
+    return requireRow(this.#qb.raw<{ tail: number; closed: number }>({
+      query: 'INSERT INTO streams (name) VALUES (?) ON CONFLICT(name) DO UPDATE SET name = excluded.name RETURNING tail, closed',
+      args: [name],
+      fetchType: FetchTypes.ONE,
+    }));
   }
 }

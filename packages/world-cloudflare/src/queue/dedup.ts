@@ -1,5 +1,6 @@
 import { DOQB } from 'workers-qb';
 import { ClaimStatus } from '../enums.js';
+import { findRow } from '../lib/qb.js';
 import type { QueueSchema } from './tables.js';
 
 /** A message as the shard will enqueue it. */
@@ -29,10 +30,10 @@ export class DedupTable {
 
   /** Records a new key, or returns what an earlier claim of it stored. */
   claim(key: string, message: OutgoingMessage, payloadDigest: string): Claim {
-    const existing = this.#qb.fetchOne({
+    const existing = findRow(this.#qb.fetchOne({
       tableName: 'queue_dedup', where: { conditions: 'key = ?', params: [key] },
-    }).execute().results;
-    if (!existing) {
+    }));
+    if (existing === undefined) {
       this.#qb.insert({
         tableName: 'queue_dedup',
         data: {
