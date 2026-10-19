@@ -1,13 +1,18 @@
 {
   "name": "@workflow/world-cloudflare",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Workflow SDK World on Cloudflare Durable Objects",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./remote": {
+      "types": "./src/remote/client.ts",
+      "default": "./dist/remote/client.js"
+    }
   },
   "scripts": {
+    "build": "tsc -p tsconfig.remote.json",
     "db:generate": "drizzle-kit generate --config drizzle/store.config.ts && drizzle-kit generate --config drizzle/queue.config.ts && drizzle-kit generate --config drizzle/streams.config.ts"
   },
   "dependencies": {
