@@ -7,7 +7,7 @@ import { createHook, getWritable, sleep } from 'workflow';
  */
 
 const MAX_BYTES = 16 * 1024 * 1024;
-const MAX_COUNT = 2_000;
+const MAX_COUNT = 30_000;
 const MAX_MEGA_ITERATIONS = 20_000;
 const MAX_SLEEP_HOURS = 24 * 400;
 
