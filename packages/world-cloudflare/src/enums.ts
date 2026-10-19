@@ -83,3 +83,17 @@ export enum ClaimStatus {
   /** Already accepted: the first message wins. */
   Accepted = 'accepted',
 }
+
+/** What an event changes besides its run. Each kind carries exactly the entities it writes. */
+export enum ChangeKind {
+  /** Only the run changes, if anything. */
+  Run = 'run',
+  Step = 'step',
+  /** A lazy `step_started` creates and starts its step in one write. */
+  LazyStepStart = 'lazy-step-start',
+  HookCreated = 'hook-created',
+  /** Another run holds the token: journal `hook_conflict` instead. */
+  HookConflict = 'hook-conflict',
+  HookDisposed = 'hook-disposed',
+  Wait = 'wait',
+}

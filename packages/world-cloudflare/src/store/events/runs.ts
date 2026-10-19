@@ -1,4 +1,4 @@
-import { EntityConflictError, RunExpiredError, WorkflowRunNotFoundError } from '@workflow/errors';
+import { EntityConflictError, RunExpiredError } from '@workflow/errors';
 import {
   applyAttributeChanges, isTerminalWorkflowRunStatus, validateAttributeChanges, validateAttributeEventDataSize,
   type AnyEventRequest, type EventResult, type WorkflowRun,
@@ -57,11 +57,6 @@ function newRun(tx: Tx, fields: NewRunFields): WorkflowRun {
   };
 }
 
-export function requireRun(run: WorkflowRun | undefined, runId: string): WorkflowRun {
-  if (!run) throw new WorkflowRunNotFoundError(runId);
-  return run;
-}
-
 /**
  * Whether the run accepts this event. Returns a result for an event that is already applied,
  * throws for one the run rejects, and returns undefined to proceed.
@@ -84,7 +79,7 @@ export function checkRunAccepts(db: Db, run: WorkflowRun, data: AnyEventRequest)
     case EventType.StepFailed:
     case EventType.StepRetrying:
       // A step that was already running may still finish after cancellation.
-      if (db.step(run.runId, data.correlationId)?.status === StepStatus.Running) return undefined;
+      if (db.findStep(run.runId, data.correlationId)?.status === StepStatus.Running) return undefined;
       break;
   }
   throw new EntityConflictError(`Run ${run.runId} is terminal`);

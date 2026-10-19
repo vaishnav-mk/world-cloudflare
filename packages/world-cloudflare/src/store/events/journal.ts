@@ -3,7 +3,7 @@ import {
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult,
 } from '@workflow/world';
 import { SINCE_CURSOR_LIMIT } from '../../constants.js';
-import { EventType, SortOrder } from '../../enums.js';
+import { ChangeKind, EventType, SortOrder } from '../../enums.js';
 import { encode } from '../../lib/codec.js';
 import type { Db } from '../db.js';
 import { listEvents } from '../pages.js';
@@ -12,7 +12,7 @@ import type { Change, HookConflictEvent } from './types.js';
 
 /** Appends at the run's next dense slot. The event's payload field is stored as a BLOB. */
 export function appendEvent(
-  db: Db, runId: string, data: AnyEventRequest | HookConflictEvent, now: Date, params?: CreateEventParams,
+  db: Db, runId: string, data: AnyEventRequest | HookConflictEvent, now: Date, params: CreateEventParams = {},
 ): Event {
   const field = getEventDataPayloadField(data.eventType);
   const metadata = 'eventData' in data ? { ...data.eventData } as Record<string, unknown> : undefined;
@@ -27,19 +27,20 @@ export function appendEvent(
     kind: data.eventType,
     correlation_id: 'correlationId' in data ? data.correlationId ?? null : null,
     spec_version: data.specVersion ?? mintedSpecVersion(),
-    created_at: (params?.occurredAt ?? now).getTime(),
-    occurred_at: params?.occurredAt?.getTime() ?? null,
-    resume_id: params?.resumeId ?? null,
-    resume_digest: params?.resumePayloadDigest ?? null,
+    created_at: (params.occurredAt ?? now).getTime(),
+    occurred_at: params.occurredAt?.getTime() ?? null,
+    resume_id: params.resumeId ?? null,
+    resume_digest: params.resumePayloadDigest ?? null,
     data: metadata === undefined ? null : encode(metadata),
-    payload: payload instanceof Uint8Array ? new Uint8Array(payload).buffer : null,
+    payload: payload === undefined ? null : new Uint8Array(payload).buffer,
   };
   db.insertEvent(row);
   return toEvent(row);
 }
 
-/** What the log keeps of a request. Data that lives only on the entity is left out. */
-export function journalOf(data: AnyEventRequest, stepCreated: boolean): AnyEventRequest {
+/** What the log keeps of a request. Data that lives only on an entity is left out. */
+export function journalOf(data: AnyEventRequest, change: Change): AnyEventRequest {
+  if (change.kind === ChangeKind.LazyStepStart) return change.journal;
   switch (data.eventType) {
     case EventType.RunCreated: {
       // Dynamic workflow source lives only on the run.
@@ -49,29 +50,21 @@ export function journalOf(data: AnyEventRequest, stepCreated: boolean): AnyEvent
     case EventType.RunStarted:
       // A lazy start's run fields are journaled in the implied run_created.
       return { eventType: EventType.RunStarted, specVersion: data.specVersion };
-    case EventType.StepStarted: {
-      if (!stepCreated) return data;
-      // The implied step_created holds the input.
-      const { input: _input, ...eventData } = data.eventData!;
-      return { ...data, eventData };
-    }
     default:
       return data;
   }
 }
 
 /** The `events.create` result: the event, the entities it touched, and any events the writer missed. */
-export function eventResult(db: Db, event: Event, change: Change, params?: CreateEventParams): EventResult {
+export function eventResult(db: Db, event: Event, change: Change, params: CreateEventParams): EventResult {
+  const reportsRun = event.eventType.startsWith('run_') || event.eventType === EventType.AttrSet;
   const result: EventResult = {
     event,
-    allocated: change.stepCreated ? 2 : 1,
-    ...(event.eventType.startsWith('run_') || event.eventType === EventType.AttrSet ? { run: change.run } : {}),
-    ...(change.step ? { step: change.step } : {}),
-    ...(change.createdHook ? { hook: change.createdHook } : {}),
-    ...(change.wait ? { wait: change.wait } : {}),
-    ...(change.stepCreated ? { stepCreated: change.stepCreated } : {}),
+    allocated: change.kind === ChangeKind.LazyStepStart ? 2 : 1,
+    ...(reportsRun ? { run: change.run } : {}),
+    ...entitiesOf(change),
   };
-  if (params?.sinceCursor) {
+  if (params.sinceCursor) {
     const page = listEvents(db, {
       runId: event.runId, resolveData: params.resolveData,
       pagination: { cursor: params.sinceCursor, sortOrder: SortOrder.Asc, limit: SINCE_CURSOR_LIMIT },
@@ -79,11 +72,28 @@ export function eventResult(db: Db, event: Event, change: Change, params?: Creat
     return { ...result, events: page.data, cursor: page.cursor, hasMore: page.hasMore };
   }
   // A stale writer gets the events it skipped.
-  const seen = params?.eventCount;
+  const seen = params.eventCount;
   const slot = requireEventSlot(event.eventId);
   if (seen !== undefined && Number.isSafeInteger(seen) && seen >= 0 && slot > seen + 1) {
     const missed = db.eventsBetween(event.runId, seen, slot);
-    return { ...result, events: missed.map((row) => toEvent(row, params?.resolveData)), cursor: null, hasMore: false };
+    return { ...result, events: missed.map((row) => toEvent(row, params.resolveData)), cursor: null, hasMore: false };
   }
   return result;
+}
+
+function entitiesOf(change: Change): Pick<EventResult, 'step' | 'hook' | 'wait' | 'stepCreated'> {
+  switch (change.kind) {
+    case ChangeKind.Step:
+      return { step: change.step };
+    case ChangeKind.LazyStepStart:
+      return { step: change.step, stepCreated: true };
+    case ChangeKind.HookCreated:
+      return { hook: change.hook };
+    case ChangeKind.Wait:
+      return { wait: change.wait };
+    case ChangeKind.Run:
+    case ChangeKind.HookConflict:
+    case ChangeKind.HookDisposed:
+      return {};
+  }
 }

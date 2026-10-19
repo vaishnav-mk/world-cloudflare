@@ -1,52 +1,55 @@
 import { EntityConflictError } from '@workflow/errors';
-import type { Step } from '@workflow/world';
-import { EventType, StepStatus } from '../../enums.js';
+import type { Step, WorkflowRun } from '@workflow/world';
+import { ChangeKind, EventType, StepStatus } from '../../enums.js';
 import { unreachable } from '../../lib/unreachable.js';
 import type { EventOf } from '../../types.js';
 import type { Change, StepEvent, Tx } from './types.js';
 
-type StepChange = Pick<Change, 'step' | 'implied' | 'stepCreated'>;
 type StepUpdateEvent = Exclude<StepEvent, EventOf<EventType.StepCreated>>;
+type LazyStartFields = Omit<NonNullable<EventOf<EventType.StepStarted>['eventData']>, 'input'>;
 
 /**
  * Applies a step event. `step_created` makes a pending step. A lazy `step_started` carries the
  * input itself: it creates the step and starts it in one write, implying a `step_created`.
  */
-export function changeStep(tx: Tx, data: StepEvent): StepChange {
+export function changeStep(tx: Tx, run: WorkflowRun, data: StepEvent): Change {
   switch (data.eventType) {
-    case EventType.StepCreated:
-      return { step: createStep(tx, data) };
-    case EventType.StepStarted:
-      if (data.eventData?.input !== undefined) return startLazily(tx, data);
+    case EventType.StepCreated: {
+      const { stepName, input } = data.eventData;
+      return { kind: ChangeKind.Step, run, step: createStep(tx, data.correlationId, stepName, input) };
+    }
+    case EventType.StepStarted: {
+      const { input, ...fields } = data.eventData ?? {};
+      if (input !== undefined) return startLazily(tx, run, data, input, fields);
       break;
+    }
   }
-  return { step: advanceStep(existingStep(tx, data.correlationId), data, tx.now) };
+  return { kind: ChangeKind.Step, run, step: advanceStep(tx.db.getStep(tx.runId, data.correlationId), data, tx.now) };
 }
 
-function startLazily(tx: Tx, data: EventOf<EventType.StepStarted>): StepChange {
-  const step = createStep(tx, data);
-  const implied: EventOf<EventType.StepCreated> = {
-    eventType: EventType.StepCreated, correlationId: step.stepId, specVersion: tx.specVersion,
-    eventData: { stepName: step.stepName, input: step.input! },
-  };
-  return { step: advanceStep(step, data, tx.now), implied, stepCreated: true };
-}
-
-function createStep(tx: Tx, data: EventOf<EventType.StepCreated | EventType.StepStarted>): Step {
-  const id = data.correlationId;
-  if (tx.db.step(tx.runId, id)) throw new EntityConflictError(`Step ${id} already created`);
-  const stepName = data.eventData?.stepName;
+function startLazily(
+  tx: Tx, run: WorkflowRun, data: EventOf<EventType.StepStarted>, input: unknown, { stepName, ...rest }: LazyStartFields,
+): Change {
   if (!stepName) throw new Error('Lazy step_started requires stepName');
+  const step = createStep(tx, data.correlationId, stepName, input);
   return {
-    runId: tx.runId, stepId: id, stepName, status: StepStatus.Pending, input: data.eventData!.input, attempt: 0,
+    kind: ChangeKind.LazyStepStart,
+    run,
+    step: advanceStep(step, data, tx.now),
+    implied: {
+      eventType: EventType.StepCreated, correlationId: step.stepId, specVersion: tx.specVersion,
+      eventData: { stepName, input },
+    },
+    journal: { ...data, eventData: { stepName, ...rest } },
+  };
+}
+
+function createStep(tx: Tx, stepId: string, stepName: string, input: unknown): Step {
+  if (tx.db.findStep(tx.runId, stepId)) throw new EntityConflictError(`Step ${stepId} already created`);
+  return {
+    runId: tx.runId, stepId, stepName, status: StepStatus.Pending, input, attempt: 0,
     specVersion: tx.specVersion, createdAt: tx.now, updatedAt: tx.now,
   };
-}
-
-function existingStep(tx: Tx, id: string): Step {
-  const step = tx.db.step(tx.runId, id);
-  if (!step) throw new Error(`Step ${id} not found`);
-  return step;
 }
 
 function advanceStep(step: Step, data: StepUpdateEvent, now: Date): Step {
