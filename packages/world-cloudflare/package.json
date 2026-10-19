@@ -7,11 +7,19 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "db:generate": "drizzle-kit generate --config drizzle/store.config.ts && drizzle-kit generate --config drizzle/queue.config.ts && drizzle-kit generate --config drizzle/streams.config.ts"
+  },
   "dependencies": {
     "@workflow/errors": "5.0.4",
     "@workflow/world": "5.0.4",
     "devalue": "6.0.3",
+    "drizzle-orm": "0.45.4",
     "durability": "4.1.2",
-    "ulid": "3.0.2"
+    "ulid": "3.0.2",
+    "workers-qb": "1.15.0"
+  },
+  "devDependencies": {
+    "drizzle-kit": "0.31.11"
   }
 }
