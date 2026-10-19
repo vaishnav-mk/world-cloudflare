@@ -6,7 +6,7 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 | --- | --- |
 | `WorldStore` | Every run's events, runs, steps, hooks and waits, plus the dispatch outbox |
 | `QueueShard` | Queue messages, delays, retries and idempotency keys; dead letters go to R2 |
-| `RunStreams` | One per run: that run's streams |
+| `RunStreams` | One per run: that run's streams and its VM snapshot |
 
 Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It is v1 and unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
 
@@ -15,6 +15,7 @@ Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/REA
 - The Workflow SDK built with this repo's [patch](../../patches/workflow-sdk-cloudflare-workers.patch), which adds `workflow build --target cloudflare-workers`.
 - `WORKFLOW_VM=quickjs` and the `nodejs_compat` flag, because workerd has no working `node:vm`.
 - A Wrangler rule that bundles the migration SQL as text: `"rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]`.
+- `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1` to turn on VM snapshots. The World has no encryption keys, so without it the SDK replays each run's whole event log on every invocation. Snapshots hold the run's memory in plaintext, as the store already holds its payloads.
 
 ## Add it to a Worker
 
@@ -65,7 +66,7 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 
 | Export | Use |
 | --- | --- |
-| `createWorld(env?)` | The World; also the default export |
+| `createWorld(env?)` | The World, including VM snapshot storage (`experimental_snapshots`); also the default export |
 | `WorldStore`, `QueueShard`, `RunStreams` | Durable Object classes to re-export from the Worker |
 | `createQueueConsumer(flow)` | The `QueueConsumer` entrypoint class |
 | `createExecutor(flow)` | A retained executor's default export |
@@ -83,4 +84,4 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 - **The Worker side:** mount `handleWorldRpc` at `POST /world/rpc` and keep the token in a secret.
 - **Build it** with `pnpm build`. Unlike the Worker entry, this entry ships as compiled JavaScript (`dist/remote/client.js`), because Node loads it directly.
 
-It reads and writes runs, steps, events, hooks and streams. It cannot receive queue deliveries; workflows still run on Cloudflare.
+It reads and writes runs, steps, events, hooks, streams and VM snapshots. It cannot receive queue deliveries; workflows still run on Cloudflare.

@@ -41,6 +41,16 @@ Every Wrangler config now sets `WORKFLOW_COMPRESSION_CODEC=gzip`, and an end-to-
 - **Fan-out** gets slower faster than linearly.
 - **Event cap.** The SDK stops a run at 25,000 events, about 8,300 steps at three events each, unless `WORKFLOW_MAX_EVENTS` raises it.
 
+## VM snapshots
+
+Without snapshots, every flow invocation replays the run's whole event log inside the QuickJS VM. On a 30,000-step sequential run on staging, the pauses grew with the log: about 9 s at 10,000 events, 34 s at 20,000 and 80 s at 35,000.
+
+The World now implements the SDK's `experimental_snapshots`. When an invocation suspends after processing `WORKFLOW_SNAPSHOT_THRESHOLD` events (1,000 by default) since the last snapshot, the SDK saves the VM's memory. The next invocation restores it and replays only the events after it. The end-to-end test checks that a restored invocation reads only those events. The pauses above were measured before this change; staging has not been measured since.
+
+Each run's snapshot lives in its `RunStreams` object as one envelope of metadata and bytes, split into 1.9 MB parts and written in one transaction. The SDK deletes it when the run finishes. The SDK does not save heaps over 32 MiB, but a compressed snapshot plus its framing can still pass the 32 MiB RPC limit, so it moves between the Worker and the object as a stream. A workerd test round-trips 33 MiB.
+
+Snapshots are stored in plaintext. The SDK only snapshots runs that have an encryption key unless `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1` is set. This World has no keys, so `wrangler.jsonc`, `wrangler.executor.jsonc` and the end-to-end test config set it. A snapshot holds the run's memory, including values the workflow still references, which is the same exposure as the payloads the store already keeps in plaintext. Encrypting both is a follow-up.
+
 ## CPU
 
 | Step work | Time | Result at the 30 s default CPU limit |
@@ -77,6 +87,7 @@ It now writes `{ "$bytes": "<base64>" }`, 1.34 times the payload size, and a 4 M
 | Worker memory | 128 MB per isolate; the SDK's 256 MB QuickJS limit cannot be reached |
 | RPC message | 32 MiB serialized |
 | Workflow replay budget | 240 s (`WORKFLOW_REPLAY_TIMEOUT_MS`) |
+| VM snapshot | Every 1,000 events (`WORKFLOW_SNAPSHOT_THRESHOLD`), heaps up to 32 MiB |
 | SDK deliveries per queue message | 48 |
 | Queue shard retries | 64 attempts, backoff up to 30 s |
 | Run attributes | 64 keys, 8 KiB per write |

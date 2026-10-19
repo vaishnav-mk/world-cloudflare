@@ -91,8 +91,8 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | `createBatch` | ✗ | ✗ | ✗ | |
 | `cancelMany` | ✗ | ✗ | ✗ | |
 | `experimentalSetAttributes` | ✗ | ✗ | ✗ | `attr_set` works |
-| Snapshots (`experimental_snapshots`) | ✗ | ✗ | ✗ | |
-| Encryption and key rotation | ✗ | ✗ | ✗ | Storage and DLQ hold plaintext |
+| Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✗ | In the run's `RunStreams` object, in 1.9 MB parts; stored in plaintext ([limits](limits.md#vm-snapshots)) |
+| Encryption and key rotation | ✗ | ✗ | ✗ | Storage, snapshots and DLQ hold plaintext |
 | Analytics | ✗ | ✗ | ✗ | |
 | `hookRetention`, `hookForceClaim`, `hookResumeDedup` | ✗ | ✗ | ✗ | Not advertised |
 | `inBandFence`, `maxConcurrency`, `invoke` | ✗ | ✗ | ✗ | Not advertised |
