@@ -103,6 +103,7 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Item | Done | Notes |
 | --- | :---: | --- |
 | Installable `createWorld()` package | ✓ | `packages/world-cloudflare`, unpublished |
+| Versioned schema migrations | ✓ | Drizzle Kit, applied by each Durable Object on start; tested over pre-Drizzle tables |
 | Published to npm | ✗ | The `@workflow` scope belongs to Vercel |
 | Listed in `worlds-manifest.json` | ✗ | |
 | SDK patch upstreamed | ✗ | Pinned to one SDK commit |
