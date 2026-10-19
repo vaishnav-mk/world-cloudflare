@@ -15,6 +15,7 @@ import type {
   WorkflowRunWithoutData,
 } from '@workflow/world';
 import { STORE_NAME } from '../constants.js';
+import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
 type AnyRun = WorkflowRun | WorkflowRunWithoutData;
@@ -25,7 +26,7 @@ type WithData = { resolveData?: 'all' };
 /** The World's `Storage`. Every call is an RPC to the store Durable Object. */
 export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE'>): Storage {
   // A stub belongs to one request, so never cache it in the World singleton.
-  const store = () => env.WORLD_STORE.getByName(STORE_NAME);
+  const store = () => transientAsWorldError(env.WORLD_STORE.getByName(STORE_NAME));
 
   function getRun(id: string, params: GetWorkflowRunParams & WithoutData): Promise<WorkflowRunWithoutData>;
   function getRun(id: string, params?: GetWorkflowRunParams & WithData): Promise<WorkflowRun>;

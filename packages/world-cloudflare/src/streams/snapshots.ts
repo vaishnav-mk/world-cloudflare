@@ -1,4 +1,5 @@
 import { decodeSnapshotEnvelope, encodeSnapshotEnvelope, type Storage } from '@workflow/world';
+import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
 /**
@@ -7,7 +8,7 @@ import type { WorldEnv } from '../types.js';
  * travel as streams, because the SDK's 32 MiB snapshot cap plus framing can pass the RPC limit.
  */
 export function createSnapshots(env: Pick<WorldEnv, 'RUN_STREAMS'>): Pick<Required<Storage>, 'experimental_snapshots'> {
-  const streamsOf = (runId: string) => env.RUN_STREAMS.getByName(runId);
+  const streamsOf = (runId: string) => transientAsWorldError(env.RUN_STREAMS.getByName(runId));
   return {
     experimental_snapshots: {
       save: (runId, data, metadata) => {

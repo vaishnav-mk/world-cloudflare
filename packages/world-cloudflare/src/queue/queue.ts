@@ -3,6 +3,7 @@ import { MessageId, QueuePrefix, ValidQueueName, type Queue, type QueuePayload }
 import { QUEUE_SHARD_NAME, STORE_NAME } from '../constants.js';
 import { MessageKind } from '../enums.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
+import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldStore } from '../store/world-store.js';
 import type { WorldEnv } from '../types.js';
 import { executorFor } from './routes.js';
@@ -31,12 +32,12 @@ export function createQueue(env: QueueEnv): Queue {
 
       const key = idempotencyKey ? `${queueName}:${idempotencyKey}` : undefined;
       const encoded = stringify(message);
-      const store = env.WORLD_STORE.getByName(STORE_NAME);
+      const store = transientAsWorldError(env.WORLD_STORE.getByName(STORE_NAME));
       const claim = outboxClaim(message);
       const slot = claim ? await pendingSlot(store, claim) : 0;
       const id = key ? await messageIdFor(key) : crypto.randomUUID();
       const digest = key ? await sha256Hex(encoded) : undefined;
-      const result = await env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME).enqueue(
+      const result = await transientAsWorldError(env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME)).enqueue(
         id, queueName, encoded, Math.ceil(delay * 1000), target, key, digest,
       );
       if (result.fresh && claim && slot) await markPublished(store, claim, slot);

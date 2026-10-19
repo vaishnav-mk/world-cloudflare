@@ -1,5 +1,6 @@
 import type { GetChunksOptions, Streamer } from '@workflow/world';
 import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from '../constants.js';
+import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
 const encoder = new TextEncoder();
@@ -7,7 +8,7 @@ const toBytes = (chunk: string | Uint8Array) => typeof chunk === 'string' ? enco
 
 /** The World's `Streamer`. Each run's streams live in that run's `RunStreams` object. */
 export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS'>): Streamer {
-  const streamsOf = (runId: string) => env.RUN_STREAMS.getByName(runId);
+  const streamsOf = (runId: string) => transientAsWorldError(env.RUN_STREAMS.getByName(runId));
   return {
     streams: {
       write: async (runId, name, chunk) => {
