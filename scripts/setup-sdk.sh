@@ -17,4 +17,5 @@ if ! git -C "$sdk" apply --reverse --check "$patch" 2>/dev/null; then
 fi
 
 (cd "$sdk" && pnpm install --dangerously-allow-all-builds && pnpm exec turbo run build --filter='@workflow/cli...' --filter='workflow...')
-(cd "$root" && pnpm install --dangerously-allow-all-builds && pnpm link "$sdk/packages/workflow" --dangerously-allow-all-builds && pnpm link "$sdk/packages/cli" --dangerously-allow-all-builds && pnpm run build:workflow)
+# The workspace overrides link `workflow` and `@workflow/cli` to the patched checkout.
+(cd "$root" && pnpm install --dangerously-allow-all-builds && pnpm run build:workflow)
