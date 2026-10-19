@@ -2,6 +2,7 @@ import { env as platformEnv } from 'cloudflare:workers';
 import { mintedSpecVersion, type World } from '@workflow/world';
 import { createQueue } from './queue/queue.js';
 import { createStorage } from './store/storage.js';
+import { createSnapshots } from './streams/snapshots.js';
 import { createStreamer } from './streams/streamer.js';
 import type { WorldEnv } from './types.js';
 
@@ -12,5 +13,6 @@ export function createWorld(env: WorldEnv = platformEnv): World {
     ...createStorage(env),
     ...createQueue(env),
     ...createStreamer(env),
+    ...createSnapshots(env),
   };
 }
