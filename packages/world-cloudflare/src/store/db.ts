@@ -1,6 +1,8 @@
-import type { Hook, Step, Wait, WorkflowRun } from '@workflow/world';
+import { HookNotFoundError, WorkflowRunNotFoundError } from '@workflow/errors';
+import { slotToEventId, type Hook, type Step, type Wait, type WorkflowRun } from '@workflow/world';
 import { DOQB, FetchTypes, OrderTypes, Raw } from 'workers-qb';
 import { decode, encode } from '../lib/codec.js';
+import { allRows, findRow, requireRow } from '../lib/qb.js';
 import type { EventRow, RecordRow } from './rows.js';
 import type { StoreSchema } from './tables.js';
 
@@ -9,7 +11,12 @@ export type RecordTable = 'runs' | 'steps' | 'hooks';
 /** Upserts replace the encoded entity and keep the row's identity columns. */
 const replaceData = { data: new Raw('excluded.data') };
 
-/** Typed reads and writes over the store's tables. Callers own transactions. */
+/**
+ * Typed reads and writes over the store's tables. Callers own transactions.
+ *
+ * `get*` lookups throw the contract's not-found error. `find*` lookups return `undefined` and are
+ * only for callers where a missing record is a normal outcome.
+ */
 export class Db {
   readonly #qb: DOQB<StoreSchema>;
 
@@ -17,37 +24,16 @@ export class Db {
     this.#qb = new DOQB<StoreSchema>(sql);
   }
 
-  // Runs, steps, hooks and waits.
+  // Runs.
 
-  run(id: string): WorkflowRun | undefined {
-    const row = this.#qb.fetchOne({ tableName: 'runs', fields: ['data'], where: { conditions: 'id = ?', params: [id] } });
-    return decodeRow(row.execute().results);
+  findRun(id: string): WorkflowRun | undefined {
+    return this.#entity(this.#qb.fetchOne({ tableName: 'runs', fields: ['data'], where: { conditions: 'id = ?', params: [id] } }));
   }
 
-  step(runId: string, stepId: string): Step | undefined {
-    const row = this.#qb.fetchOne({
-      tableName: 'steps', fields: ['data'],
-      where: { conditions: ['run_id = ?', 'id = ?'], params: [runId, stepId] },
-    });
-    return decodeRow(row.execute().results);
-  }
-
-  hook(hookId: string): Hook | undefined {
-    const row = this.#qb.fetchOne({ tableName: 'hooks', fields: ['data'], where: { conditions: 'id = ?', params: [hookId] } });
-    return decodeRow(row.execute().results);
-  }
-
-  hookByToken(token: string): Hook | undefined {
-    const row = this.#qb.fetchOne({ tableName: 'hooks', fields: ['data'], where: { conditions: 'token = ?', params: [token] } });
-    return decodeRow(row.execute().results);
-  }
-
-  wait(runId: string, correlationId: string): Wait | undefined {
-    const row = this.#qb.fetchOne({
-      tableName: 'waits', fields: ['data'],
-      where: { conditions: ['run_id = ?', 'id = ?'], params: [runId, correlationId] },
-    });
-    return decodeRow(row.execute().results);
+  getRun(id: string): WorkflowRun {
+    const run = this.findRun(id);
+    if (run === undefined) throw new WorkflowRunNotFoundError(id);
+    return run;
   }
 
   putRun(run: WorkflowRun): void {
@@ -61,12 +47,48 @@ export class Db {
     }).execute();
   }
 
+  // Steps.
+
+  findStep(runId: string, stepId: string): Step | undefined {
+    return this.#entity(this.#qb.fetchOne({
+      tableName: 'steps', fields: ['data'], where: { conditions: ['run_id = ?', 'id = ?'], params: [runId, stepId] },
+    }));
+  }
+
+  getStep(runId: string, stepId: string): Step {
+    const step = this.findStep(runId, stepId);
+    if (step === undefined) throw new Error(`Step ${stepId} in run ${runId} not found`);
+    return step;
+  }
+
   putStep(step: Step): void {
     this.#qb.insert({
       tableName: 'steps',
       data: { run_id: step.runId, id: step.stepId, data: encode(step), created_at: step.createdAt.getTime() },
       onConflict: { column: ['run_id', 'id'], data: replaceData },
     }).execute();
+  }
+
+  // Hooks.
+
+  findHook(hookId: string): Hook | undefined {
+    return this.#entity(this.#qb.fetchOne({ tableName: 'hooks', fields: ['data'], where: { conditions: 'id = ?', params: [hookId] } }));
+  }
+
+  getHook(hookId: string): Hook {
+    const hook = this.findHook(hookId);
+    if (hook === undefined) throw new HookNotFoundError(hookId);
+    return hook;
+  }
+
+  findHookByToken(token: string): Hook | undefined {
+    return this.#entity(this.#qb.fetchOne({ tableName: 'hooks', fields: ['data'], where: { conditions: 'token = ?', params: [token] } }));
+  }
+
+  getHookByToken(token: string): Hook {
+    const hook = this.findHookByToken(token);
+    if (hook === undefined) throw new HookNotFoundError(token);
+    return hook;
   }
 
   insertHook(hook: Hook): void {
@@ -86,13 +108,27 @@ export class Db {
 
   /** Frees a finished run's hook tokens, except those still inside their retention window. */
   releaseHooks(runId: string, now: Date): void {
-    const rows = this.#qb.fetchAll<'hooks', 'id' | 'data'>({
+    const rows = allRows(this.#qb.fetchAll<'hooks', 'id' | 'data'>({
       tableName: 'hooks', fields: ['id', 'data'], where: { conditions: 'run_id = ?', params: [runId] },
-    }).execute().results ?? [];
+    }));
     for (const row of rows) {
       const retainedUntil = decode<Hook>(row.data).tokenRetentionUntil;
-      if (!retainedUntil || retainedUntil.getTime() <= now.getTime()) this.deleteHook(row.id);
+      if (retainedUntil === undefined || retainedUntil.getTime() <= now.getTime()) this.deleteHook(row.id);
     }
+  }
+
+  // Waits.
+
+  findWait(runId: string, correlationId: string): Wait | undefined {
+    return this.#entity(this.#qb.fetchOne({
+      tableName: 'waits', fields: ['data'], where: { conditions: ['run_id = ?', 'id = ?'], params: [runId, correlationId] },
+    }));
+  }
+
+  getWait(runId: string, correlationId: string): Wait {
+    const wait = this.findWait(runId, correlationId);
+    if (wait === undefined) throw new Error(`Wait ${correlationId} not found`);
+    return wait;
   }
 
   putWait(runId: string, correlationId: string, wait: Wait): void {
@@ -109,16 +145,18 @@ export class Db {
 
   // Events.
 
-  event(runId: string, slot: number): EventRow | undefined {
-    return this.#qb.fetchOne({
+  getEvent(runId: string, slot: number): EventRow {
+    const row = findRow(this.#qb.fetchOne({
       tableName: 'events', where: { conditions: ['run_id = ?', 'slot = ?'], params: [runId, slot] },
-    }).execute().results;
+    }));
+    if (row === undefined) throw new Error(`Event ${slotToEventId(slot)} not found`);
+    return row;
   }
 
-  eventByResumeId(runId: string, resumeId: string): EventRow | undefined {
-    return this.#qb.fetchOne({
+  findEventByResumeId(runId: string, resumeId: string): EventRow | undefined {
+    return findRow(this.#qb.fetchOne({
       tableName: 'events', where: { conditions: ['run_id = ?', 'resume_id = ?'], params: [runId, resumeId] },
-    }).execute().results;
+    }));
   }
 
   /** Events after (or, descending, before) `slot`, optionally for one correlation ID. */
@@ -130,25 +168,24 @@ export class Db {
       conditions.push('correlation_id = ?');
       params.push(correlationId);
     }
-    return this.#qb.fetchAll<'events'>({
+    return allRows(this.#qb.fetchAll<'events'>({
       tableName: 'events', where: { conditions, params },
       orderBy: { slot: descending ? OrderTypes.DESC : OrderTypes.ASC }, limit,
-    }).execute().results ?? [];
+    }));
   }
 
   eventsBetween(runId: string, afterSlot: number, beforeSlot: number): EventRow[] {
-    return this.#qb.fetchAll<'events'>({
+    return allRows(this.#qb.fetchAll<'events'>({
       tableName: 'events',
       where: { conditions: ['run_id = ?', 'slot > ?', 'slot < ?'], params: [runId, afterSlot, beforeSlot] },
       orderBy: { slot: OrderTypes.ASC },
-    }).execute().results ?? [];
+    }));
   }
 
   lastSlot(runId: string): number {
-    const row = this.#qb.raw<{ slot: number }>({
+    return requireRow(this.#qb.raw<{ slot: number }>({
       query: 'SELECT COALESCE(MAX(slot), 0) AS slot FROM events WHERE run_id = ?', args: [runId], fetchType: FetchTypes.ONE,
-    }).execute().results;
-    return row?.slot ?? 0;
+    })).slot;
   }
 
   insertEvent(row: EventRow): void {
@@ -159,13 +196,14 @@ export class Db {
 
   records(table: RecordTable, conditions: string[], params: (string | number)[], descending: boolean, limit: number): RecordRow[] {
     const order = descending ? OrderTypes.DESC : OrderTypes.ASC;
-    return this.#qb.fetchAll<RecordTable, 'id' | 'data' | 'created_at'>({
+    return allRows(this.#qb.fetchAll<RecordTable, 'id' | 'data' | 'created_at'>({
       tableName: table, fields: ['id', 'data', 'created_at'],
       where: { conditions, params }, orderBy: { created_at: order, id: order }, limit,
-    }).execute().results ?? [];
+    }));
   }
-}
 
-function decodeRow<T>(row: { data: string } | undefined): T | undefined {
-  return row ? decode<T>(row.data) : undefined;
+  #entity<T>(query: { execute(): { results?: { data: string } } }): T | undefined {
+    const row = findRow(query);
+    return row === undefined ? undefined : decode<T>(row.data);
+  }
 }
