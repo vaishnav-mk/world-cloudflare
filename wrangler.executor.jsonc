@@ -16,5 +16,6 @@
   ] },
   "r2_buckets": [{ "binding": "DLQ", "bucket_name": "workflow-sdk-dlq" }],
   "services": [{ "binding": "CONSUMER", "service": "workflow-sdk-cloudflare", "entrypoint": "QueueConsumer" }],
+  "limits": { "cpu_ms": 300000 },
   "observability": { "enabled": true }
 }
