@@ -18,7 +18,7 @@ it('creates each object’s tables on first use', async () => {
     expect(tables(state.storage.sql)).toContain('queue_dedup');
   });
   await runInDurableObject(env.RUN_STREAMS.getByName(crypto.randomUUID()), (_streams, state) => {
-    expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['chunks', 'streams']));
+    expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['chunks', 'snapshot', 'snapshot_parts', 'streams']));
   });
 });
 
@@ -26,24 +26,24 @@ it('applies the baselines over tables created before Drizzle, keeping their rows
   const cases = [
     { namespace: env.WORLD_STORE, migrations: storeMigrations,
       seed: `INSERT INTO runs (id, data, created_at, status, workflow_name) VALUES ('kept', 'x', 1, 'pending', 'w')`,
-      read: 'SELECT id FROM runs' },
+      read: 'SELECT id FROM runs', newer: [] },
     { namespace: env.QUEUE_SHARD, migrations: queueMigrations,
       seed: `INSERT INTO queue_dedup (key, id, queue_name, payload_digest, delay_ms) VALUES ('kept', 'm', 'q', 'd', 0)`,
-      read: 'SELECT key AS id FROM queue_dedup' },
+      read: 'SELECT key AS id FROM queue_dedup', newer: [] },
     { namespace: env.RUN_STREAMS, migrations: streamsMigrations,
       seed: `INSERT INTO streams (name) VALUES ('kept')`,
-      read: 'SELECT name AS id FROM streams' },
+      read: 'SELECT name AS id FROM streams', newer: ['snapshot', 'snapshot_parts'] },
   ] as const;
-  for (const { namespace, migrations, seed, read } of cases) {
+  for (const { namespace, migrations, seed, read, newer } of cases) {
     const stub = (namespace as DurableObjectNamespace).getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_object, state) => {
       const sql = state.storage.sql;
       sql.exec(seed);
-      // A pre-Drizzle object has the tables but no migration journal.
-      sql.exec('DROP TABLE __drizzle_migrations');
+      // A pre-Drizzle object has the baseline tables but no migration journal and no later tables.
+      for (const table of ['__drizzle_migrations', ...newer]) sql.exec(`DROP TABLE ${table}`);
       await migrate(drizzle(state.storage), migrations);
       expect(sql.exec(read).toArray()).toEqual([{ id: 'kept' }]);
-      expect(sql.exec('SELECT COUNT(*) AS applied FROM __drizzle_migrations').one()).toEqual({ applied: 1 });
+      expect(sql.exec('SELECT COUNT(*) AS applied FROM __drizzle_migrations').one()).toEqual({ applied: migrations.journal.entries.length });
     });
   }
 });

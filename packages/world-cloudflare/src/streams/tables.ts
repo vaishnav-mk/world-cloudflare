@@ -14,7 +14,20 @@ export const chunks = sqliteTable('chunks', {
   bytes: bytes('bytes').notNull(),
 }, (table) => [primaryKey({ columns: [table.name, table.position] })]);
 
+/** The run's VM snapshot envelope: at most one row, its total size in bytes. */
+export const snapshot = sqliteTable('snapshot', {
+  size: integer('size').notNull(),
+});
+
+/** The envelope split into ordered parts, each under the SQLite value limit. */
+export const snapshotParts = sqliteTable('snapshot_parts', {
+  part: integer('part').primaryKey(),
+  bytes: bytes('bytes').notNull(),
+});
+
 export type StreamsSchema = {
   streams: typeof streams.$inferSelect;
   chunks: typeof chunks.$inferSelect;
+  snapshot: typeof snapshot.$inferSelect;
+  snapshot_parts: typeof snapshotParts.$inferSelect;
 };
