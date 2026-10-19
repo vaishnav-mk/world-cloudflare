@@ -7,6 +7,7 @@ A [Workflow SDK](https://workflow-sdk.dev) v5 World that runs on Cloudflare Work
 | Path | Contents |
 | --- | --- |
 | [`packages/world-cloudflare`](packages/world-cloudflare/README.md) | The World package |
+| [`packages/world-cloudflare/drizzle`](packages/world-cloudflare/drizzle/README.md) | Drizzle migrations, one set per Durable Object |
 | `src/` | Example Worker: HTTP API, queue consumer, retained executor |
 | `workflows/demo.ts` | Sample workflows |
 | `test/` | workerd tests and SDK end-to-end tests |
