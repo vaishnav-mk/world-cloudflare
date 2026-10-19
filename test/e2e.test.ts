@@ -146,3 +146,17 @@ it('starts a v5 run, executes a real step, returns its result, and replays the s
   expect(resumedEvents).toContain('event: run_completed');
   expect(resumedEvents).not.toContain('event: run_created');
 });
+
+it('stores incompressible step output larger than 64 KiB', async () => {
+  const response = await SELF.fetch('https://local/runs', {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'stepOutput', value: 256 * 1024 }),
+  });
+  const { runId } = await response.json() as { runId: string };
+  await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${runId}`, { headers })).json() as { status: string }).status,
+    { interval: 200, timeout: 20_000 }).toBe('completed');
+  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 256 * 1024 });
+  // Binary payloads stream as base64, not as JSON index maps about 12 times their size.
+  const events = await (await SELF.fetch(`https://local/runs/${runId}/events`, { headers })).text();
+  expect(events.length).toBeLessThan(2 * 256 * 1024);
+});
