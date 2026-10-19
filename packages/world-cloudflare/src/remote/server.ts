@@ -32,9 +32,10 @@ export async function handleWorldRpc(request: Request, world: World, token: stri
 
 function invoke(world: World, method: RpcMethod, args: unknown[]): unknown {
   const [scope, name] = method.split('.');
-  // SAFETY: `method` is one of the RpcMethod paths, each naming a World function.
-  const owner = (name === undefined ? world : world[scope as keyof World]) as Record<string, unknown>;
-  const fn = owner[name ?? scope];
+  // SAFETY: `method` is one of the RpcMethod paths, each naming a World function or an optional
+  // group of them, such as `experimental_snapshots`.
+  const owner = (name === undefined ? world : world[scope as keyof World]) as Record<string, unknown> | undefined;
+  const fn = owner?.[name ?? scope];
   if (typeof fn !== 'function') throw new Error(`This World does not implement ${method}`);
   return fn.apply(owner, args);
 }

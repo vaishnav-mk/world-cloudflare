@@ -50,3 +50,14 @@ it('streams bytes through streams.get', async () => {
   const text = await new Response(await remote.streams.get(runId, 'out')).text();
   expect(text).toBe('ab');
 });
+
+it('saves, loads and deletes snapshots with their metadata', async () => {
+  const remote = remoteWorld();
+  const runId = `wrun_${crypto.randomUUID()}`;
+  const metadata = { eventsCursor: 'eid:7', createdAt: new Date(1_700_000_000_000), eventCount: 7, formatVersion: 3 };
+  expect(await remote.experimental_snapshots!.load(runId)).toBeNull();
+  await remote.experimental_snapshots!.save(runId, new Uint8Array([0, 255, 1]), metadata);
+  expect(await remote.experimental_snapshots!.load(runId)).toEqual({ data: new Uint8Array([0, 255, 1]), metadata });
+  await remote.experimental_snapshots!.delete(runId);
+  expect(await world.experimental_snapshots!.load(runId)).toBeNull();
+});

@@ -59,6 +59,11 @@ export function createWorld(options: { url?: string; token?: string } = {}): Wor
       getInfo: call(RpcMethod.StreamsGetInfo),
       get: async (...args: unknown[]) => (await post(RpcMethod.StreamsGet, args)).body,
     },
+    experimental_snapshots: {
+      save: call(RpcMethod.SnapshotsSave),
+      load: call(RpcMethod.SnapshotsLoad),
+      delete: call(RpcMethod.SnapshotsDelete),
+    },
     queue: call(RpcMethod.Queue),
     getDeploymentId: call(RpcMethod.GetDeploymentId),
     createQueueHandler: () => {

@@ -31,6 +31,9 @@ export enum RpcMethod {
   StreamsGetInfo = 'streams.getInfo',
   /** Answered with the stream's bytes as the response body instead of an encoded result. */
   StreamsGet = 'streams.get',
+  SnapshotsSave = 'experimental_snapshots.save',
+  SnapshotsLoad = 'experimental_snapshots.load',
+  SnapshotsDelete = 'experimental_snapshots.delete',
   Queue = 'queue',
   GetDeploymentId = 'getDeploymentId',
 }
