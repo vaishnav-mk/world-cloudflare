@@ -66,6 +66,21 @@ describe('World v5 contract (workerd bindings)', () => {
     );
   });
 
+  it('caps the skipped-event report for a writer far behind at one page', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    const step = (correlationId: string) => ({
+      eventType: 'step_created' as const, correlationId, eventData: { stepName: 'work', input: bytes('argument') },
+    });
+    for (let index = 0; index < 1001; index++) await world.events.create(runId, step(`step-${index}`));
+    // Slots 2 to 1003 were written after the writer's view; it gets the first 1,000 and a cursor.
+    const stale = await world.events.create(runId, step('late'), { eventCount: 1 });
+    expect(stale.events).toHaveLength(1000);
+    expect(stale.events?.[0]?.eventId).toBe(slotToEventId(2));
+    expect(stale.hasMore).toBe(true);
+    expect(stale.cursor).toBe(`eid:${slotToEventId(1001)}`);
+  });
+
   it("treats skip-step-inputs as all except possibly step inputs, unlike none", async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });
