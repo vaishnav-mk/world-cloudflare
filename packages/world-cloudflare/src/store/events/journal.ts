@@ -71,12 +71,16 @@ export function eventResult(db: Db, event: Event, change: Change, params: Create
     });
     return { ...result, events: page.data, cursor: page.cursor, hasMore: page.hasMore };
   }
-  // A stale writer gets the events it skipped.
+  // A stale writer gets the events it skipped, one page at most: a writer far behind would
+  // otherwise get the whole log, past the 32 MiB RPC limit. The SDK re-reads a truncated report.
   const seen = params.eventCount;
   const slot = requireEventSlot(event.eventId);
   if (seen !== undefined && Number.isSafeInteger(seen) && seen >= 0 && slot > seen + 1) {
-    const missed = db.eventsBetween(event.runId, seen, slot);
-    return { ...result, events: missed.map((row) => toEvent(row, params.resolveData)), cursor: null, hasMore: false };
+    const rows = db.eventsBetween(event.runId, seen, slot, SINCE_CURSOR_LIMIT + 1);
+    const events = rows.slice(0, SINCE_CURSOR_LIMIT).map((row) => toEvent(row, params.resolveData));
+    const hasMore = rows.length > SINCE_CURSOR_LIMIT;
+    const last = events.at(-1);
+    return { ...result, events, cursor: hasMore && last ? `eid:${last.eventId}` : null, hasMore };
   }
   return result;
 }

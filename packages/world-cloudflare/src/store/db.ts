@@ -174,11 +174,12 @@ export class Db {
     }));
   }
 
-  eventsBetween(runId: string, afterSlot: number, beforeSlot: number): EventRow[] {
+  eventsBetween(runId: string, afterSlot: number, beforeSlot: number, limit: number): EventRow[] {
     return allRows(this.#qb.fetchAll<'events'>({
       tableName: 'events',
       where: { conditions: ['run_id = ?', 'slot > ?', 'slot < ?'], params: [runId, afterSlot, beforeSlot] },
       orderBy: { slot: OrderTypes.ASC },
+      limit,
     }));
   }
 
