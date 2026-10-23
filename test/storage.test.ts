@@ -82,18 +82,21 @@ describe('v5 event storage in SQLite DO', () => {
     });
     const slot = Number(received.event!.eventId.slice(5));
     const stub = env.WORLD_STORE.getByName(runId);
+    // Earlier tests leave their own dead letters behind, so count only this run's.
+    const deadIds = async () => {
+      const ids = new Set<string>();
+      for (const object of (await env.DLQ.list({ prefix: 'workflow/' })).objects) {
+        const entry = await (await env.DLQ.get(object.key))!.json() as { messageId: string; body: { encoded: string } };
+        if ((parse(entry.body.encoded) as { runId?: unknown }).runId === runId) ids.add(entry.messageId);
+      }
+      return ids.size;
+    };
     await stub.drainOutbox();
-    await expect.poll(async () => (await env.DLQ.list({ prefix: 'workflow/' })).objects.length,
-      { timeout: 5_000 }).toBe(1);
+    await expect.poll(deadIds, { timeout: 5_000 }).toBe(1);
     await expect.poll(() => stub.pendingHookWakeSlot(runId), { timeout: 5_000 }).toBe(slot);
     await new Promise((resolve) => setTimeout(resolve, 10_100));
     await stub.drainOutbox();
-    await expect.poll(async () => (await env.DLQ.list({ prefix: 'workflow/' })).objects.length,
-      { timeout: 5_000 }).toBe(2);
-    const objects = (await env.DLQ.list({ prefix: 'workflow/' })).objects;
-    const messages = await Promise.all(objects.map(async (object) =>
-      (await (await env.DLQ.get(object.key))!.json() as { messageId: string }).messageId));
-    expect(new Set(messages).size).toBe(2);
+    await expect.poll(deadIds, { timeout: 5_000 }).toBe(2);
   }, 20_000);
 
   it('does not republish a hook wake accepted by the SDK queue', async () => {
