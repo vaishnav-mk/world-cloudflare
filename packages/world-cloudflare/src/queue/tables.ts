@@ -12,6 +12,18 @@ export const queueDedup = sqliteTable('queue_dedup', {
   accepted: integer('accepted').notNull().default(0),
 });
 
+/**
+ * Deliveries handed to the consumer and not yet settled. A fresh instance runs nothing, so rows it
+ * finds were cut off by a reset of the previous one.
+ */
+export const inflight = sqliteTable('inflight', {
+  id: text('id').primaryKey(),
+  queue_name: text('queue_name').notNull(),
+  encoded: text('encoded').notNull(),
+  target_deployment: text('target_deployment'),
+});
+
 export type QueueSchema = {
   queue_dedup: typeof queueDedup.$inferSelect;
+  inflight: typeof inflight.$inferSelect;
 };

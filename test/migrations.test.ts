@@ -15,7 +15,7 @@ it('creates each object’s tables on first use', async () => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['dispatch_outbox', 'events', 'hooks', 'runs', 'steps', 'waits']));
   });
   await runInDurableObject(env.QUEUE_SHARD.getByName(crypto.randomUUID()), (_shard, state) => {
-    expect(tables(state.storage.sql)).toContain('queue_dedup');
+    expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['inflight', 'queue_dedup']));
   });
   await runInDurableObject(env.RUN_STREAMS.getByName(crypto.randomUUID()), (_streams, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['chunks', 'snapshot', 'snapshot_parts', 'streams']));
@@ -29,7 +29,7 @@ it('applies the baselines over tables created before Drizzle, keeping their rows
       read: 'SELECT id FROM runs', newer: [] },
     { namespace: env.QUEUE_SHARD, migrations: queueMigrations,
       seed: `INSERT INTO queue_dedup (key, id, queue_name, payload_digest, delay_ms) VALUES ('kept', 'm', 'q', 'd', 0)`,
-      read: 'SELECT key AS id FROM queue_dedup', newer: [] },
+      read: 'SELECT key AS id FROM queue_dedup', newer: ['inflight'] },
     { namespace: env.RUN_STREAMS, migrations: streamsMigrations,
       seed: `INSERT INTO streams (name) VALUES ('kept')`,
       read: 'SELECT name AS id FROM streams', newer: ['snapshot', 'snapshot_parts'] },
