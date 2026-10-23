@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
+import { QueueShard } from '../packages/world-cloudflare/src/queue/queue-shard.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
 
@@ -12,6 +13,27 @@ describe('durability fanout', () => {
     const id = (await queue.queue(queueName, { runId: 'run-1' })).messageId;
     await runDurableObjectAlarm(env.QUEUE_SHARD.getByName('flow'));
     await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);
+  });
+
+  it('settles its in-flight record once the consumer returns', async () => {
+    const id = (await queue.queue(queueName, { runId: 'settled' })).messageId;
+    await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);
+    await expect.poll(() => runInDurableObject(env.QUEUE_SHARD.getByName('flow'), (_shard, state) =>
+      state.storage.sql.exec('SELECT id FROM inflight WHERE id = ?', id).toArray())).toEqual([]);
+  });
+
+  it('redelivers a delivery that a reset cut off', async () => {
+    const before = (await env.SINK.getByName('sink').received()).length;
+    await runInDurableObject(env.QUEUE_SHARD.getByName('orphans'), (_shard, state) => {
+      state.storage.sql.exec(
+        'INSERT INTO inflight (id, queue_name, encoded) VALUES (?, ?, ?)', 'cut-off', queueName, '[{"runId":1},"orphan"]',
+      );
+      // A new instance over the same storage, as after a deploy or a storage reset.
+      new QueueShard(state, env);
+    });
+    await expect.poll(async () => (await env.SINK.getByName('sink').received()).length, { timeout: 5_000 }).toBe(before + 1);
+    expect(await runInDurableObject(env.QUEUE_SHARD.getByName('orphans'), (_shard, state) =>
+      state.storage.sql.exec('SELECT id FROM inflight').toArray())).toEqual([]);
   });
 
   it('deduplicates a repeated enqueue key while delivery is pending', async () => {
