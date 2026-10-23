@@ -16,7 +16,7 @@ Vercel's column is its documented limits.
 | Run creations | 1,000 per second | 26 to 39 per second with one store for every run, lower while the same Worker runs many flows; per-run stores not measured on Workers yet |
 | 1,000 parallel steps | Not documented | 66 to 74 s |
 
-Run creation is the open gap. One store object used to serialize every run's writes; each run now has its own store, but one directory object still takes every run's index updates (about three per run) and hook-token claims.
+Run creation is the open gap. One store object used to serialize every run's writes; each run now has its own store, but one directory object still takes every run's index updates (about three per run) and hook-token claims. Locally the sharded World is slower: a burst of 300 creations at concurrency 30 (`scripts/perf/burst.mjs` against `wrangler dev`) made 84 to 91 runs per second, against 133 to 171 with one store, because local workerd runs every object on one thread.
 
 ## Payloads
 
