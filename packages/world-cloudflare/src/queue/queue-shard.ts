@@ -14,6 +14,9 @@ import { InflightTable } from './inflight.js';
 
 type FanoutMessage = DurabilityFanoutMessage<Envelope>;
 
+/** What `enqueueMany` does with one message: settled already, or sent to the fanout. */
+type Plan = { done: EnqueueResult } | { message: OutgoingMessage; key?: string; fresh: boolean };
+
 /** The run wake a dead-lettered message carried, so the store can reopen its outbox row. */
 type DeadLetter =
   | { kind: MessageKind.Step; runId: string; stepId: string; stepName: string }
@@ -54,40 +57,58 @@ export class QueueShard extends DurableObject<WorldEnv> {
     id: string, queueName: string, encoded: string, delayMs: number,
     targetDeployment?: string, deduplicationKey?: string, payloadDigest?: string,
   ): Promise<{ id: string; fresh: boolean }> {
-    let message: OutgoingMessage = { id, queueName, encoded, delayMs, targetDeployment };
-    let fresh = true;
-    if (deduplicationKey) {
-      if (!payloadDigest) throw new Error('Missing queue payload digest');
+    const [result] = await this.enqueueMany([{ id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest }]);
+    if (result === undefined || 'error' in result) throw new Error(result?.error ?? 'Message was not enqueued');
+    return result;
+  }
+
+  /**
+   * Enqueues messages in one fanout transaction, each with its own outcome. A message whose
+   * deduplication key was accepted before returns that message's ID instead.
+   */
+  async enqueueMany(messages: EnqueueRequest[]): Promise<EnqueueResult[]> {
+    const plans = messages.map((request) => this.#plan(request));
+    const sends = plans.flatMap((plan) => ('message' in plan ? [plan] : []));
+    const ids = new Map<Plan, string>();
+    let failure = 'Message was not enqueued';
+    if (sends.length) {
+      const result = await this.#fanout.enqueue(sends.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })));
+      if (result.success) {
+        for (const [index, send] of sends.entries()) {
+          ids.set(send, result.value[index]);
+          if (send.key) this.#dedup.markAccepted(send.key);
+        }
+      } else {
+        failure = result.error.message;
+      }
+    }
+    return plans.map((plan) => {
+      if ('done' in plan) return plan.done;
+      const id = ids.get(plan);
+      return id === undefined ? { error: failure } : { id, fresh: plan.fresh };
+    });
+  }
+
+  /** Claims a message's deduplication key, deciding whether to send it and as what. */
+  #plan({ id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest }: EnqueueRequest): Plan {
+    const message: OutgoingMessage = { id, queueName, encoded, delayMs, targetDeployment };
+    if (!deduplicationKey) return { message, fresh: true };
+    if (!payloadDigest) return { done: { error: 'Missing queue payload digest' } };
+    try {
       const claim = this.#dedup.claim(deduplicationKey, message, payloadDigest);
       switch (claim.status) {
         case ClaimStatus.Accepted:
-          return { id: claim.id, fresh: false };
+          return { done: { id: claim.id, fresh: false } };
         case ClaimStatus.Replay:
-          message = claim.message;
-          fresh = false;
-          break;
+          return { message: claim.message, key: deduplicationKey, fresh: false };
         case ClaimStatus.New:
-          break;
+          return { message, key: deduplicationKey, fresh: true };
+        default:
+          return unreachable(claim);
       }
+    } catch (error) {
+      return { done: { error: String(error) } };
     }
-    const { id: messageId, ...body } = message;
-    const result = await this.#fanout.enqueue({ id: messageId, body, deduplicationKey });
-    if (!result.success) throw new Error(result.error.message);
-    if (deduplicationKey) this.#dedup.markAccepted(deduplicationKey);
-    return { id: result.value[0], fresh };
-  }
-
-  /** `enqueue` for many messages in one call, each with its own outcome. */
-  async enqueueMany(messages: EnqueueRequest[]): Promise<EnqueueResult[]> {
-    const results: EnqueueResult[] = [];
-    for (const { id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest } of messages) {
-      try {
-        results.push(await this.enqueue(id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest));
-      } catch (error) {
-        results.push({ error: String(error) });
-      }
-    }
-    return results;
   }
 
   alarm(info?: AlarmInvocationInfo) {
