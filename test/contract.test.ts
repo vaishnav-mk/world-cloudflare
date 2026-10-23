@@ -120,7 +120,7 @@ describe('World v5 contract (workerd bindings)', () => {
     expect(stale.cursor).toBe(`eid:${slotToEventId(1001)}`);
   });
 
-  it("treats skip-step-inputs as all except possibly step inputs, unlike none", async () => {
+  it("treats skip-step-inputs as all except step inputs, unlike none", async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });
     await world.events.create(runId, {
@@ -139,7 +139,7 @@ describe('World v5 contract (workerd bindings)', () => {
     );
     const step = skipped.find((event) => event.eventType === 'step_created');
     expect(step?.eventType).toBe('step_created');
-    if (step?.eventType === 'step_created') expect([undefined, bytes('argument')]).toContainEqual(step.eventData?.input);
+    if (step?.eventType === 'step_created') expect(step.eventData).toEqual({ stepName: 'work' });
     expect(none.find((event) => event.eventType === 'run_created')).not.toHaveProperty('eventData.input');
     expect(none.find((event) => event.eventType === 'step_completed')).not.toHaveProperty('eventData.result');
     expect(none.find((event) => event.eventType === 'step_created')).toHaveProperty('eventData.stepName', 'work');

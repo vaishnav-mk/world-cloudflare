@@ -44,6 +44,8 @@ export enum WaitStatus {
 export enum ResolveData {
   None = 'none',
   All = 'all',
+  /** Events only: as `all`, but `step_created` may leave out its input, which replay never reads. */
+  SkipStepInputs = 'skip-step-inputs',
 }
 
 export enum SortOrder {

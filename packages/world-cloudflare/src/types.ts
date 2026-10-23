@@ -64,8 +64,11 @@ export type ExecutorProps = { privateDispatch?: boolean; targetDeployment?: stri
 /** Events whose commit owes a queue message, recorded in the dispatch outbox. */
 export type DispatchKind = EventType.RunCreated | EventType.HookReceived | EventType.StepCreated | EventType.WaitCreated;
 
-/** The SDK passes `resolveData` as a plain string, which an enum parameter would not accept. */
-export type ResolveDataMode = `${ResolveData}`;
+/**
+ * The SDK passes `resolveData` as a plain string, which an enum parameter would not accept. Entity
+ * reads take `none` or `all`; only event reads take `skip-step-inputs`.
+ */
+export type ResolveDataMode = `${ResolveData.None | ResolveData.All}`;
 
 /** A validated event request of the given types. */
 export type EventOf<T extends EventType> = Extract<AnyEventRequest, { eventType: `${T}` }>;

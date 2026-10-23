@@ -1,5 +1,5 @@
 import { getEventDataPayloadField, slotToEventId, stripEventDataRefs, type Event } from '@workflow/world';
-import { ResolveData, type EventType } from '../enums.js';
+import { EventType, ResolveData } from '../enums.js';
 import { decode } from '../lib/codec.js';
 import type { StoreSchema } from './tables.js';
 
@@ -25,7 +25,9 @@ export function toEvent(row: EventRow, resolveData?: string): Event {
   const eventType = row.kind as Event['eventType'];
   const eventData = row.data === null ? undefined : decode<Record<string, unknown>>(row.data);
   const field = getEventDataPayloadField(eventType);
-  if (field && row.payload !== null) {
+  // Replay never reads recorded step inputs, so it skips loading them, from R2 too.
+  const skipped = resolveData === ResolveData.SkipStepInputs && eventType === EventType.StepCreated;
+  if (field && row.payload !== null && !skipped) {
     if (!eventData) throw new Error('Corrupt event: payload without metadata');
     eventData[field] = new Uint8Array(row.payload);
   }
