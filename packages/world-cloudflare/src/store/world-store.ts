@@ -298,8 +298,13 @@ export class WorldStore extends DurableObject<WorldEnv> {
    */
   async #afterWrite(freesTokens: boolean): Promise<void> {
     if (this.#isDirectory) return;
-    if (freesTokens) await this.#push();
-    else this.ctx.waitUntil(this.#push());
+    if (!freesTokens) {
+      this.ctx.waitUntil(this.#push());
+      return;
+    }
+    await this.#push();
+    // A finished run usually owes nothing now, so its store need not wake for the recovery alarm.
+    if (this.#outbox.nextDueAt() === null && this.#directoryOutbox.nextDueAt() === null) await this.ctx.storage.deleteAlarm();
   }
 
   /**

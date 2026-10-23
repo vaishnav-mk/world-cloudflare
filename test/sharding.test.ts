@@ -59,6 +59,8 @@ describe('per-run stores', () => {
     // A finishing write frees hook tokens, so it waits for its push: no polling needed.
     await world.events.create(runId, { eventType: 'run_completed', eventData: { output: bytes('done') } });
     expect(await indexedStatus(name)).toEqual(['completed']);
+    // It owes nothing more, so its store drops the recovery alarm instead of waking for it.
+    expect(await runInDurableObject(env.WORLD_STORE.getByName(runId), (_store, state) => state.storage.getAlarm())).toBeNull();
     const [run, missing] = await world.runs.getMany!([runId, 'wrun_missing']);
     expect(run).toMatchObject({ runId, status: 'completed', output: bytes('done'), attributes: { phase: 'late' } });
     expect(missing).toBeNull();
