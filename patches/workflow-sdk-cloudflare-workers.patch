@@ -1,5 +1,5 @@
 diff --git a/packages/builders/src/base-builder.ts b/packages/builders/src/base-builder.ts
-index 7db06d5..2873398 100644
+index 7db06d5c..28733982 100644
 --- a/packages/builders/src/base-builder.ts
 +++ b/packages/builders/src/base-builder.ts
 @@ -1,5 +1,6 @@
@@ -96,7 +96,7 @@ index 7db06d5..2873398 100644
        });
 diff --git a/packages/builders/src/cloudflare-workers.test.ts b/packages/builders/src/cloudflare-workers.test.ts
 new file mode 100644
-index 0000000..48c1e57
+index 00000000..48c1e575
 --- /dev/null
 +++ b/packages/builders/src/cloudflare-workers.test.ts
 @@ -0,0 +1,66 @@
@@ -167,7 +167,7 @@ index 0000000..48c1e57
 +  }
 +});
 diff --git a/packages/builders/src/types.ts b/packages/builders/src/types.ts
-index de8c423..ebeb006 100644
+index de8c423c..ebeb006c 100644
 --- a/packages/builders/src/types.ts
 +++ b/packages/builders/src/types.ts
 @@ -2,6 +2,7 @@ import type { WorkflowAfterTransformHook } from './swc-esbuild-plugin.js';
@@ -188,7 +188,7 @@ index de8c423..ebeb006 100644
    workflowsBundlePath: string;
    webhookBundlePath: string;
 diff --git a/packages/cli/src/commands/build.ts b/packages/cli/src/commands/build.ts
-index 61c1366..7ba1dc0 100644
+index 61c13663..7ba1dc06 100644
 --- a/packages/cli/src/commands/build.ts
 +++ b/packages/cli/src/commands/build.ts
 @@ -13,6 +13,7 @@ export default class Build extends BaseCommand {
@@ -232,10 +232,18 @@ index 61c1366..7ba1dc0 100644
          const builder = new StandaloneBuilder(config);
          await builder.build();
 diff --git a/packages/core/src/runtime.ts b/packages/core/src/runtime.ts
-index e88087d..93ce658 100644
+index e88087d9..287a8105 100644
 --- a/packages/core/src/runtime.ts
 +++ b/packages/core/src/runtime.ts
-@@ -49,7 +49,7 @@ import { type StepInvocationQueueItem, WorkflowSuspension } from './global.js';
+@@ -37,7 +37,6 @@ import {
+   type WorkflowRun,
+   type World,
+ } from '@workflow/world';
+-import ms from 'ms';
+ import { decodeTime } from 'ulid';
+ import {
+   classifyRunError,
+@@ -49,7 +48,7 @@ import { type StepInvocationQueueItem, WorkflowSuspension } from './global.js';
  import { type Logger, runtimeLogger } from './logger.js';
  import { getStepFunction } from './private.js';
  import { ReplayPayloadCache } from './replay-payload-cache.js';
@@ -244,7 +252,60 @@ index e88087d..93ce658 100644
  import {
    DYNAMIC_WORKFLOWS_ENV,
    getMaxEventsOverride,
-@@ -5651,7 +5651,7 @@ export function workflowEntrypoint(
+@@ -100,6 +99,7 @@ import {
+   stepDispatchIdempotencyKey,
+   withHealthCheck,
+ } from './runtime/helpers.js';
++import { getMaxInlineDurationMs } from './runtime/inline-window.js';
+ import { withRunInputs } from './runtime/invocations.js';
+ import {
+   dispatchRunCompletedHooks,
+@@ -639,44 +639,6 @@ function nextEventLogLoad(log: LoadedEventLog): ReplayEventLog {
+   };
+ }
+ 
+-/**
+- * Maximum inline-execution duration for a single handler invocation.
+- *
+- * Order of precedence:
+- * 1. `WORKFLOW_V2_TIMEOUT_MS` env var
+- * 2. Tiered budget derived from `world.getRuntimeDeadline()`
+- * 3. Default of 2 minutes
+- */
+-async function getMaxInlineDurationMs(
+-  world: World,
+-  invocationStartTime: number
+-): Promise<number> {
+-  const rawEnvOverride = process.env.WORKFLOW_V2_TIMEOUT_MS;
+-  if (rawEnvOverride !== undefined && rawEnvOverride !== '') {
+-    const parsed = Number(rawEnvOverride);
+-    if (Number.isFinite(parsed) && parsed > 0) {
+-      return parsed;
+-    }
+-  }
+-
+-  const runtimeDeadline = await world.getRuntimeDeadline?.();
+-  if (runtimeDeadline !== undefined) {
+-    const deadlineMs = runtimeDeadline.getTime();
+-    if (!Number.isNaN(deadlineMs)) {
+-      const maxDurationMs = Math.floor(deadlineMs - invocationStartTime);
+-      if (maxDurationMs >= ms('25m')) {
+-        return ms('10m');
+-      }
+-
+-      if (maxDurationMs >= ms('10m')) {
+-        return ms('5m');
+-      }
+-    }
+-  }
+-
+-  return ms('2m');
+-}
+-
+ /** The workflow code a delivery replays, and the marker when it is dynamic. */
+ interface ResolvedWorkflowCode {
+   code: string;
+@@ -5651,7 +5613,7 @@ export function workflowEntrypoint(
          kind: spanKind,
          attributes: {
            ...Attribute.WorkflowRouteType('flow'),
@@ -255,7 +316,7 @@ index e88087d..93ce658 100644
            ...Attribute.WorkflowRouteEntrypointAgeMs(
 diff --git a/packages/core/src/runtime/compute-instance.test.ts b/packages/core/src/runtime/compute-instance.test.ts
 new file mode 100644
-index 0000000..f43e4b9
+index 00000000..f43e4b96
 --- /dev/null
 +++ b/packages/core/src/runtime/compute-instance.test.ts
 @@ -0,0 +1,10 @@
@@ -270,7 +331,7 @@ index 0000000..f43e4b9
 +  });
 +});
 diff --git a/packages/core/src/runtime/compute-instance.ts b/packages/core/src/runtime/compute-instance.ts
-index 0c40f16..84a9116 100644
+index 0c40f16e..84a91162 100644
 --- a/packages/core/src/runtime/compute-instance.ts
 +++ b/packages/core/src/runtime/compute-instance.ts
 @@ -1,14 +1,9 @@
@@ -295,8 +356,207 @@ index 0c40f16..84a9116 100644
 +  computeInstanceId ??= `cinst_${ulid()}`;
 +  return computeInstanceId;
 +}
+diff --git a/packages/core/src/runtime/inline-window.ts b/packages/core/src/runtime/inline-window.ts
+new file mode 100644
+index 00000000..00e502c8
+--- /dev/null
++++ b/packages/core/src/runtime/inline-window.ts
+@@ -0,0 +1,40 @@
++import type { World } from '@workflow/world';
++import ms from 'ms';
++
++/**
++ * Maximum inline-execution duration for a single handler invocation.
++ *
++ * Order of precedence:
++ * 1. `WORKFLOW_V2_TIMEOUT_MS` env var
++ * 2. Tiered budget derived from `world.getRuntimeDeadline()`
++ * 3. Default of 2 minutes
++ */
++export async function getMaxInlineDurationMs(
++  world: World,
++  invocationStartTime: number
++): Promise<number> {
++  const rawEnvOverride = process.env.WORKFLOW_V2_TIMEOUT_MS;
++  if (rawEnvOverride !== undefined && rawEnvOverride !== '') {
++    const parsed = Number(rawEnvOverride);
++    if (Number.isFinite(parsed) && parsed > 0) {
++      return parsed;
++    }
++  }
++
++  const runtimeDeadline = await world.getRuntimeDeadline?.();
++  if (runtimeDeadline !== undefined) {
++    const deadlineMs = runtimeDeadline.getTime();
++    if (!Number.isNaN(deadlineMs)) {
++      const maxDurationMs = Math.floor(deadlineMs - invocationStartTime);
++      if (maxDurationMs >= ms('25m')) {
++        return ms('10m');
++      }
++
++      if (maxDurationMs >= ms('10m')) {
++        return ms('5m');
++      }
++    }
++  }
++
++  return ms('2m');
++}
+diff --git a/packages/core/src/runtime/quickjs-entrypoint.ts b/packages/core/src/runtime/quickjs-entrypoint.ts
+index 0b7ac75e..7342c53a 100644
+--- a/packages/core/src/runtime/quickjs-entrypoint.ts
++++ b/packages/core/src/runtime/quickjs-entrypoint.ts
+@@ -70,6 +70,7 @@ import {
+   publishForceClaimVictimWake,
+   republishOwedForceClaimVictimWakes,
+ } from './hook-wake.js';
++import { getMaxInlineDurationMs } from './inline-window.js';
+ import {
+   dispatchRunCompletedHooks,
+   dispatchRunFailedHooks,
+@@ -1029,6 +1030,10 @@ export async function runWorkflowWithQuickJS(params: {
+   const world = await getWorld();
+   const runId = workflowRun.runId;
+   const invocationStart = tick();
++  // The same inline window as the node engine: stop running steps inline after it, so the
++  // invocation suspends (and can snapshot) before the platform cuts it off.
++  const inlineDeadline =
++    Date.now() + (await getMaxInlineDurationMs(world, Date.now()));
+ 
+   // Strip the inline source map comment before evaluating the bundle in
+   // the QuickJS VM. The map is purely host-side metadata for
+@@ -1759,7 +1764,12 @@ export async function runWorkflowWithQuickJS(params: {
+ 
+   try {
+     let iteration = 0;
+-    while (result.suspended && !runGone && !budget.isExhausted()) {
++    while (
++      result.suspended &&
++      !runGone &&
++      !budget.isExhausted() &&
++      Date.now() < inlineDeadline
++    ) {
+       iteration++;
+       // Re-check the event ceiling every turn: the loop appends events on
+       // each continueWithEvents, so a single invocation can otherwise grow
+@@ -2628,9 +2638,9 @@ export async function runWorkflowWithQuickJS(params: {
+       );
+     };
+ 
+-    if (budget.isExhausted()) {
+-      // The loop stopped on the replay budget with progress still
+-      // possible, so continue in a fresh invocation.
++    if (budget.isExhausted() || Date.now() >= inlineDeadline) {
++      // The loop stopped on the replay budget or the inline window with
++      // progress still possible, so continue in a fresh invocation.
+       wfdiag('exit_suspended', { action: 'budget_exhausted_requeue' });
+       await requeueImmediately();
+       return;
+diff --git a/packages/core/src/runtime/quickjs-inline-window.test.ts b/packages/core/src/runtime/quickjs-inline-window.test.ts
+new file mode 100644
+index 00000000..edb10a15
+--- /dev/null
++++ b/packages/core/src/runtime/quickjs-inline-window.test.ts
+@@ -0,0 +1,97 @@
++import {
++  type CreateEventRequest,
++  SPEC_VERSION_CURRENT,
++  type WorkflowRun,
++  type World,
++} from '@workflow/world';
++import { afterEach, expect, it, vi } from 'vitest';
++import { runWorkflowWithQuickJS } from './quickjs-entrypoint.js';
++import { startQuickJSWorkflow } from './quickjs-runtime.js';
++import { executeStep } from './step-executor.js';
++import { setWorld } from './world.js';
++
++vi.mock('@vercel/functions', () => ({ waitUntil: vi.fn() }));
++vi.mock('./get-port-lazy.js', () => ({ getPortLazy: async () => 3000 }));
++vi.mock('./quickjs-runtime.js', () => ({ startQuickJSWorkflow: vi.fn() }));
++vi.mock('./step-executor.js', () => ({ executeStep: vi.fn() }));
++
++afterEach(() => {
++  setWorld(undefined);
++  vi.restoreAllMocks();
++  vi.clearAllMocks();
++  delete process.env.WORKFLOW_V2_TIMEOUT_MS;
++});
++
++const now = new Date('2026-05-19T12:00:00.000Z');
++const workflowRun: WorkflowRun = {
++  runId: 'wrun_quickjs_inline_window',
++  workflowName: 'workflow',
++  status: 'running',
++  input: [],
++  deploymentId: 'dpl_quickjs_inline_window',
++  specVersion: SPEC_VERSION_CURRENT,
++  startedAt: now,
++  createdAt: now,
++  updatedAt: now,
++};
++
++it('requeues instead of running steps inline once the inline window closes', async () => {
++  // Like the node engine, QuickJS stops inlining after the inline window so
++  // a long run of steps suspends cleanly instead of being cut off by the
++  // platform mid-invocation.
++  process.env.WORKFLOW_V2_TIMEOUT_MS = '1';
++  let clock = now.getTime();
++  vi.spyOn(Date, 'now').mockImplementation(() => (clock += 1000));
++
++  const created: CreateEventRequest[] = [];
++  const queued: { payload: any; opts: any }[] = [];
++  setWorld({
++    specVersion: SPEC_VERSION_CURRENT,
++    capabilities: {},
++    events: {
++      list: async () => ({ data: [], cursor: null, hasMore: false }),
++      create: async (_runId: string, request: CreateEventRequest) => {
++        created.push(request);
++        return {
++          event: { ...request, runId: workflowRun.runId, eventId: 'evnt_1' },
++        };
++      },
++    },
++    runs: { get: async () => workflowRun },
++    queue: async (_queueName: string, payload: unknown, opts: unknown) => {
++      queued.push({ payload, opts });
++      return { messageId: null };
++    },
++    getDeploymentId: async () => workflowRun.deploymentId,
++    getEncryptionKeyForRun: async () => undefined,
++  } as unknown as World);
++  vi.mocked(startQuickJSWorkflow).mockImplementation(async () => ({
++    result: {
++      suspended: {
++        pendingOperations: [
++          {
++            type: 'step',
++            correlationId: 'step_inline_window',
++            stepId: 'step//inline//window',
++            input: new Uint8Array([1]),
++            hasCreatedEvent: false,
++          },
++        ],
++      },
++    },
++    continueWithEvents: vi.fn(),
++    dispose: vi.fn(),
++  }));
++
++  await runWorkflowWithQuickJS({
++    workflowCode: '',
++    workflowName: workflowRun.workflowName,
++    workflowRun,
++  });
++
++  expect(executeStep).not.toHaveBeenCalled();
++  expect(created.map((e) => e.eventType)).not.toContain('step_started');
++  const replays = queued.filter((q) => q.payload?.stepId === undefined);
++  expect(replays).toHaveLength(1);
++  expect(replays[0].payload).toMatchObject({ runId: workflowRun.runId });
++});
 diff --git a/packages/core/src/runtime/quickjs-runtime.ts b/packages/core/src/runtime/quickjs-runtime.ts
-index 65d4835..4959eeb 100644
+index 65d48359..4959eebe 100644
 --- a/packages/core/src/runtime/quickjs-runtime.ts
 +++ b/packages/core/src/runtime/quickjs-runtime.ts
 @@ -1140,23 +1140,37 @@ const quickjsAssets = globalSingleton(
@@ -353,7 +613,7 @@ index 65d4835..4959eeb 100644
      // than being stuck with a rejected promise forever.
      quickjsAssets.promise.catch(() => {
 diff --git a/packages/core/src/runtime/step-executor.test.ts b/packages/core/src/runtime/step-executor.test.ts
-index 5344ff1..3c24e08 100644
+index 5344ff10..3c24e082 100644
 --- a/packages/core/src/runtime/step-executor.test.ts
 +++ b/packages/core/src/runtime/step-executor.test.ts
 @@ -14,7 +14,7 @@ import { dehydrateStepArguments, hydrateStepError } from '../serialization.js';
@@ -393,7 +653,7 @@ index 5344ff1..3c24e08 100644
      expect(started?.[2]?.requestId).toBeUndefined();
    });
 diff --git a/packages/core/src/runtime/step-executor.ts b/packages/core/src/runtime/step-executor.ts
-index 746489d..5584b06 100644
+index 746489d4..5584b06b 100644
 --- a/packages/core/src/runtime/step-executor.ts
 +++ b/packages/core/src/runtime/step-executor.ts
 @@ -51,7 +51,7 @@ import {
@@ -415,7 +675,7 @@ index 746489d..5584b06 100644
    };
  
 diff --git a/packages/core/src/runtime/suspension-handler.test.ts b/packages/core/src/runtime/suspension-handler.test.ts
-index c82489c..24ab730 100644
+index c82489cf..24ab7306 100644
 --- a/packages/core/src/runtime/suspension-handler.test.ts
 +++ b/packages/core/src/runtime/suspension-handler.test.ts
 @@ -22,7 +22,7 @@ import {
@@ -437,7 +697,7 @@ index c82489c..24ab730 100644
        // Claims: both inline steps owned, running attempt 1, input attached
        // (batch responses return refs lazily — the body hydrates local bytes).
 diff --git a/packages/core/src/runtime/suspension-handler.ts b/packages/core/src/runtime/suspension-handler.ts
-index f3bcf5b..fde6c2c 100644
+index f3bcf5be..fde6c2c8 100644
 --- a/packages/core/src/runtime/suspension-handler.ts
 +++ b/packages/core/src/runtime/suspension-handler.ts
 @@ -43,7 +43,7 @@ import {
@@ -459,7 +719,7 @@ index f3bcf5b..fde6c2c 100644
              })),
              // Per-write request attribution, same as the single path's
 diff --git a/packages/core/src/runtime/world.ts b/packages/core/src/runtime/world.ts
-index ca4ae08..2653b57 100644
+index ca4ae086..2653b57b 100644
 --- a/packages/core/src/runtime/world.ts
 +++ b/packages/core/src/runtime/world.ts
 @@ -5,18 +5,10 @@ import {
@@ -503,7 +763,7 @@ index ca4ae08..2653b57 100644
        dataDir: process.env.WORKFLOW_LOCAL_DATA_DIR,
      });
 diff --git a/packages/core/src/telemetry/semantic-conventions.ts b/packages/core/src/telemetry/semantic-conventions.ts
-index e5e0521..57b21a0 100644
+index e5e05215..57b21a09 100644
 --- a/packages/core/src/telemetry/semantic-conventions.ts
 +++ b/packages/core/src/telemetry/semantic-conventions.ts
 @@ -331,7 +331,7 @@ export const WorkflowRouteModuleBodyInitMs = SemanticConvention<number>(
