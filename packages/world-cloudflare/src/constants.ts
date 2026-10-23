@@ -58,6 +58,12 @@ export const MAX_QUEUE_RETRY_DELAY_MS = 30_000;
  * could suspend and save a VM snapshot. Stays under the 15 minute alarm wall time limit.
  */
 export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
+/**
+ * Delivery lanes in the queue shard. Durability runs one batch per target at a time, and a batch
+ * lasts as long as its slowest flow (up to the SDK's inline window), so runs hash onto lanes and
+ * one long run holds up only the runs on its own lane.
+ */
+export const FLOW_LANES = 8;
 
 /** Workers for Platforms script names in `EXECUTOR_ROUTES`. */
 export const EXECUTOR_SCRIPT_PATTERN = /^[a-zA-Z0-9_-]{1,63}$/;
