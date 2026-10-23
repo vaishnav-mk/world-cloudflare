@@ -126,7 +126,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async createEvent(runId: string | null, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
     // No awaits inside: the slot, event, state and outbox row commit together.
     const result = this.ctx.storage.transactionSync(() => applyEvent(this.#db, this.#outbox, runId, request, params));
-    await this.#afterCommit(request, result);
+    await this.#afterCommit([{ request, result }]);
     return result;
   }
 
@@ -151,27 +151,35 @@ export class WorldStore extends DurableObject<WorldEnv> {
       }
     }));
     const results: BatchEventItemResult[] = [];
+    const committed: { request: AnyEventRequest; result: EventResult }[] = [];
     for (const [index, outcome] of outcomes.entries()) {
       if (outcome instanceof Error || outcome.event === undefined) {
         const message = outcome instanceof Error ? outcome.message : 'The run is finished';
         results.push({ status: 409, error: 'conflict', message });
         continue;
       }
-      await this.#afterCommit(events[index].event, outcome);
+      committed.push({ request: events[index].event, result: outcome });
       const { event, run, step, wait } = outcome;
       results.push({ status: 200, event, run, step, wait });
     }
+    await this.#afterCommit(committed);
     return { results };
   }
 
-  /** Wakes event subscribers and makes sure a queue message the event owes gets published. */
-  async #afterCommit(request: AnyEventRequest, result: EventResult): Promise<void> {
-    if (result.event === undefined) return;
-    this.#waiters.wake(result.event.runId);
-    if (!DISPATCH_KINDS.has(request.eventType)) return;
-    const resumeAt = request.eventType === EventType.WaitCreated ? result.wait?.resumeAt : undefined;
-    const at = resumeAt ? Math.max(Date.now() + 1, resumeAt.getTime()) : Date.now() + DISPATCH_RECOVERY_DELAY_MS;
-    await this.#armAlarm(at, 'dispatch recovery');
+  /**
+   * Wakes event subscribers and makes sure the queue messages the events owe get published. One
+   * alarm check covers all of them: each check is a storage round trip.
+   */
+  async #afterCommit(committed: { request: AnyEventRequest; result: EventResult }[]): Promise<void> {
+    let at = Number.POSITIVE_INFINITY;
+    for (const { request, result } of committed) {
+      if (result.event === undefined) continue;
+      this.#waiters.wake(result.event.runId);
+      if (!DISPATCH_KINDS.has(request.eventType)) continue;
+      const resumeAt = request.eventType === EventType.WaitCreated ? result.wait?.resumeAt : undefined;
+      at = Math.min(at, resumeAt ? Math.max(Date.now() + 1, resumeAt.getTime()) : Date.now() + DISPATCH_RECOVERY_DELAY_MS);
+    }
+    if (at !== Number.POSITIVE_INFINITY) await this.#armAlarm(at, 'dispatch recovery');
   }
 
   /** Replays events after `cursor` (a slot), or waits for the next commit. `done` once a finished run is drained. */
