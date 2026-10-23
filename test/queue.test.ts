@@ -1,8 +1,9 @@
 import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
-import { QueueShard } from '../packages/world-cloudflare/src/queue/queue-shard.js';
+import { laneFor, QueueShard } from '../packages/world-cloudflare/src/queue/queue-shard.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
 
@@ -49,6 +50,20 @@ describe('durability fanout', () => {
       { kind: 'done' }, { kind: 'failed', error: 'Flow handler returned 500: boom' }, { kind: 'wake', seconds: 3 },
     ]);
     expect(peak).toBe(3);
+  });
+
+  it('keeps a slow run from holding up a run on another lane', async () => {
+    const sink = env.SINK.getByName('sink');
+    const slowRun = `lane-slow-${crypto.randomUUID()}`;
+    const lane = (runId: string) => laneFor(stringify({ runId }));
+    const fastRun = Array.from({ length: 64 }, (_, index) => `lane-fast-${index}`).find((id) => lane(id) !== lane(slowRun));
+    const slowQueue = `${getQueueTopicPrefix('workflow')}lane_slow` as ValidQueueName;
+    const slow = (await queue.queue(slowQueue, { runId: slowRun })).messageId;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const fast = (await queue.queue(queueName, { runId: fastRun ?? 'unreachable' })).messageId;
+    await expect.poll(() => sink.received(), { timeout: 1_000 }).toContain(fast);
+    expect(await sink.received()).not.toContain(slow);
+    await expect.poll(() => sink.received(), { timeout: 5_000 }).toContain(slow);
   });
 
   it('settles its in-flight record once the consumer returns', async () => {
