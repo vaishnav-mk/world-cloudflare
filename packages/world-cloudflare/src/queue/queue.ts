@@ -1,48 +1,59 @@
 import { parse, stringify } from 'devalue';
-import { MessageId, QueuePrefix, ValidQueueName, type Queue, type QueuePayload } from '@workflow/world';
+import {
+  MessageId, QueuePrefix, ValidQueueName, type Queue, type QueueOptions, type QueuePayload,
+} from '@workflow/world';
 import { QUEUE_SHARD_NAME, STORE_NAME } from '../constants.js';
 import { MessageKind } from '../enums.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
 import { transientAsWorldError } from '../lib/transient.js';
-import type { WorldStore } from '../store/world-store.js';
-import type { WorldEnv } from '../types.js';
+import type { EnqueueRequest, EnqueueResult, OutboxClaim, WorldEnv } from '../types.js';
 import { executorFor } from './routes.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
-type Store = DurableObjectStub<WorldStore>;
-
-/** The outbox row a message settles once the queue accepts it. */
-type OutboxClaim =
-  | { kind: MessageKind.Step; runId: string; stepId: string; stepName: string }
-  | { kind: MessageKind.Start; runId: string }
-  | { kind: MessageKind.HookWake; runId: string }
-  | { kind: MessageKind.WaitContinuation; runId: string; correlationId: string };
+type Ready = { request: EnqueueRequest; claim?: OutboxClaim };
 
 /** The World's `Queue`, backed by the queue shard Durable Object. */
 export function createQueue(env: QueueEnv): Queue {
+  // A batch costs three round trips however many messages it holds: outbox slots, enqueue, settle.
+  const queueBatch: NonNullable<Queue['queueBatch']> = async (queueName, messages) => {
+    ValidQueueName.parse(queueName);
+    const prepared = await Promise.all(messages.map(({ message, opts = {} }) => prepare(env, queueName, message, opts)));
+    const ready = prepared.filter((entry): entry is Ready => !('error' in entry));
+    const store = transientAsWorldError(env.WORLD_STORE.getByName(STORE_NAME));
+    const claims = ready.flatMap(({ claim }) => (claim ? [claim] : []));
+    const slots = claims.length ? await store.pendingDispatchSlots(claims) : [];
+    const slotOf = new Map(claims.map((claim, index) => [claim, slots[index] ?? 0]));
+    const enqueued = ready.length
+      ? await transientAsWorldError(env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME)).enqueueMany(ready.map(({ request }) => request))
+      : [];
+    if (enqueued.length !== ready.length) throw new Error('Incomplete enqueue response');
+    const results = new Map<Ready, EnqueueResult>(ready.map((entry, index) => [entry, enqueued[index]]));
+    const published = ready.flatMap((entry) => {
+      const slot = entry.claim ? slotOf.get(entry.claim) : 0;
+      const result = results.get(entry);
+      return entry.claim && slot && result && 'fresh' in result && result.fresh ? [{ claim: entry.claim, slot }] : [];
+    });
+    if (published.length) await store.markDispatchesPublished(published);
+    return prepared.map((entry) => {
+      if ('error' in entry) return { messageId: null, error: entry.error, retryable: false };
+      const result = results.get(entry);
+      if (result === undefined || 'error' in result) {
+        return { messageId: null, error: result?.error ?? 'Message was not enqueued', retryable: true };
+      }
+      return { messageId: MessageId.parse(result.id) };
+    });
+  };
+
   return {
     getDeploymentId: async () => env.DEPLOYMENT_ID,
 
-    queue: async (queueName, message, { deploymentId: target, delaySeconds: delay = 0, idempotencyKey } = {}) => {
-      ValidQueueName.parse(queueName);
-      if (target && target !== env.DEPLOYMENT_ID && !executorFor(env, target)) {
-        throw new Error(`Deployment ${target} is unavailable`);
-      }
-      if (!Number.isFinite(delay) || delay < 0) throw new RangeError('Invalid queue delay');
-
-      const key = idempotencyKey ? `${queueName}:${idempotencyKey}` : undefined;
-      const encoded = stringify(message);
-      const store = transientAsWorldError(env.WORLD_STORE.getByName(STORE_NAME));
-      const claim = outboxClaim(message);
-      const slot = claim ? await pendingSlot(store, claim) : 0;
-      const id = key ? await messageIdFor(key) : crypto.randomUUID();
-      const digest = key ? await sha256Hex(encoded) : undefined;
-      const result = await transientAsWorldError(env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME)).enqueue(
-        id, queueName, encoded, Math.ceil(delay * 1000), target, key, digest,
-      );
-      if (result.fresh && claim && slot) await markPublished(store, claim, slot);
-      return { messageId: MessageId.parse(result.id) };
+    queue: async (queueName, message, opts) => {
+      const [result] = await queueBatch(queueName, [{ message, opts }]);
+      if (result === undefined || result.error !== undefined) throw new Error(result?.error ?? 'Message was not enqueued');
+      return { messageId: result.messageId };
     },
+
+    queueBatch,
 
     createQueueHandler: (prefix, handler) => async (request) => {
       const queueName = request.headers.get('x-vqs-queue-name');
@@ -71,6 +82,25 @@ export function createQueue(env: QueueEnv): Queue {
   };
 }
 
+/** Validates one message and computes what the shard stores, or why it cannot be queued. */
+async function prepare(
+  env: QueueEnv, queueName: string, message: QueuePayload,
+  { deploymentId: target, delaySeconds: delay = 0, idempotencyKey }: QueueOptions,
+): Promise<Ready | { error: string }> {
+  if (target && target !== env.DEPLOYMENT_ID && !executorFor(env, target)) return { error: `Deployment ${target} is unavailable` };
+  if (!Number.isFinite(delay) || delay < 0) return { error: 'Invalid queue delay' };
+  const key = idempotencyKey ? `${queueName}:${idempotencyKey}` : undefined;
+  const encoded = stringify(message);
+  const [id, digest] = key ? await Promise.all([messageIdFor(key), sha256Hex(encoded)]) : [crypto.randomUUID(), undefined];
+  return {
+    request: {
+      id, queueName, encoded, delayMs: Math.ceil(delay * 1000), targetDeployment: target,
+      deduplicationKey: key, payloadDigest: digest,
+    },
+    claim: outboxClaim(message),
+  };
+}
+
 /** Which outbox row an SDK message would settle, if any. */
 function outboxClaim(message: QueuePayload): OutboxClaim | undefined {
   if ('__healthCheck' in message) return undefined;
@@ -86,28 +116,3 @@ function outboxClaim(message: QueuePayload): OutboxClaim | undefined {
   return undefined;
 }
 
-function pendingSlot(store: Store, claim: OutboxClaim): Promise<number> {
-  switch (claim.kind) {
-    case MessageKind.Step:
-      return store.pendingStepDispatchSlot(claim.runId, claim.stepId, claim.stepName);
-    case MessageKind.Start:
-      return store.pendingRunStartSlot(claim.runId);
-    case MessageKind.HookWake:
-      return store.pendingHookWakeSlot(claim.runId);
-    case MessageKind.WaitContinuation:
-      return store.pendingWaitDispatchSlot(claim.runId, claim.correlationId);
-  }
-}
-
-function markPublished(store: Store, claim: OutboxClaim, slot: number): Promise<void> {
-  switch (claim.kind) {
-    case MessageKind.Step:
-      return store.markStepDispatchPublished(claim.runId, slot);
-    case MessageKind.Start:
-      return store.markRunStartsPublished(claim.runId, slot);
-    case MessageKind.HookWake:
-      return store.markHookWakesPublished(claim.runId, slot);
-    case MessageKind.WaitContinuation:
-      return store.markWaitDispatchPublished(claim.runId, slot);
-  }
-}
