@@ -14,10 +14,11 @@ import {
   QUEUE_SHARD_NAME, REDRIVE_DELAY_MS,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
-import { EventType, RunStatus, WaitStatus } from '../enums.js';
+import { EventType, MessageKind, RunStatus, WaitStatus } from '../enums.js';
 import { toJson } from '../lib/json.js';
+import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
-import type { DispatchKind, ResolveDataMode, WorldEnv } from '../types.js';
+import type { DispatchKind, OutboxClaim, ResolveDataMode, WorldEnv } from '../types.js';
 import { Db } from './db.js';
 import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './dispatch.js';
 import { applyEvent } from './events/apply.js';
@@ -194,6 +195,46 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   // Dispatch outbox, called by the queue client and the queue shard's dead-letter handler.
+
+  /** The outbox slot each queue message would settle, 0 where none is owed, in one call. */
+  async pendingDispatchSlots(claims: OutboxClaim[]): Promise<number[]> {
+    return Promise.all(claims.map((claim) => {
+      switch (claim.kind) {
+        case MessageKind.Step:
+          return this.pendingStepDispatchSlot(claim.runId, claim.stepId, claim.stepName);
+        case MessageKind.Start:
+          return this.pendingRunStartSlot(claim.runId);
+        case MessageKind.HookWake:
+          return this.pendingHookWakeSlot(claim.runId);
+        case MessageKind.WaitContinuation:
+          return this.pendingWaitDispatchSlot(claim.runId, claim.correlationId);
+        default:
+          return unreachable(claim);
+      }
+    }));
+  }
+
+  /** Settles the outbox rows of messages the queue accepted, in one call. */
+  async markDispatchesPublished(published: { claim: OutboxClaim; slot: number }[]): Promise<void> {
+    for (const { claim, slot } of published) {
+      switch (claim.kind) {
+        case MessageKind.Step:
+          await this.markStepDispatchPublished(claim.runId, slot);
+          break;
+        case MessageKind.Start:
+          await this.markRunStartsPublished(claim.runId, slot);
+          break;
+        case MessageKind.HookWake:
+          await this.markHookWakesPublished(claim.runId, slot);
+          break;
+        case MessageKind.WaitContinuation:
+          await this.markWaitDispatchPublished(claim.runId, slot);
+          break;
+        default:
+          unreachable(claim);
+      }
+    }
+  }
 
   async pendingRunStartSlot(runId: string): Promise<number> {
     return this.#outbox.pendingSlot(runId, EventType.RunCreated);

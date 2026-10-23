@@ -8,7 +8,7 @@ import {
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, DeliveryResult, MessageKind } from '../enums.js';
 import { unreachable } from '../lib/unreachable.js';
-import type { Delivery, Envelope, WorldEnv } from '../types.js';
+import type { Delivery, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
 import { InflightTable } from './inflight.js';
 
@@ -75,6 +75,19 @@ export class QueueShard extends DurableObject<WorldEnv> {
     if (!result.success) throw new Error(result.error.message);
     if (deduplicationKey) this.#dedup.markAccepted(deduplicationKey);
     return { id: result.value[0], fresh };
+  }
+
+  /** `enqueue` for many messages in one call, each with its own outcome. */
+  async enqueueMany(messages: EnqueueRequest[]): Promise<EnqueueResult[]> {
+    const results: EnqueueResult[] = [];
+    for (const { id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest } of messages) {
+      try {
+        results.push(await this.enqueue(id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest));
+      } catch (error) {
+        results.push({ error: String(error) });
+      }
+    }
+    return results;
   }
 
   alarm(info?: AlarmInvocationInfo) {

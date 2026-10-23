@@ -1,5 +1,5 @@
 import type { AnyEventRequest } from '@workflow/world';
-import type { DeliveryResult, EventType, ResolveData } from './enums.js';
+import type { DeliveryResult, EventType, MessageKind, ResolveData } from './enums.js';
 import type { QueueShard } from './queue/queue-shard.js';
 import type { WorldStore } from './store/world-store.js';
 import type { RunStreams } from './streams/run-streams.js';
@@ -39,6 +39,22 @@ export type DeliveryOutcome =
 
 /** One message handed to `QueueConsumer.consume`. */
 export type Delivery = { id: string; attempt: number; enqueuedAt: number; body: Envelope };
+
+/** The outbox row a queue message settles once the queue accepts it. */
+export type OutboxClaim =
+  | { kind: MessageKind.Step; runId: string; stepId: string; stepName: string }
+  | { kind: MessageKind.Start; runId: string }
+  | { kind: MessageKind.HookWake; runId: string }
+  | { kind: MessageKind.WaitContinuation; runId: string; correlationId: string };
+
+/** One message for `QueueShard.enqueueMany`, as `enqueue` takes it. */
+export type EnqueueRequest = {
+  id: string; queueName: string; encoded: string; delayMs: number;
+  targetDeployment?: string; deduplicationKey?: string; payloadDigest?: string;
+};
+
+/** `QueueShard.enqueueMany`'s outcome for one message. */
+export type EnqueueResult = { id: string; fresh: boolean } | { error: string };
 
 /** Props the dispatching consumer passes to a retained executor. */
 export type ExecutorProps = { privateDispatch?: boolean; targetDeployment?: string };
