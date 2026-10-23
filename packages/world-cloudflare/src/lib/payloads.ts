@@ -1,5 +1,6 @@
+import { WorkflowWorldError } from '@workflow/errors';
 import type { AnyEventRequest } from '@workflow/world';
-import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../constants.js';
+import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../constants.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -46,8 +47,15 @@ export function createPayloads(bucket: R2Bucket) {
   /** A copy of the request with each binary `eventData` field offloaded: the payload, and dynamic workflow code. */
   async function offloadEvent<T extends AnyEventRequest>(runId: string, request: T, written: Written): Promise<T> {
     if (!('eventData' in request) || request.eventData === undefined) return request;
-    const fields = await Promise.all(Object.entries(request.eventData).map(async ([key, value]: [string, unknown]) =>
-      [key, value instanceof Uint8Array ? await offload(runId, value, written) : value]));
+    const fields = await Promise.all(Object.entries(request.eventData).map(async ([key, value]: [string, unknown]) => {
+      if (!(value instanceof Uint8Array)) return [key, value];
+      if (value.byteLength > PAYLOAD_MAX_BYTES) {
+        throw new WorkflowWorldError(`A ${value.byteLength}-byte ${key} is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`, {
+          status: 413, code: 'PAYLOAD_TOO_LARGE',
+        });
+      }
+      return [key, await offload(runId, value, written)];
+    }));
     // SAFETY: only Uint8Array fields change, and each stays a Uint8Array.
     return { ...request, eventData: Object.fromEntries(fields) } as T;
   }

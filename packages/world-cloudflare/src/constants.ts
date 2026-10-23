@@ -30,6 +30,15 @@ export const MAX_TERMINAL_WAIT_MS = 30_000;
  * The store keeps each payload twice, once as base64, so this stays well under SQLite's 2 MB limit.
  */
 export const PAYLOAD_INLINE_MAX_BYTES = 1_048_576;
+/**
+ * The largest single serialized event payload the World accepts. A workflow reads each value back
+ * into its VM, holding several copies at once; past this size a QuickJS invocation runs out of
+ * Workers' 128 MB memory and retries forever. On staging a 16 MiB step output worked and a 20 MiB
+ * one did not. Step outputs serialize bytes as-is, while a step input carries them as base64, about
+ * 1.33 times their size, so the largest step input is about 13.5 MiB. Rejecting the write fails
+ * the step with an error instead.
+ */
+export const PAYLOAD_MAX_BYTES = 18 * 1_048_576;
 /** Starts a payload ref. No UTF-8 text, SDK payload or SDK stream frame starts with 0xff. */
 export const PAYLOAD_REF_PREFIX = Uint8Array.of(0xff, ...new TextEncoder().encode('r2:'));
 
