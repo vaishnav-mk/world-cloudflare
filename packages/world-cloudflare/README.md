@@ -4,7 +4,7 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 
 | Durable Object | Holds |
 | --- | --- |
-| `WorldStore` | Every run's events, runs, steps, hooks and waits, plus the dispatch outbox |
+| `WorldStore` | One per run, named by its run ID: the run's events, steps, hooks and waits, plus its dispatch outbox. The one named `global` is the directory ([below](#run-stores-and-the-directory)) |
 | `QueueShard` | Queue messages, delays, retries and idempotency keys; dead letters go to R2 |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
@@ -48,9 +48,19 @@ Bindings, as in the repo's `wrangler.jsonc`:
 | `DEPLOYMENT_ID` | A new ID per release |
 | `EXECUTORS`, `EXECUTOR_ROUTES` | Optional retained executors, below |
 
-Add a `* * * * *` cron so `drainOutbox` can recover dispatches whose alarm was lost.
+Add a `* * * * *` cron so `drainOutbox` can recover the directory's dispatches whose alarm was lost, and wake the queue shard.
 
 `WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`. Call `setWorld(createWorld())` instead.
+
+## Run stores and the directory
+
+Each run lives in its own `WorldStore`, named by its run ID, so runs no longer queue behind each other's writes. The one named `global` is the directory: an index copy of every run for `runs.list` and `runs.getMany`, the hook-token registry, and every run created before per-run stores.
+- **Routing.** The World client sends a run-scoped call to the run's store. A store throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the directory and remembers, per isolate, that the run lives there.
+- **Run index.** After a write that changes the run, its store pushes the run row to the directory just after the commit, off the write's path. Until then `runs.list` and `runs.getMany` can show an older status. A failed push stays owed and the store's alarm retries it.
+- **Hook tokens.** Before a `hook_created` write, the run's store claims the token from the directory. A disposal or the run finishing waits for its push, so a freed token is free once that write returns. A claim whose write never commits holds its token until the run finishes.
+- **Recovery.** Each run store drains its own outbox from its alarm, armed before any write that owes a queue message or a push. The cron reaches only the directory.
+
+Retained executors deployed before per-run stores talk only to the directory, so don't route new runs to them.
 
 ## Large payloads
 

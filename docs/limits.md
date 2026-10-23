@@ -13,10 +13,10 @@ Vercel's column is its documented limits.
 | Replay | 240 s budget | A snapshot restore took 81 ms at 30,000 events; pauses between invocations stay at 4 to 8 s |
 | One payload | 50 MB | 16 MiB step output with QuickJS, 20 MiB with the isolate engine; larger payloads are rejected |
 | One stream chunk | 10 MB | 70 MiB locally; not measured on Workers |
-| Run creations | 1,000 per second | 26 to 39 per second, lower while the same Worker runs many flows |
+| Run creations | 1,000 per second | 26 to 39 per second with one store for every run, lower while the same Worker runs many flows; per-run stores not measured on Workers yet |
 | 1,000 parallel steps | Not documented | 66 to 74 s |
 
-Run creation is the open gap: one store object serializes every run's writes. Per-run sharding is on the `store-sharding` branch and not yet proven faster on Workers.
+Run creation is the open gap. One store object used to serialize every run's writes; each run now has its own store, but one directory object still takes every run's index updates (about three per run) and hook-token claims.
 
 ## Payloads
 
