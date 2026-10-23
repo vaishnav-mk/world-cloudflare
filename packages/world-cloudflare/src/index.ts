@@ -1,4 +1,4 @@
-import { STORE_NAME } from './constants.js';
+import { QUEUE_SHARD_NAME, STORE_NAME } from './constants.js';
 import type { WorldEnv } from './types.js';
 import { createWorld } from './world.js';
 
@@ -13,9 +13,16 @@ export { toJson } from './lib/json.js';
 export { handleWorldRpc } from './remote/server.js';
 export type { Delivery, FlowHandler, WorldEnv } from './types.js';
 
-/** Publishes dispatches whose alarm was lost. Call it from a `scheduled` handler. */
-export function drainOutbox(env: Pick<WorldEnv, 'WORLD_STORE'>): Promise<number> {
-  return env.WORLD_STORE.getByName(STORE_NAME).drainOutbox();
+/**
+ * Publishes dispatches whose alarm was lost, and wakes the queue shard so it redelivers what a
+ * reset cut off. Call it from a `scheduled` handler.
+ */
+export async function drainOutbox(env: Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD'>): Promise<number> {
+  const [published] = await Promise.all([
+    env.WORLD_STORE.getByName(STORE_NAME).drainOutbox(),
+    env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME).wake(),
+  ]);
+  return published;
 }
 
 /**
