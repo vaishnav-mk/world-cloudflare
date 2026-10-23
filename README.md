@@ -44,7 +44,7 @@ The example has no authentication. Anyone who can reach it can start runs, and w
 
 ## Deploy
 
-1. Create the R2 dead-letter bucket, then deploy the Worker with your copy of `wrangler.jsonc`.
+1. Create the R2 dead-letter and payload buckets, then deploy the Worker with your copy of `wrangler.jsonc`.
 2. Optional: to keep in-flight runs on the code that started them, give each release its own executor.
    1. Deploy a copy of `wrangler.executor.jsonc` into a Workers for Platforms dispatch namespace, bound as `EXECUTORS`.
    2. Add its deployment ID to `EXECUTOR_ROUTES`, keeping the old entries.
@@ -74,7 +74,8 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 ## Limits
 
 - One Durable Object holds every run and one queue shard delivers every message, so both cap throughput.
-- Step outputs up to about 5.75 MiB, run outputs up to 4 MiB and stream chunks up to 5 MiB fit; larger ones fail. HTTP bodies are capped at 1 MiB. Measurements are in [limits](docs/limits.md).
+- Payloads and stream chunks over 1 MiB go to R2. Locally, step and run payloads up to 100 MiB, stream chunks up to 70 MiB and 40 MB hook payloads work; Workers' 128 MB memory limit will make production lower, and it is not measured yet. HTTP bodies are capped at 100 MB. Measurements are in [limits](docs/limits.md#payload-sizes).
+- R2 payload objects are never deleted, including ones left by writes that failed.
 - A step that exceeds the CPU limit is retried indefinitely and holds up the single queue shard. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
 - No encryption, retention, batching or forced hook claims. Payloads and VM snapshots are stored in plaintext. See [contract parity](docs/contract-parity.md).
 - Steps run at least once, so give their side effects idempotency keys.

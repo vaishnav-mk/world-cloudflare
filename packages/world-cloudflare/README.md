@@ -43,13 +43,26 @@ Bindings, as in the repo's `wrangler.jsonc`:
 | --- | --- |
 | `WORLD_STORE`, `QUEUE_SHARD`, `RUN_STREAMS` | SQLite Durable Objects with those class names |
 | `CONSUMER` | Service binding to this Worker's `QueueConsumer` entrypoint |
-| `DLQ` | R2 bucket |
+| `DLQ` | R2 bucket for dead letters |
+| `PAYLOADS` | R2 bucket for payloads and stream chunks over 1 MiB |
 | `DEPLOYMENT_ID` | A new ID per release |
 | `EXECUTORS`, `EXECUTOR_ROUTES` | Optional retained executors, below |
 
 Add a `* * * * *` cron so `drainOutbox` can recover dispatches whose alarm was lost.
 
 `WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`. Call `setWorld(createWorld())` instead.
+
+## Large payloads
+
+Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 MiB message limit, so the World keeps large values in R2.
+
+- **Writes.** The World client runs in the calling Worker. Before `events.create` or a stream write reaches its Durable Object, it puts each binary `eventData` field (the event's payload, and dynamic workflow code) and each stream chunk over 1 MiB into `PAYLOADS` at `runs/<runId>/<uuid>`. The object stores a ref instead: a 0xff byte, `r2:` and the key. The R2 write finishes before the event commits, so a committed ref always has its object.
+- **Reads.** Every `runs`, `steps`, `events`, `hooks` and `streams` read, and the result of `events.create`, swaps refs back for their bytes from R2 in the same Worker. `resolveData: 'none'` drops payloads before they leave the object, so it reads nothing from R2.
+- **Opaque bytes.** Payloads stay the SDK's serialized, possibly gzipped, bytes. Small bytes that happen to start like a ref go to R2 too, so a stored ref is never user data.
+
+The SDK expects the World to resolve refs. Core asks for payloads with `resolveData` and uses the bytes it gets back as they are (`packages/core/src/runtime/helpers.ts`, where replay calls `events.list`). The Vercel World keeps large payloads behind refs in its backend and asks it to resolve them (`remoteRefBehavior: 'resolve'` in `packages/world-vercel/src/events.ts` and `runs.ts`), and `resolveData: 'none'` drops them (`stripEventDataRefs` in `packages/world/src/events.ts`). Refs never reach the SDK from either World.
+
+Every Worker that runs World client code needs the `PAYLOADS` binding, including retained executors. An executor deployed before this change reads a ref as if it were the payload and fails the run, so don't send hook payloads over 1 MiB to runs pinned to such an executor. [Limits](../../docs/limits.md#payload-sizes) has the measured sizes and the open costs: memory, and objects left behind by failed writes.
 
 ## Retained executors
 
@@ -74,7 +87,7 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 | `nextEvents(env, runId, cursor, types?)` | Long-polls a run's events, for a live subscription |
 | `EventType`, `RunStatus`, `StepStatus`, `WaitStatus`, `ResolveData` | Enums of the SDK's string values |
 | `handleWorldRpc(request, world, token)` | Serves the World over HTTP for the remote client |
-| `toJson(value)` | JSON with bytes as base64, for HTTP responses |
+| `toJson(value)` | JSON with bytes as base64 and payload refs as `{ "$ref": key }`, for HTTP responses |
 
 ## Remote client
 
@@ -84,4 +97,4 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 - **The Worker side:** mount `handleWorldRpc` at `POST /world/rpc` and keep the token in a secret.
 - **Build it** with `pnpm build`. Unlike the Worker entry, this entry ships as compiled JavaScript (`dist/remote/client.js`), because Node loads it directly.
 
-It reads and writes runs, steps, events, hooks, streams and VM snapshots. It cannot receive queue deliveries; workflows still run on Cloudflare.
+It reads and writes runs, steps, events, hooks, streams and VM snapshots. It cannot receive queue deliveries; workflows still run on Cloudflare. Payloads travel as devalue base64 in one request or response, so the Worker's request body limit and memory bound the largest value it can write or read.

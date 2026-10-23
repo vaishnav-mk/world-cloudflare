@@ -21,10 +21,11 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | `events.list` | ✓ | ✓ | ✓ | |
 | `events.get`, `events.listByCorrelationId` | ✓ | ✗ | ✗ | |
 | `hooks.get`, `hooks.getByToken`, `hooks.list` | ✓ | ✓ | ✓ | `list` and `getByToken` remotely |
-| `resolveData: none` and `skip-step-inputs` | ✓ | ✓ | ✗ | |
+| `resolveData: none` and `skip-step-inputs` | ✓ | ✓ | ✗ | `skip-step-inputs` leaves out `step_created` inputs, so replay never loads them from R2 |
 | Dense per-run event slots | ✓ | ✓ | ✓ | |
 | Stale-writer reports (`eventCount`, `sinceCursor`) | ✓ | ✓ | ✗ | |
-| `run_created` with a null run ID | ✓ | ✓ | ✗ | The World mints `wrun_<ulid>` |
+| `run_created` with a null run ID | ✓ | ✓ | ✗ | The World client mints `wrun_<ulid>` |
+| Payloads over 1 MiB, in R2 | ✓ | ✓ | ✗ | Resolved by the World client, as the SDK expects; 105 MiB step outputs locally ([limits](limits.md#payload-sizes)) |
 | Existing runs keep their spec version | ✓ | ✓ | ✗ | |
 
 ## Event semantics
@@ -82,7 +83,7 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | `writeMulti` | ✓ | ✓ | ✗ | Atomic and ordered |
 | `list`, `getInfo`, `getChunks` | ✓ | ✓ | ✗ | |
 | `get`: live reads and negative start | ✓ | ✓ | ✓ | Remote reader connected before the first write |
-| Chunks over 5 MiB | ✗ | ✗ | ✗ | 5 MiB works in production; 6 MiB hits `SQLITE_TOOBIG` ([limits](limits.md)) |
+| Chunks over 1 MiB, in R2 | ✓ | ✓ | ✗ | 70 MiB locally; the SDK's reader rejects larger frames ([limits](limits.md#payload-sizes)) |
 
 ## Optional APIs and capabilities
 
@@ -109,7 +110,8 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Listed in `worlds-manifest.json` | ✗ | |
 | SDK patch upstreamed | ✗ | Pinned to one SDK commit |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World |
-| Retention and cleanup of finished runs | ✗ | Runs, outbox and dedup rows are kept forever |
-| Payloads over about 4–6 MiB | ✗ | No R2 offload; measured in [limits](limits.md) |
+| Retention and cleanup of finished runs | ✗ | Runs, outbox and dedup rows, and R2 payloads, are kept forever |
+| Payloads over 1 MiB | ✓ | In R2; production ceiling not measured ([limits](limits.md#payload-sizes)) |
+| Cleanup of orphaned R2 payloads | ✗ | A write that fails after its payload reached R2 leaves the object behind |
 | Sharding beyond one store and one queue shard | ✗ | |
 | Multi-region placement | ✗ | |
