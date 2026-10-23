@@ -38,36 +38,37 @@ export class DirectoryOutbox {
   }
 
   /**
-   * Pushes what is owed now, with the run row as it is now. A push that failed waits out its
-   * backoff. Returns when to retry after a failure.
+   * Pushes the run row as it is now, and the released hooks, until nothing is owed. A change
+   * committed during a push has a later slot, so it stays owed and goes in the next one. A push
+   * that failed waits out its backoff. Returns when to retry after a failure.
    */
   async push(db: Db, directory: Directory): Promise<number | undefined> {
-    const row = findRow(this.#qb.fetchOne<'directory_outbox', 'run_id' | 'attempts'>({
-      tableName: 'directory_outbox', fields: ['run_id', 'attempts'], where: { conditions: 'next_at <= ?', params: [Date.now()] },
-    }));
-    if (row === undefined) return undefined;
-    const runId = row.run_id;
-    const released = allRows(this.#qb.fetchAll<'directory_releases', 'hook_id'>({
-      tableName: 'directory_releases', fields: ['hook_id'], where: { conditions: 'run_id = ?', params: [runId] },
-    })).map(({ hook_id }) => hook_id);
-    const slot = db.lastSlot(runId);
-    try {
-      await directory.indexRun(db.getRun(runId), slot, released);
-    } catch (error) {
-      console.error('Run index push failed', { runId, error });
-      const retryAt = Date.now() + Math.min(MAX_PUBLISH_BACKOFF_MS, (row.attempts + 1) ** 2 * 1_000);
-      this.#qb.raw({
-        query: 'UPDATE directory_outbox SET attempts = attempts + 1, next_at = ? WHERE run_id = ?', args: [retryAt, runId],
-      }).execute();
-      return retryAt;
+    for (;;) {
+      const row = findRow(this.#qb.fetchOne<'directory_outbox', 'run_id' | 'attempts'>({
+        tableName: 'directory_outbox', fields: ['run_id', 'attempts'], where: { conditions: 'next_at <= ?', params: [Date.now()] },
+      }));
+      if (row === undefined) return undefined;
+      const runId = row.run_id;
+      const released = allRows(this.#qb.fetchAll<'directory_releases', 'hook_id'>({
+        tableName: 'directory_releases', fields: ['hook_id'], where: { conditions: 'run_id = ?', params: [runId] },
+      })).map(({ hook_id }) => hook_id);
+      const slot = db.lastSlot(runId);
+      try {
+        await directory.indexRun(db.getRun(runId), slot, released);
+      } catch (error) {
+        console.error('Run index push failed', { runId, error });
+        const retryAt = Date.now() + Math.min(MAX_PUBLISH_BACKOFF_MS, (row.attempts + 1) ** 2 * 1_000);
+        this.#qb.raw({
+          query: 'UPDATE directory_outbox SET attempts = attempts + 1, next_at = ? WHERE run_id = ?', args: [retryAt, runId],
+        }).execute();
+        return retryAt;
+      }
+      this.#qb.delete({ tableName: 'directory_outbox', where: { conditions: ['run_id = ?', 'slot <= ?'], params: [runId, slot] } })
+        .execute();
+      for (const hookId of released) {
+        this.#qb.delete({ tableName: 'directory_releases', where: { conditions: 'hook_id = ?', params: [hookId] } }).execute();
+      }
     }
-    // A change committed while the push was in flight has a later slot, so it stays owed.
-    this.#qb.delete({ tableName: 'directory_outbox', where: { conditions: ['run_id = ?', 'slot <= ?'], params: [runId, slot] } })
-      .execute();
-    for (const hookId of released) {
-      this.#qb.delete({ tableName: 'directory_releases', where: { conditions: 'hook_id = ?', params: [hookId] } }).execute();
-    }
-    return undefined;
   }
 
   nextDueAt(): number | null {

@@ -33,6 +33,12 @@ import { listEvents, listRecords } from './pages.js';
 import { toEvent } from './rows.js';
 import { hookView, runView, stepView } from './views.js';
 
+/** A write that frees hook tokens: a disposal, or the run finishing. */
+function freesTokens(data: AnyEventRequest, result: EventResult): boolean {
+  if (result.event === undefined) return false;
+  return data.eventType === EventType.HookDisposed || (result.run !== undefined && isTerminalWorkflowRunStatus(result.run.status));
+}
+
 // shortcut: the directory is one object; it takes about three index pushes per run plus hook
 // claims, so partition the index by run ID if it ever bottlenecks.
 /**
@@ -50,6 +56,8 @@ export class WorldStore extends DurableObject<WorldEnv> {
   readonly #directoryOutbox: DirectoryOutbox;
   readonly #waiters = new Waiters();
   readonly #isDirectory: boolean;
+  /** The push to the directory in flight, if any. */
+  #pushing: Promise<void> | undefined;
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
@@ -153,7 +161,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
       return result;
     });
     this.#wake([result]);
-    await this.#pushToDirectory();
+    await this.#afterWrite(freesTokens(data, result));
     return result;
   }
 
@@ -189,18 +197,20 @@ export class WorldStore extends DurableObject<WorldEnv> {
     }));
     const results: BatchEventItemResult[] = [];
     const committed: EventResult[] = [];
-    for (const outcome of outcomes) {
+    let frees = false;
+    for (const [index, outcome] of outcomes.entries()) {
       if (outcome instanceof Error || outcome.event === undefined) {
         const message = outcome instanceof Error ? outcome.message : 'The run is finished';
         results.push({ status: 409, error: 'conflict', message });
         continue;
       }
       committed.push(outcome);
+      frees ||= freesTokens(parsed[index].event, outcome);
       const { event, run, step, wait } = outcome;
       results.push({ status: 200, event, run, step, wait });
     }
     this.#wake(committed);
-    await this.#pushToDirectory();
+    await this.#afterWrite(frees);
     return { results };
   }
 
@@ -282,11 +292,25 @@ export class WorldStore extends DurableObject<WorldEnv> {
     if (!this.#isDirectory) this.#directoryOutbox.owe(data, result);
   }
 
-  /** A failed push stays owed and the alarm retries it with backoff, so a stale index heals itself. */
-  async #pushToDirectory(): Promise<void> {
+  /**
+   * After a run store's write: a write that frees hook tokens waits for its push, so a freed token
+   * is free once the write returns. The run index alone updates in the background, off the write's path.
+   */
+  async #afterWrite(freesTokens: boolean): Promise<void> {
     if (this.#isDirectory) return;
-    const retryAt = await this.#directoryOutbox.push(this.#db, this.#directory());
-    if (retryAt !== undefined) await this.#armAlarm(retryAt, 'run index retry');
+    if (freesTokens) await this.#push();
+    else this.ctx.waitUntil(this.#push());
+  }
+
+  /**
+   * One push at a time; a write that commits during a push rides its loop. A failed push stays
+   * owed and the alarm retries it with backoff, so a stale index heals itself.
+   */
+  #push(): Promise<void> {
+    this.#pushing ??= this.#directoryOutbox.push(this.#db, this.#directory())
+      .then((retryAt) => (retryAt === undefined ? undefined : this.#armAlarm(retryAt, 'run index retry')))
+      .finally(() => { this.#pushing = undefined; });
+    return this.#pushing;
   }
 
   // Directory only, called by run stores.
@@ -443,7 +467,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   async drainOutbox(): Promise<number> {
     const drained = await drainOutbox(this.#db, this.#outbox, this.env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME));
-    await this.#pushToDirectory();
+    if (!this.#isDirectory) await this.#push();
     const due = [this.#outbox.nextDueAt(), this.#directoryOutbox.nextDueAt()].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));
     return drained;

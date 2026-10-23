@@ -20,10 +20,14 @@ const countRows = (stub: DurableObjectStub<WorldStore>, table: string, runId: st
     state.storage.sql.exec<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table} WHERE run_id = ?`, runId).one().count);
 
 const indexedStatus = async (workflowName: string) => (await world.runs.list({ workflowName })).data.map((run) => run.status);
+/** The run index updates just after a commit, in the background. */
+const expectIndexed = (workflowName: string, statuses: string[]) =>
+  expect.poll(() => indexedStatus(workflowName), { timeout: 2_000 }).toEqual(statuses);
 
 describe('per-run stores', () => {
   it('keeps a run in its own store, with only an index copy in the directory', async () => {
-    const runId = await newRun();
+    const name = `shard-${crypto.randomUUID()}`;
+    const runId = await newRun(name);
     await world.events.create(runId, { eventType: 'run_started' });
     await world.events.createBatch!(runId, [
       { event: { eventType: 'step_created', correlationId: 'a', eventData: { stepName: 'work', input: bytes('a') } } },
@@ -31,12 +35,12 @@ describe('per-run stores', () => {
     ]);
     expect(await countRows(env.WORLD_STORE.getByName(runId), 'events', runId)).toBe(4);
     expect(await countRows(env.WORLD_STORE.getByName(runId), 'steps', runId)).toBe(1);
+    await expectIndexed(name, ['running']);
     expect(await countRows(directory(), 'events', runId)).toBe(0);
     expect(await countRows(directory(), 'steps', runId)).toBe(0);
-    // Step events leave the run row alone, so the copy is as of run_started.
     const copy = await runInDurableObject(directory(), (_store, state) =>
-      state.storage.sql.exec('SELECT status, index_slot FROM runs WHERE id = ?', runId).one());
-    expect(copy).toEqual({ status: 'running', index_slot: 2 });
+      state.storage.sql.exec<{ index_slot: number | null }>('SELECT index_slot FROM runs WHERE id = ?', runId).one());
+    expect(copy.index_slot).toBeGreaterThanOrEqual(2);
     // The index copy takes no writes.
     const completed = { eventType: 'run_completed', eventData: { output: bytes('x') } } as const;
     const refused = await Promise.resolve(directory().createEvent(runId, completed)).then(() => null, (error: unknown) => error);
@@ -46,12 +50,13 @@ describe('per-run stores', () => {
   it('lists sharded runs and gets many with their current status', async () => {
     const name = `shard-list-${crypto.randomUUID()}`;
     const runId = await newRun(name);
-    expect(await indexedStatus(name)).toEqual(['pending']);
+    await expectIndexed(name, ['pending']);
     await world.events.create(runId, { eventType: 'run_started' });
-    expect(await indexedStatus(name)).toEqual(['running']);
+    await expectIndexed(name, ['running']);
     await world.events.create(runId, { eventType: 'attr_set', eventData: {
       changes: [{ key: 'phase', value: 'late' }], writer: { type: 'workflow' },
     } });
+    // A finishing write frees hook tokens, so it waits for its push: no polling needed.
     await world.events.create(runId, { eventType: 'run_completed', eventData: { output: bytes('done') } });
     expect(await indexedStatus(name)).toEqual(['completed']);
     const [run, missing] = await world.runs.getMany!([runId, 'wrun_missing']);
@@ -115,7 +120,7 @@ describe('per-run stores', () => {
     expect((await world.events.list({ runId })).data.map((event) => event.eventType))
       .toEqual(['run_created', 'run_started', 'step_created', 'hook_created']);
     expect((await world.steps.get(runId, 'step')).status).toBe('pending');
-    expect(await indexedStatus(name)).toEqual(['running']);
+    await expectIndexed(name, ['running']);
     expect(await countRows(env.WORLD_STORE.getByName(runId), 'events', runId)).toBe(0);
     // Tokens are unique across legacy and sharded runs.
     const sharded = await newRun();
@@ -145,6 +150,7 @@ describe('per-run stores', () => {
   it('heals a stale run index after a failed push', async () => {
     const name = `shard-heal-${crypto.randomUUID()}`;
     const runId = await newRun(name);
+    await expectIndexed(name, ['pending']);
     const stub = env.WORLD_STORE.getByName(runId);
     await runInDurableObject(stub, async (store: WorldStore) => {
       // SAFETY: `env` is the Durable Object's own binding record; the test swaps in a failing directory.
