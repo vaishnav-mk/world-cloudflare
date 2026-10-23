@@ -17,7 +17,7 @@ import type {
 import { ulid } from 'ulid';
 import { STORE_NAME } from '../constants.js';
 import { EventType } from '../enums.js';
-import { createPayloads, type Written } from '../lib/payloads.js';
+import { createPayloads } from '../lib/payloads.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
@@ -89,7 +89,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
     const id = runId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
     if (id === null) throw new Error('runId is required');
     // Payloads reach R2 before the event commits, so a committed ref never points at nothing.
-    const written: Written = new Map();
+    const written = new Map<string, Uint8Array>();
     const result = await store().createEvent(id, await offloadEvent(id, data, written), params);
     // The store returns the union result; narrow it to the request's event type.
     return resolveAll(result, written) as Promise<EventResult<T['eventType']>>;

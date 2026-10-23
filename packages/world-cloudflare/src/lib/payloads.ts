@@ -5,7 +5,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /** Payloads this call wrote to R2, by key, so its result can reuse them instead of reading R2 back. */
-export type Written = Map<string, Uint8Array>;
+type Written = Map<string, Uint8Array>;
 
 /** Whether `bytes` are a ref to a payload in R2 rather than the payload itself. */
 export function isPayloadRef(bytes: Uint8Array): boolean {
