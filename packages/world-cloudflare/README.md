@@ -56,7 +56,7 @@ Add a `* * * * *` cron so `drainOutbox` can recover the directory's dispatches w
 
 Each run lives in its own `WorldStore`, named by its run ID, so runs no longer queue behind each other's writes. The one named `global` is the directory: an index copy of every run for `runs.list` and `runs.getMany`, the hook-token registry, and every run created before per-run stores.
 - **Routing.** The World client sends a run-scoped call to the run's store. A store throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the directory and remembers, per isolate, that the run lives there.
-- **Run index.** After a write that changes the run, its store pushes the run row to the directory just after the commit, off the write's path. Until then `runs.list` and `runs.getMany` can show an older status. A failed push stays owed and the store's alarm retries it.
+- **Run index.** After a write that changes the run, its store pushes the run row to the directory just after the commit, in the background unless the write frees hook tokens (below). Until then `runs.list` and `runs.getMany` can show an older status. A failed push stays owed and the store's alarm retries it.
 - **Hook tokens.** Before a `hook_created` write, the run's store claims the token from the directory. A disposal or the run finishing waits for its push, so a freed token is free once that write returns. A claim whose write never commits holds its token until the run finishes.
 - **Recovery.** Each run store drains its own outbox from its alarm, armed before any write that owes a queue message or a push. The cron reaches only the directory.
 
