@@ -1,5 +1,8 @@
-/** Request bodies above this size are rejected with 413. */
-export const MAX_BODY_BYTES = 1_048_576;
+/**
+ * Request bodies above this size are rejected with 413. It is the 100 MB request body limit of the
+ * Free and Pro Cloudflare plans; Worker memory bounds a usable hook payload well below it.
+ */
+export const MAX_BODY_BYTES = 100_000_000;
 
 /** Thrown by route handlers; the router turns it into a plain-text response. */
 export class HttpError extends Error {

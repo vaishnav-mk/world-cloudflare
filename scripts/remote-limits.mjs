@@ -2,6 +2,7 @@
 //   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-limits.mjs [probe:value ...]
 // With no arguments it runs the default matrix below. Each probe starts one run of a
 // `workflows/limits.ts` workflow and reports how it ended.
+import { randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const base = process.env.WORKFLOW_BASE_URL?.replace(/\/$/, '');
@@ -12,14 +13,14 @@ const MiB = 1024 * KiB;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
 const DEFAULT_MATRIX = [
-  ...[256 * KiB, 512 * KiB, MiB, 1.25 * MiB, 1.5 * MiB, 2 * MiB, 4 * MiB].map((bytes) => ['stepOutput', bytes]),
-  ...[MiB, 1.5 * MiB, 2 * MiB].map((bytes) => ['stepInput', bytes]),
-  ...[512 * KiB, MiB, 1.5 * MiB, 2 * MiB].map((bytes) => ['runOutput', bytes]),
-  ...[512 * KiB, MiB, 1.9 * MiB, 2 * MiB, 4 * MiB, 8 * MiB].map((bytes) => ['streamChunk', bytes]),
+  ...[4 * MiB, 8 * MiB, 20 * MiB, 32 * MiB, 50 * MiB, 64 * MiB].map((bytes) => ['stepOutput', bytes]),
+  ...[8 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['stepInput', bytes]),
+  ...[8 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['runOutput', bytes]),
+  ...[8 * MiB, 10 * MiB, 20 * MiB, 50 * MiB, 70 * MiB].map((bytes) => ['streamChunk', bytes]),
   ...[100, 500, 1000].map((count) => ['sequentialSteps', count]),
   ...[50, 200, 500].map((count) => ['parallelSteps', count]),
   ...[100, 1000, 3000].map((mega) => ['cpuStep', mega]),
-  ...[512 * KiB, 1000 * KiB, 1100 * KiB].map((bytes) => ['hookPayload', bytes]),
+  ...[MiB, 10 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['hookPayload', bytes]),
 ];
 
 const matrix = process.argv.length > 2
@@ -56,12 +57,12 @@ async function eventCount(runId) {
   return text.split('\n').filter((line) => line.startsWith('event: ')).length;
 }
 
-/** Resumes a `hookPayload` run with a JSON string of `bytes` characters. */
+/** Resumes a `hookPayload` run with a JSON string of `bytes` random base64 characters, which compression cannot shrink. */
 async function resumeWithPayload(runId, bytes) {
   for (let attempt = 0; attempt < 30; attempt++) {
     const hooks = JSON.parse((await call(`/runs/${runId}/hooks`)).text).data;
     if (hooks.length) {
-      const body = JSON.stringify('x'.repeat(Math.max(0, bytes - 2)));
+      const body = JSON.stringify(randomBytes(Math.max(0, Math.floor((bytes - 2) * 3 / 4))).toString('base64'));
       return call(`/hooks/${encodeURIComponent(hooks[0].token)}`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body,
       });

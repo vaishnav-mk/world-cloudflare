@@ -24,9 +24,9 @@ export async function getRunStatus({ params }: RouteContext): Promise<Response> 
   return json(await world.runs.get(params.runId));
 }
 
-/** Waits for the run to finish, then returns its decoded result. */
+/** Waits for the run to finish, then returns its decoded result, with binary values as base64. */
 export async function getRunResult({ params }: RouteContext): Promise<Response> {
-  return Response.json({ value: await getRun(params.runId).returnValue });
+  return json({ value: await getRun(params.runId).returnValue });
 }
 
 export async function listRunHooks({ params }: RouteContext): Promise<Response> {
