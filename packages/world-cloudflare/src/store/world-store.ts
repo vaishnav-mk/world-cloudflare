@@ -1,7 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
+import { EntityConflictError } from '@workflow/errors';
 import {
   isTerminalWorkflowRunStatus, slotToEventId,
-  type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type GetWorkflowRunParams, type Hook,
+  type AnyEventRequest, type BatchEventItemResult, type BatchEventRequest, type CreateEventBatchParams,
+  type CreateEventParams, type Event, type EventBatchResult, type EventResult, type GetWorkflowRunParams, type Hook,
   type ListEventsByCorrelationIdParams, type ListEventsParams, type ListHooksParams, type ListWorkflowRunStepsParams,
   type ListWorkflowRunsParams, type PaginatedResponse, type Step, type StepWithoutData, type WorkflowRun,
   type WorkflowRunWithoutData,
@@ -19,6 +21,7 @@ import type { DispatchKind, ResolveDataMode, WorldEnv } from '../types.js';
 import { Db } from './db.js';
 import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './dispatch.js';
 import { applyEvent } from './events/apply.js';
+import { checkBatch } from './events/batch.js';
 import { Outbox } from './outbox.js';
 import { listEvents, listRecords } from './pages.js';
 import { toEvent } from './rows.js';
@@ -122,14 +125,52 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async createEvent(runId: string | null, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
     // No awaits inside: the slot, event, state and outbox row commit together.
     const result = this.ctx.storage.transactionSync(() => applyEvent(this.#db, this.#outbox, runId, request, params));
-    if (result.event === undefined) return result;
-    this.#waiters.wake(result.event.runId);
-    if (DISPATCH_KINDS.has(request.eventType)) {
-      const resumeAt = request.eventType === EventType.WaitCreated ? result.wait?.resumeAt : undefined;
-      const at = resumeAt ? Math.max(Date.now() + 1, resumeAt.getTime()) : Date.now() + DISPATCH_RECOVERY_DELAY_MS;
-      await this.#armAlarm(at, 'dispatch recovery');
-    }
+    await this.#afterCommit(request, result);
     return result;
+  }
+
+  /**
+   * Appends events in order in one transaction. Each event commits or is rejected on its own, with
+   * the outcome its single `createEvent` would have had; a conflict is a 409 item.
+   */
+  async createEventBatch(
+    runId: string, events: BatchEventRequest[], params: CreateEventBatchParams = {},
+  ): Promise<EventBatchResult> {
+    checkBatch(events);
+    const storage = this.ctx.storage;
+    const outcomes = storage.transactionSync(() => events.map(({ event, occurredAt, computeInstanceId }) => {
+      try {
+        // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
+        return storage.transactionSync(() => applyEvent(this.#db, this.#outbox, runId, event, {
+          resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
+        }));
+      } catch (error) {
+        if (EntityConflictError.is(error)) return error;
+        throw error;
+      }
+    }));
+    const results: BatchEventItemResult[] = [];
+    for (const [index, outcome] of outcomes.entries()) {
+      if (outcome instanceof Error || outcome.event === undefined) {
+        const message = outcome instanceof Error ? outcome.message : 'The run is finished';
+        results.push({ status: 409, error: 'conflict', message });
+        continue;
+      }
+      await this.#afterCommit(events[index].event, outcome);
+      const { event, run, step, wait } = outcome;
+      results.push({ status: 200, event, run, step, wait });
+    }
+    return { results };
+  }
+
+  /** Wakes event subscribers and makes sure a queue message the event owes gets published. */
+  async #afterCommit(request: AnyEventRequest, result: EventResult): Promise<void> {
+    if (result.event === undefined) return;
+    this.#waiters.wake(result.event.runId);
+    if (!DISPATCH_KINDS.has(request.eventType)) return;
+    const resumeAt = request.eventType === EventType.WaitCreated ? result.wait?.resumeAt : undefined;
+    const at = resumeAt ? Math.max(Date.now() + 1, resumeAt.getTime()) : Date.now() + DISPATCH_RECOVERY_DELAY_MS;
+    await this.#armAlarm(at, 'dispatch recovery');
   }
 
   /** Replays events after `cursor` (a slot), or waits for the next commit. `done` once a finished run is drained. */

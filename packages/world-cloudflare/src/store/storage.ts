@@ -87,6 +87,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE'>): Storage {
     steps: { get: getStep, list: listSteps },
     events: {
       create,
+      createBatch: (runId, events, params) => store().createEventBatch(runId, events, params),
       get: (runId, eventId, params) => store().getEvent(runId, eventId, params?.resolveData),
       list: (params) => store().listEvents(params),
       listByCorrelationId: (params) => store().listEventsByCorrelationId(params),
