@@ -61,7 +61,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | Runs stay on their deployment's executor | ✓ | ✓ | ✓ | Workers for Platforms, across D, E and F |
 | Dead letters saved to R2 | ✓ | ✓ | ✗ | |
 | Dead-lettered wakes, steps and waits reopened | ✓ | ✓ | ✗ | With a fresh queue key |
-| `queueBatch` | ✗ | ✗ | ✗ | |
+| `queueBatch` | ✓ | ✓ | ✗ | Three round trips per batch and one fanout transaction; per-entry failures ([limits](limits.md#queue-delivery)) |
 
 ## Dispatch recovery
 
@@ -73,6 +73,7 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | `step_created` | ✓ | ✓ | ✗ | Uses the SDK's step queue key |
 | `wait_created` | ✓ | ✓ | ✗ | Published at `resumeAt` |
 | `hook_received` | ✓ | ✓ | ✓ | A failed publish recovered remotely without a second POST |
+| Delivery cut off by a queue shard reset | ✓ | ✓ | ✗ | A fresh shard redelivers it; the cron wakes the shard every minute |
 | Recovery of a step that was already running | ✗ | ✗ | ✗ | The SDK has owner leases; no test proves ours |
 
 ## Streams
@@ -89,10 +90,10 @@ Each event that owes a queue message writes an outbox row in its own transaction
 
 | Contract | Built | Workerd | Remote | Notes |
 | --- | :---: | :---: | :---: | --- |
-| `createBatch` | ✗ | ✗ | ✗ | |
+| `createBatch` | ✓ | ✓ | ✗ | One transaction with a savepoint per event; a conflict is a 409 item. Used by the node and isolate engines, not QuickJS |
 | `cancelMany` | ✗ | ✗ | ✗ | |
 | `experimentalSetAttributes` | ✗ | ✗ | ✗ | `attr_set` works |
-| Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✗ | In the run's `RunStreams` object, in 1.9 MB parts; stored in plaintext ([limits](limits.md#vm-snapshots)) |
+| Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✓ | In the run's `RunStreams` object, in 1.9 MB parts; stored in plaintext ([limits](limits.md#vm-snapshots)) |
 | Encryption and key rotation | ✗ | ✗ | ✗ | Storage, snapshots and DLQ hold plaintext |
 | Analytics | ✗ | ✗ | ✗ | |
 | `hookRetention`, `hookForceClaim`, `hookResumeDedup` | ✗ | ✗ | ✗ | Not advertised |
