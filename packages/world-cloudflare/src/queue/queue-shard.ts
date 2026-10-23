@@ -9,6 +9,7 @@ import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, MessageKind } from '../enums.js';
 import type { Delivery, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
+import { InflightTable } from './inflight.js';
 
 type FanoutMessage = DurabilityFanoutMessage<Envelope>;
 
@@ -22,6 +23,7 @@ type DeadLetter =
 /** Delayed, retried delivery of workflow queue messages to the `CONSUMER` entrypoint. */
 export class QueueShard extends DurableObject<WorldEnv> {
   readonly #dedup = new DedupTable(this.ctx.storage.sql);
+  readonly #inflight = new InflightTable(this.ctx.storage.sql);
   readonly #scheduler = new DurabilityScheduler({ context: this.ctx });
   readonly #fanout = new DurabilityFanout<Envelope>({
     scheduler: this.#scheduler,
@@ -40,7 +42,11 @@ export class QueueShard extends DurableObject<WorldEnv> {
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
     migrateOnStart(ctx, migrations);
+    ctx.blockConcurrencyWhile(() => this.#redeliverOrphans());
   }
+
+  /** Starts the object, so a fresh instance after a reset redelivers what the reset cut off. */
+  wake(): void {}
 
   /** Enqueues a message. With a deduplication key, a repeat returns the first accepted message's ID. */
   async enqueue(
@@ -86,11 +92,27 @@ export class QueueShard extends DurableObject<WorldEnv> {
     }
     if (!due.length) return;
     const deliveries: Delivery[] = due.map(({ id, attempt, enqueuedAt, body }) => ({ id, attempt, enqueuedAt, body }));
-    const timeouts = await this.env.CONSUMER.consume(deliveries);
+    this.#inflight.add(deliveries);
+    const timeouts = await this.env.CONSUMER.consume(deliveries).finally(() => {
+      for (const { id } of deliveries) this.#inflight.remove(id);
+    });
     if (timeouts.length !== due.length) throw new Error('Incomplete queue delivery response');
     // A number is the SDK asking to be woken again after that many seconds.
     for (const [index, timeout] of timeouts.entries()) {
       if (typeof timeout === 'number') await due[index].retry(timeout * 1000);
+    }
+  }
+
+  /**
+   * A fresh instance runs nothing yet, so deliveries still recorded were cut off by a reset (a
+   * deploy, or a storage error) and would otherwise wait out their attempt timeout.
+   */
+  async #redeliverOrphans(): Promise<void> {
+    for (const { id, ...body } of this.#inflight.all()) {
+      // A new ID: the cut-off delivery stays claimed until it times out, and the SDK tolerates the copy.
+      const result = await this.#fanout.enqueue({ id: crypto.randomUUID(), body });
+      if (!result.success) throw new Error(result.error.message);
+      this.#inflight.remove(id);
     }
   }
 
