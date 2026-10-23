@@ -37,6 +37,18 @@ async function startedRun(input = new Uint8Array([1])) {
 }
 
 describe('payloads in R2', () => {
+  it('offloads a large step input written through a batch', async () => {
+    const runId = await startedRun();
+    const input = random(PAYLOAD_INLINE_MAX_BYTES + 1);
+    const { results } = await store.events.createBatch!(runId, [
+      { event: { eventType: 'step_created', correlationId: 'big', eventData: { stepName: 'work', input } } },
+    ]);
+    expect(results[0]?.status).toBe(200);
+    expect(await objects(runId)).toHaveLength(1);
+    expect(isRef((await storedStep(runId)).input)).toBe(true);
+    expect(same((await store.steps.get(runId, 'big')).input, input)).toBe(true);
+  });
+
   it('keeps a payload at the threshold inline', async () => {
     const input = random(PAYLOAD_INLINE_MAX_BYTES);
     const runId = await startedRun(input);
