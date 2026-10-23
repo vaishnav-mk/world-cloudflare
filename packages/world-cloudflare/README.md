@@ -56,7 +56,7 @@ Add a `* * * * *` cron so `drainOutbox` can recover dispatches whose alarm was l
 
 Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 MiB message limit, so the World keeps large values in R2.
 
-- **Writes.** The World client runs in the calling Worker. Before `events.create` or a stream write reaches its Durable Object, it puts each binary `eventData` field (the event's payload, and dynamic workflow code) and each stream chunk over 1 MiB into `PAYLOADS` at `runs/<runId>/<uuid>`. The object stores a ref instead: a 0xff byte, `r2:` and the key. The R2 write finishes before the event commits, so a committed ref always has its object.
+- **Writes.** The World client runs in the calling Worker. Before `events.create` or a stream write reaches its Durable Object, it puts each stream chunk and each binary `eventData` field (the event's payload, and dynamic workflow code) over 1 MiB into `PAYLOADS` at `runs/<runId>/<uuid>`. The object stores a ref instead: a 0xff byte, `r2:` and the key. The R2 write finishes before the event commits, so a committed ref always has its object.
 - **Reads.** Every `runs`, `steps`, `events`, `hooks` and `streams` read, and the result of `events.create`, swaps refs back for their bytes from R2 in the same Worker. `resolveData: 'none'` drops payloads before they leave the object, so it reads nothing from R2.
 - **Opaque bytes.** Payloads stay the SDK's serialized, possibly gzipped, bytes. Small bytes that happen to start like a ref go to R2 too, so a stored ref is never user data.
 
