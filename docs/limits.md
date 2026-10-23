@@ -52,6 +52,27 @@ Every Wrangler config now sets `WORKFLOW_COMPRESSION_CODEC=gzip`, and an end-to-
 - **Fan-out** gets slower faster than linearly.
 - **Event cap.** The SDK stops a run at 25,000 events, about 8,300 steps at three events each, unless `WORKFLOW_MAX_EVENTS` raises it.
 
+## Step throughput and log size
+
+Each step used to cost more than the one before it, because the SDK walked the whole event log once per step. A 15,000-step `sequentialSteps` run (45,003 events) under `wrangler dev` on an Apple silicon laptop, timed from its own event timestamps:
+
+| Engine | ms per step at 3,000 events | at 30,000 events | Whole run |
+| --- | --- | --- | --- |
+| QuickJS, before | 2.9 | 13.6 | 169 s |
+| QuickJS, after | 1.4 | 1.2 | 19.5 s |
+| Isolate (branch `iso-curated`), before | 9.3 | 15.0 | 220 s |
+| Isolate (branch `iso-curated`), after | 8.6 | 8.9 | 135 s |
+
+Local isolate steps bottom out near 9 ms because local workerd clamps the timer turns that engine waits on.
+
+CPU profiles taken through the inspector at about 3,000 and 30,000 events found the cause. The store's `createEvent` stayed at 0.65 ms of CPU per event; what grew was SDK code that re-read the log on every step:
+- **The node engine's replay loop** (which the isolate engine reuses): the hole check `findEventSlotGap`, the retained session's prefix compare in `resume`, `appendUniqueEvents` rebuilding a set of every event ID, the step count for latency telemetry, the terminal-event check and the wait filters.
+- **QuickJS.** The VM's `__pending` list kept every finished step. Each suspension sent all their IDs back to the host and each event searched the list from the front, about 11 of its 13 ms per step at 30,000 events.
+
+The fix is in the SDK patch. `runtime/event-log-memo.ts` keeps those facts per log array and reads only the events appended since its last read. The two helpers that rewrite a log in place mark it, which makes the memos start over, and `resume` skips the prefix compare only for the same array with nothing but appends since it was last fed. QuickJS drops settled steps, waits and attribute writes from `__pending`; it keeps hooks, which `abort()` and the terminal drain still look up. In the profiles after the fix no function's cost per step grows with the log.
+
+To reproduce, run `node scripts/perf/run-steps.mjs` against `wrangler dev --var WORLD_RPC_TOKEN:x --var WORKFLOW_V2_TIMEOUT_MS:1800000`, and use `scripts/perf/profile.mjs` and `scripts/perf/analyze.mjs` for profiles. The script keeps the queue shard busy, because local workerd evicts an idle shard about 70 s after its last request and cancels the delivery it was running. A fresh shard redelivers deliveries a reset cut off, and the `scheduled` handler wakes it every minute; local `wrangler dev` does not run the cron.
+
 ## VM snapshots
 
 Without snapshots, every flow invocation replays the run's whole event log inside the QuickJS VM. On a 30,000-step sequential run on staging, the pauses grew with the log: about 9 s at 10,000 events, 34 s at 20,000 and 80 s at 35,000.
