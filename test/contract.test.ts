@@ -1,4 +1,4 @@
-import { env, runDurableObjectAlarm } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import {
   getQueueTopicPrefix, mintedSpecVersion, slotToEventId, SPEC_VERSION_MAX_SUPPORTED,
@@ -64,6 +64,45 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.events.list({ runId })).data.map((event) => event.eventId)).toEqual(
       [1, 2, 3, 4].map(slotToEventId),
     );
+  });
+
+  it('appends a batch in order, each event with the outcome its own create would have had', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    const step = (correlationId: string) => ({ event: {
+      eventType: 'step_created' as const, correlationId, eventData: { stepName: 'work', input: bytes('argument') },
+    } });
+    const first = await world.events.createBatch!(runId, [step('a'), step('b')]);
+    expect(first.results.map((item) => [item.status, item.event?.eventId])).toEqual([[200, slotToEventId(3)], [200, slotToEventId(4)]]);
+    expect(first.results[0]?.step?.status).toBe('pending');
+    // `a` exists already: its item conflicts and takes no slot, and `c` still commits right after `b`.
+    const second = await world.events.createBatch!(runId, [step('a'), step('c')]);
+    expect(second.results.map((item) => item.status)).toEqual([409, 200]);
+    expect(second.results[1]?.event?.eventId).toBe(slotToEventId(5));
+    expect((await world.events.list({ runId })).data).toHaveLength(5);
+  });
+
+  it('creates a running step from a batched pair without dispatching it', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    const { results } = await world.events.createBatch!(runId, [
+      { event: { eventType: 'step_created', correlationId: 'pair', eventData: { stepName: 'work', input: bytes('argument') } } },
+      { event: { eventType: 'step_started', correlationId: 'pair' } },
+    ]);
+    expect(results.map((item) => item.status)).toEqual([200, 200]);
+    expect((await world.steps.get(runId, 'pair')).status).toBe('running');
+    const pending = await runInDurableObject(env.WORLD_STORE.getByName('global'), (_store, state) => state.storage.sql.exec(
+      `SELECT slot FROM dispatch_outbox WHERE run_id = ? AND status = 'pending' AND slot = 3`, runId).toArray());
+    expect(pending).toEqual([]);
+  });
+
+  it('rejects a batch the contract does not allow, writing none of it', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    const created = { event: { eventType: 'step_created' as const, correlationId: 'x', eventData: { stepName: 'work', input: bytes('a') } } };
+    await expect(world.events.createBatch!(runId, [created, { event: { eventType: 'run_cancelled' } }])).rejects.toThrow('cannot be batched');
+    await expect(world.events.createBatch!(runId, [created, created])).rejects.toThrow('one event per entity');
+    expect((await world.events.list({ runId })).data).toHaveLength(2);
   });
 
   it('caps the skipped-event report for a writer far behind at one page', async () => {
