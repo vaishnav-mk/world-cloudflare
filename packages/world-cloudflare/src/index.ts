@@ -8,10 +8,10 @@ export { createQueueConsumer } from './queue/consumer.js';
 export { QueueShard } from './queue/queue-shard.js';
 export { WorldStore } from './store/world-store.js';
 export { RunStreams } from './streams/run-streams.js';
-export { EventType, ResolveData, RunStatus, StepStatus, WaitStatus } from './enums.js';
+export { DeliveryResult, EventType, ResolveData, RunStatus, StepStatus, WaitStatus } from './enums.js';
 export { toJson } from './lib/json.js';
 export { handleWorldRpc } from './remote/server.js';
-export type { Delivery, FlowHandler, WorldEnv } from './types.js';
+export type { Delivery, DeliveryOutcome, FlowHandler, WorldEnv } from './types.js';
 
 /**
  * Publishes dispatches whose alarm was lost, and wakes the queue shard so it redelivers what a

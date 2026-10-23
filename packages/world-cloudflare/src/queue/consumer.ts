@@ -1,7 +1,8 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { FLOW_URL } from '../constants.js';
 import { withRequestContext } from '../lib/request-context.js';
-import type { Delivery, ExecutorProps, FlowHandler, WorldEnv } from '../types.js';
+import { DeliveryResult } from '../enums.js';
+import type { Delivery, DeliveryOutcome, ExecutorProps, FlowHandler, WorldEnv } from '../types.js';
 import { executorFor } from './routes.js';
 
 type ConsumerEnv = WorldEnv & { EXECUTORS?: DispatchNamespace };
@@ -12,18 +13,27 @@ type ConsumerEnv = WorldEnv & { EXECUTORS?: DispatchNamespace };
  */
 export function createQueueConsumer(flow: FlowHandler) {
   return class QueueConsumer extends WorkerEntrypoint<ConsumerEnv> {
-    /** Returns, per delivery, the SDK's requested re-delivery delay in seconds, or null. */
-    async consume(deliveries: Delivery[]): Promise<(number | null)[]> {
-      const timeouts: (number | null)[] = [];
-      for (const delivery of deliveries) {
+    /**
+     * Runs a batch of deliveries side by side (the shard hands over at most 10) and returns each
+     * one's outcome, so a slow or failing flow holds up and retries only itself.
+     */
+    consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {
+      return Promise.all(deliveries.map((delivery) => this.#consumeOne(delivery)));
+    }
+
+    async #consumeOne(delivery: Delivery): Promise<DeliveryOutcome> {
+      try {
         const target = delivery.body.targetDeployment ?? this.env.DEPLOYMENT_ID;
         const response = await this.#runFlow(target, flowRequest(delivery));
-        if (!response.ok) throw new Error(`Flow handler returned ${response.status}: ${await response.text()}`);
+        if (!response.ok) {
+          return { kind: DeliveryResult.Failed, error: `Flow handler returned ${response.status}: ${await response.text()}` };
+        }
         const { timeoutSeconds } = await response.json() as { timeoutSeconds?: unknown };
-        const valid = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds >= 0;
-        timeouts.push(valid ? timeoutSeconds : null);
+        const wake = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds >= 0;
+        return wake ? { kind: DeliveryResult.Wake, seconds: timeoutSeconds } : { kind: DeliveryResult.Done };
+      } catch (error) {
+        return { kind: DeliveryResult.Failed, error: String(error) };
       }
-      return timeouts;
     }
 
     #runFlow(deployment: string, request: Request): Promise<Response> {

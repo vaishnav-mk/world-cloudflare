@@ -97,3 +97,11 @@ export enum ChangeKind {
   HookDisposed = 'hook-disposed',
   Wait = 'wait',
 }
+
+/** What one flow delivery asks of the queue shard. */
+export enum DeliveryResult {
+  Done = 'done',
+  /** The SDK asked to be woken again after a delay. */
+  Wake = 'wake',
+  Failed = 'failed',
+}

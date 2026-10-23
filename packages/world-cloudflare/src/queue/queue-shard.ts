@@ -6,7 +6,8 @@ import {
   DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
-import { ClaimStatus, MessageKind } from '../enums.js';
+import { ClaimStatus, DeliveryResult, MessageKind } from '../enums.js';
+import { unreachable } from '../lib/unreachable.js';
 import type { Delivery, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
 import { InflightTable } from './inflight.js';
@@ -93,13 +94,25 @@ export class QueueShard extends DurableObject<WorldEnv> {
     if (!due.length) return;
     const deliveries: Delivery[] = due.map(({ id, attempt, enqueuedAt, body }) => ({ id, attempt, enqueuedAt, body }));
     this.#inflight.add(deliveries);
-    const timeouts = await this.env.CONSUMER.consume(deliveries).finally(() => {
+    const outcomes = await this.env.CONSUMER.consume(deliveries).finally(() => {
       for (const { id } of deliveries) this.#inflight.remove(id);
     });
-    if (timeouts.length !== due.length) throw new Error('Incomplete queue delivery response');
-    // A number is the SDK asking to be woken again after that many seconds.
-    for (const [index, timeout] of timeouts.entries()) {
-      if (typeof timeout === 'number') await due[index].retry(timeout * 1000);
+    if (outcomes.length !== due.length) throw new Error('Incomplete queue delivery response');
+    for (const [index, outcome] of outcomes.entries()) {
+      const message = due[index];
+      switch (outcome.kind) {
+        case DeliveryResult.Done:
+          break;
+        case DeliveryResult.Wake:
+          await message.retry(outcome.seconds * 1000);
+          break;
+        case DeliveryResult.Failed:
+          console.error('Flow delivery failed', { messageId: message.id, attempt: message.attempt, error: outcome.error });
+          await message.retry(Math.min(MAX_QUEUE_RETRY_DELAY_MS, message.attempt * 1000));
+          break;
+        default:
+          unreachable(outcome);
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 import type { AnyEventRequest } from '@workflow/world';
-import type { EventType, ResolveData } from './enums.js';
+import type { DeliveryResult, EventType, ResolveData } from './enums.js';
 import type { QueueShard } from './queue/queue-shard.js';
 import type { WorldStore } from './store/world-store.js';
 import type { RunStreams } from './streams/run-streams.js';
@@ -10,7 +10,7 @@ export type WorldEnv = {
   QUEUE_SHARD: DurableObjectNamespace<QueueShard>;
   RUN_STREAMS: DurableObjectNamespace<RunStreams>;
   /** Service binding to the Worker's own `QueueConsumer` entrypoint. */
-  CONSUMER: { consume(deliveries: Delivery[]): Promise<(number | null)[]> };
+  CONSUMER: { consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> };
   DLQ: R2Bucket;
   DEPLOYMENT_ID: string;
   /** JSON map from deployment ID to a retained executor script name. */
@@ -30,6 +30,12 @@ export type Envelope = {
   /** Absolute deadline written by messages queued before `delayMs` existed. */
   due?: number;
 };
+
+/** The outcome of one delivery, returned by `QueueConsumer.consume` in delivery order. */
+export type DeliveryOutcome =
+  | { kind: DeliveryResult.Done }
+  | { kind: DeliveryResult.Wake; seconds: number }
+  | { kind: DeliveryResult.Failed; error: string };
 
 /** One message handed to `QueueConsumer.consume`. */
 export type Delivery = { id: string; attempt: number; enqueuedAt: number; body: Envelope };
