@@ -25,6 +25,14 @@ export const STREAM_POLL_MS = 15_000;
 export const STREAM_READ_BATCH = 100;
 export const MAX_TERMINAL_WAIT_MS = 30_000;
 
+/**
+ * Payloads and stream chunks above this size go to R2, and the Durable Objects keep a ref instead.
+ * The store keeps each payload twice, once as base64, so this stays well under SQLite's 2 MB limit.
+ */
+export const PAYLOAD_INLINE_MAX_BYTES = 1_048_576;
+/** Starts a payload ref. No UTF-8 text, SDK payload or SDK stream frame starts with 0xff. */
+export const PAYLOAD_REF_PREFIX = Uint8Array.of(0xff, ...new TextEncoder().encode('r2:'));
+
 /** VM snapshots are stored in parts under Durable Object SQLite's documented 2 MB value limit. */
 export const SNAPSHOT_PART_BYTES = 1_900_000;
 
