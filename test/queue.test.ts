@@ -16,6 +16,20 @@ describe('durability fanout', () => {
     await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);
   });
 
+  it('queues a batch with one result per message, in order, failing only the bad entry', async () => {
+    const key = crypto.randomUUID();
+    const results = await queue.queueBatch!(queueName, [
+      { message: { runId: 'batch-1' }, opts: { idempotencyKey: `${key}-1` } },
+      { message: { runId: 'batch-2' }, opts: { deploymentId: 'nowhere' } },
+      { message: { runId: 'batch-3' }, opts: { idempotencyKey: `${key}-3` } },
+    ]);
+    expect(results.map((result) => result.error === undefined)).toEqual([true, false, true]);
+    expect(results[1]).toMatchObject({ messageId: null, retryable: false, error: 'Deployment nowhere is unavailable' });
+    for (const { messageId } of [results[0], results[2]]) {
+      await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(messageId);
+    }
+  });
+
   it('runs a batch of deliveries together and returns each its own outcome', async () => {
     let running = 0;
     let peak = 0;
