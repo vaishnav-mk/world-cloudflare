@@ -376,13 +376,15 @@ export class WorldStore extends DurableObject<WorldEnv> {
     }
   }
 
+  /**
+   * Unlike other run-scoped calls, a run store answers 0 for a run it does not hold yet: `start()`
+   * publishes the start message while `run_created` is still in flight, and only new runs have one.
+   */
   async pendingRunStartSlot(runId: string): Promise<number> {
-    this.#own(runId);
     return this.#outbox.pendingSlot(runId, EventType.RunCreated);
   }
 
   async markRunStartsPublished(runId: string, upToSlot: number): Promise<void> {
-    this.#own(runId);
     this.#outbox.publishThrough(runId, upToSlot, EventType.RunCreated);
   }
 

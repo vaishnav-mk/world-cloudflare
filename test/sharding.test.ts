@@ -130,7 +130,7 @@ describe('per-run stores', () => {
     const calls = [
       () => stub.getRun('wrun_elsewhere'), () => stub.getStep('wrun_elsewhere', 'step'),
       () => stub.listSteps({ runId: 'wrun_elsewhere' }), () => stub.listEvents({ runId: 'wrun_elsewhere' }),
-      () => stub.listHooks({ runId: 'wrun_elsewhere' }), () => stub.pendingRunStartSlot('wrun_elsewhere'),
+      () => stub.listHooks({ runId: 'wrun_elsewhere' }), () => stub.pendingHookWakeSlot('wrun_elsewhere'),
       () => stub.reopenPublishedHookWakes('wrun_elsewhere'), () => stub.createEvent('wrun_elsewhere', { eventType: 'run_started' }),
       () => stub.createEvent('wrun_other', runCreated('misrouted')),
     ];
@@ -138,6 +138,8 @@ describe('per-run stores', () => {
       const error = await Promise.resolve(call()).then(() => null, (reason: unknown) => reason);
       expect(WorkflowRunNotFoundError.is(error)).toBe(true);
     }
+    // `start()` publishes the start message while `run_created` may still be in flight.
+    expect(await stub.pendingRunStartSlot('wrun_elsewhere')).toBe(0);
   });
 
   it('heals a stale run index after a failed push', async () => {
