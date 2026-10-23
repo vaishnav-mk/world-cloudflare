@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../packages/world-cloudflare/src/constants.js';
+import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../packages/world-cloudflare/src/constants.js';
 import { toJson } from '../packages/world-cloudflare/src/lib/json.js';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
 import type { WorldStore } from '../packages/world-cloudflare/src/store/world-store.js';
@@ -37,6 +37,16 @@ async function startedRun(input = new Uint8Array([1])) {
 }
 
 describe('payloads in R2', () => {
+  it('rejects a payload over the limit before writing anything', async () => {
+    const runId = await startedRun();
+    const write = store.events.create(runId, {
+      eventType: 'step_created', correlationId: 'huge', eventData: { stepName: 'work', input: new Uint8Array(PAYLOAD_MAX_BYTES + 1) },
+    });
+    await expect(write).rejects.toMatchObject({ status: 413 });
+    expect(await objects(runId)).toHaveLength(0);
+    expect((await store.events.list({ runId })).data).toHaveLength(2);
+  });
+
   it('offloads a large step input written through a batch', async () => {
     const runId = await startedRun();
     const input = random(PAYLOAD_INLINE_MAX_BYTES + 1);

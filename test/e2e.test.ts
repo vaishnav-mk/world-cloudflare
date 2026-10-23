@@ -212,23 +212,30 @@ it('saves a VM snapshot and restores the next invocation from it', async () => {
   await expect.poll(() => snapshots.load(runId), { interval: 100, timeout: 5_000 }).toBeNull();
 });
 
-it('passes a 20 MiB step output to the next step through R2', async () => {
-  const runId = await startRun('stepInput', 20 * MiB);
+it('passes a 12 MiB step output to the next step through R2', async () => {
+  const runId = await startRun('stepInput', 12 * MiB);
   const result = await SELF.fetch(`https://local/runs/${runId}/result`, { headers });
-  expect(await result.json()).toEqual({ value: 20 * MiB });
+  expect(await result.json()).toEqual({ value: 12 * MiB });
   // The step's output and the next step's input are each an R2 object.
   expect((await payloadObjects(runId)).length).toBe(2);
-  // The event subscription reads the store directly, so it shows refs instead of 20 MiB of base64.
+  // The event subscription reads the store directly, so it shows refs instead of 12 MiB of base64.
   const events = await (await SELF.fetch(`https://local/runs/${runId}/events`, { headers })).text();
   expect(events).toContain(`"$ref":"runs/${runId}/`);
   expect(events.length).toBeLessThan(MiB);
 }, 60_000);
 
-it('returns a 20 MiB run output', async () => {
-  const runId = await startRun('runOutput', 20 * MiB);
+it('returns a 12 MiB run output', async () => {
+  const runId = await startRun('runOutput', 12 * MiB);
   const result = await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json() as { value: { $bytes: string } };
-  expect(Buffer.from(result.value.$bytes, 'base64').byteLength).toBe(20 * MiB);
+  expect(Buffer.from(result.value.$bytes, 'base64').byteLength).toBe(12 * MiB);
   expect((await payloadObjects(runId)).length).toBeGreaterThanOrEqual(1);
+}, 60_000);
+
+it('fails a step whose output is over the payload limit instead of retrying forever', async () => {
+  const runId = await startRun('stepOutput', 20 * MiB);
+  await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${runId}`, { headers })).json() as { status: string }).status,
+    { interval: 250, timeout: 50_000 }).toBe('failed');
+  expect(await payloadObjects(runId)).toHaveLength(0);
 }, 60_000);
 
 it('streams a 12 MiB chunk', async () => {
@@ -238,7 +245,7 @@ it('streams a 12 MiB chunk', async () => {
   expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 12 * MiB });
 }, 60_000);
 
-it('resumes a hook with a 20 MB payload', async () => {
+it('resumes a hook with a 12 MB payload', async () => {
   const runId = await startRun('hookPayload', 0);
   const token = await vi.waitFor(async () => {
     const hooks = await (await SELF.fetch(`https://local/runs/${runId}/hooks`, { headers })).json() as { data: { token: string }[] };
@@ -246,7 +253,7 @@ it('resumes a hook with a 20 MB payload', async () => {
     return hooks.data[0].token;
   }, { interval: 100, timeout: 10_000 });
   // Random base64, so the SDK's gzip cannot shrink it under the inline threshold.
-  const random = new Uint8Array(15_000_000);
+  const random = new Uint8Array(9_000_000);
   for (let offset = 0; offset < random.length; offset += 65_536) crypto.getRandomValues(random.subarray(offset, offset + 65_536));
   const body = JSON.stringify(Buffer.from(random).toString('base64'));
   const resumed = await SELF.fetch(`https://local/hooks/${token}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
