@@ -3,12 +3,13 @@ import { DurabilityFanout, DurabilityScheduler, type DurabilityFanoutMessage, ty
 import { parse } from 'devalue';
 import migrations from '../../drizzle/queue/migrations.js';
 import {
-  DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_LANES, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS, STORE_NAME,
+  DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_LANES, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, DeliveryResult, MessageKind } from '../enums.js';
 import { fnv1a32Hex } from '../lib/hash.js';
 import { unreachable } from '../lib/unreachable.js';
+import { onRun } from '../store/route.js';
 import type { Delivery, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
 import { InflightTable } from './inflight.js';
@@ -185,17 +186,20 @@ export class QueueShard extends DurableObject<WorldEnv> {
     }
     const letter = readDeadLetter(payload);
     if (!letter) return;
-    const store = this.env.WORLD_STORE.getByName(STORE_NAME);
+    // The directory answers for a run it lacks, with nothing to reopen.
+    const answersUnknown = { answersUnknown: true };
     switch (letter.kind) {
       case MessageKind.Step:
-        await store.reopenPublishedStepDispatch(letter.runId, letter.stepId, letter.stepName);
+        await onRun(this.env.WORLD_STORE, letter.runId,
+          (store) => store.reopenPublishedStepDispatch(letter.runId, letter.stepId, letter.stepName), answersUnknown);
         break;
       case MessageKind.WaitContinuation:
-        await store.reopenPublishedWaitDispatch(letter.runId, letter.correlationId);
+        await onRun(this.env.WORLD_STORE, letter.runId,
+          (store) => store.reopenPublishedWaitDispatch(letter.runId, letter.correlationId), answersUnknown);
         break;
       case MessageKind.HookWake:
         // Reopens the run's start instead if it never started.
-        await store.reopenPublishedHookWakes(letter.runId);
+        await onRun(this.env.WORLD_STORE, letter.runId, (store) => store.reopenPublishedHookWakes(letter.runId), answersUnknown);
         break;
       default:
         unreachable(letter);

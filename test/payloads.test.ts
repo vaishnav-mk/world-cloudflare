@@ -9,10 +9,10 @@ import { createStreamer } from '../packages/world-cloudflare/src/streams/streame
 const store = createStorage(env);
 const { streams } = createStreamer(env);
 // SAFETY: the stub serves WorldStore's methods; its generated RPC types reduce entities to `never`.
-const raw = env.WORLD_STORE.getByName('global') as unknown as WorldStore;
-/** The run and step as the store keeps them, before the World client resolves refs. */
-const storedRun = (runId: string) => raw.getRun(runId);
-const storedStep = (runId: string) => raw.getStep(runId, 'big');
+const raw = (runId: string) => env.WORLD_STORE.getByName(runId) as unknown as WorldStore;
+/** The run and step as the run's store keeps them, before the World client resolves refs. */
+const storedRun = (runId: string) => raw(runId).getRun(runId);
+const storedStep = (runId: string) => raw(runId).getStep(runId, 'big');
 
 function random(length: number): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(length);

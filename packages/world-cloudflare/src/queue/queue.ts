@@ -2,10 +2,11 @@ import { parse, stringify } from 'devalue';
 import {
   MessageId, QueuePrefix, ValidQueueName, type Queue, type QueueOptions, type QueuePayload,
 } from '@workflow/world';
-import { QUEUE_SHARD_NAME, STORE_NAME } from '../constants.js';
+import { QUEUE_SHARD_NAME } from '../constants.js';
 import { MessageKind } from '../enums.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
 import { transientAsWorldError } from '../lib/transient.js';
+import { onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, OutboxClaim, WorldEnv } from '../types.js';
 import { executorFor } from './routes.js';
 
@@ -15,14 +16,17 @@ type Ready = { request: EnqueueRequest; claim?: OutboxClaim };
 /** The World's `Queue`, backed by the queue shard Durable Object. */
 export function createQueue(env: QueueEnv): Queue {
   // A batch costs three round trips however many messages it holds: outbox slots, enqueue, settle.
+  // The outbox calls go to each run's store, in parallel; a batch usually holds one run's messages.
   const queueBatch: NonNullable<Queue['queueBatch']> = async (queueName, messages) => {
     ValidQueueName.parse(queueName);
     const prepared = await Promise.all(messages.map(({ message, opts = {} }) => prepare(env, queueName, message, opts)));
     const ready = prepared.filter((entry): entry is Ready => !('error' in entry));
-    const store = transientAsWorldError(env.WORLD_STORE.getByName(STORE_NAME));
     const claims = ready.flatMap(({ claim }) => (claim ? [claim] : []));
-    const slots = claims.length ? await store.pendingDispatchSlots(claims) : [];
-    const slotOf = new Map(claims.map((claim, index) => [claim, slots[index] ?? 0]));
+    const slotOf = new Map<OutboxClaim, number>();
+    await Promise.all([...byRun(claims, (claim) => claim.runId)].map(async ([runId, group]) => {
+      const slots = await onRun(env.WORLD_STORE, runId, (store) => store.pendingDispatchSlots(group), answersUnknown);
+      for (const [index, claim] of group.entries()) slotOf.set(claim, slots[index] ?? 0);
+    }));
     const enqueued = ready.length
       ? await transientAsWorldError(env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME)).enqueueMany(ready.map(({ request }) => request))
       : [];
@@ -33,7 +37,8 @@ export function createQueue(env: QueueEnv): Queue {
       const result = results.get(entry);
       return entry.claim && slot && result && 'fresh' in result && result.fresh ? [{ claim: entry.claim, slot }] : [];
     });
-    if (published.length) await store.markDispatchesPublished(published);
+    await Promise.all([...byRun(published, ({ claim }) => claim.runId)].map(([runId, group]) =>
+      onRun(env.WORLD_STORE, runId, (store) => store.markDispatchesPublished(group), answersUnknown)));
     return prepared.map((entry) => {
       if ('error' in entry) return { messageId: null, error: entry.error, retryable: false };
       const result = results.get(entry);
@@ -80,6 +85,15 @@ export function createQueue(env: QueueEnv): Queue {
       }
     },
   };
+}
+
+/** The directory answers outbox calls for a run it lacks, such as one whose `run_created` is still in flight. */
+const answersUnknown = { answersUnknown: true };
+
+function byRun<T>(items: T[], runIdOf: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) groups.set(runIdOf(item), [...(groups.get(runIdOf(item)) ?? []), item]);
+  return groups;
 }
 
 /** Validates one message and computes what the shard stores, or why it cannot be queued. */
