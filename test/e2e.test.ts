@@ -1,12 +1,30 @@
-import { SELF } from 'cloudflare:test';
+import { env, SELF } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
+import { MAX_BODY_BYTES } from '../src/http.js';
 import { world } from '../src/world.js';
 
 const headers = {};
+const MiB = 1024 * 1024;
+
+async function startRun(name: string, value: number): Promise<string> {
+  const response = await SELF.fetch('https://local/runs', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, value }),
+  });
+  expect(response.status).toBe(202);
+  return (await response.json() as { runId: string }).runId;
+}
+
+const payloadObjects = async (runId: string) => (await env.PAYLOADS.list({ prefix: `runs/${runId}/` })).objects;
 
 it('rejects oversized streaming JSON without Content-Length', async () => {
+  let sent = 0;
   const body = new ReadableStream<Uint8Array>({
-    start(controller) { controller.enqueue(new Uint8Array(1_048_577)); controller.close(); },
+    pull(controller) {
+      const chunk = new Uint8Array(Math.min(MiB, MAX_BODY_BYTES + 1 - sent));
+      sent += chunk.byteLength;
+      controller.enqueue(chunk);
+      if (sent > MAX_BODY_BYTES) controller.close();
+    },
   });
   const response = await SELF.fetch('https://local/runs', {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body,
@@ -193,3 +211,46 @@ it('saves a VM snapshot and restores the next invocation from it', async () => {
   // The finished run's snapshot is deleted.
   await expect.poll(() => snapshots.load(runId), { interval: 100, timeout: 5_000 }).toBeNull();
 });
+
+it('passes a 20 MiB step output to the next step through R2', async () => {
+  const runId = await startRun('stepInput', 20 * MiB);
+  const result = await SELF.fetch(`https://local/runs/${runId}/result`, { headers });
+  expect(await result.json()).toEqual({ value: 20 * MiB });
+  // The step's output and the next step's input are each an R2 object.
+  expect((await payloadObjects(runId)).length).toBe(2);
+  // The event subscription reads the store directly, so it shows refs instead of 20 MiB of base64.
+  const events = await (await SELF.fetch(`https://local/runs/${runId}/events`, { headers })).text();
+  expect(events).toContain(`"$ref":"runs/${runId}/`);
+  expect(events.length).toBeLessThan(MiB);
+}, 60_000);
+
+it('returns a 20 MiB run output', async () => {
+  const runId = await startRun('runOutput', 20 * MiB);
+  const result = await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json() as { value: { $bytes: string } };
+  expect(Buffer.from(result.value.$bytes, 'base64').byteLength).toBe(20 * MiB);
+  expect((await payloadObjects(runId)).length).toBeGreaterThanOrEqual(1);
+}, 60_000);
+
+it('streams a 12 MiB chunk', async () => {
+  const runId = await startRun('streamChunk', 12 * MiB);
+  const stream = await SELF.fetch(`https://local/runs/${runId}/streams/limits`, { headers });
+  expect((await stream.arrayBuffer()).byteLength).toBe(12 * MiB);
+  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 12 * MiB });
+}, 60_000);
+
+it('resumes a hook with a 20 MB payload', async () => {
+  const runId = await startRun('hookPayload', 0);
+  const token = await vi.waitFor(async () => {
+    const hooks = await (await SELF.fetch(`https://local/runs/${runId}/hooks`, { headers })).json() as { data: { token: string }[] };
+    expect(hooks.data[0]?.token).toBeTruthy();
+    return hooks.data[0].token;
+  }, { interval: 100, timeout: 10_000 });
+  // Random base64, so the SDK's gzip cannot shrink it under the inline threshold.
+  const random = new Uint8Array(15_000_000);
+  for (let offset = 0; offset < random.length; offset += 65_536) crypto.getRandomValues(random.subarray(offset, offset + 65_536));
+  const body = JSON.stringify(Buffer.from(random).toString('base64'));
+  const resumed = await SELF.fetch(`https://local/hooks/${token}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  expect(resumed.status).toBe(200);
+  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: body.length });
+  expect((await payloadObjects(runId)).length).toBe(1);
+}, 60_000);
