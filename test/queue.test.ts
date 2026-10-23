@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
+import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
 import { QueueShard } from '../packages/world-cloudflare/src/queue/queue-shard.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
@@ -13,6 +14,27 @@ describe('durability fanout', () => {
     const id = (await queue.queue(queueName, { runId: 'run-1' })).messageId;
     await runDurableObjectAlarm(env.QUEUE_SHARD.getByName('flow'));
     await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);
+  });
+
+  it('runs a batch of deliveries together and returns each its own outcome', async () => {
+    let running = 0;
+    let peak = 0;
+    const Consumer = createQueueConsumer(async (request) => {
+      peak = Math.max(peak, ++running);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      running--;
+      switch (request.headers.get('x-vqs-message-id')) {
+        case 'fails': return new Response('boom', { status: 500 });
+        case 'sleeps': return Response.json({ timeoutSeconds: 3 });
+        default: return Response.json({});
+      }
+    });
+    const consumer = new Consumer(createExecutionContext(), env);
+    const delivery = (id: string) => ({ id, attempt: 1, enqueuedAt: Date.now(), body: { queueName, encoded: '[]' } });
+    expect(await consumer.consume([delivery('done'), delivery('fails'), delivery('sleeps')])).toEqual([
+      { kind: 'done' }, { kind: 'failed', error: 'Flow handler returned 500: boom' }, { kind: 'wake', seconds: 3 },
+    ]);
+    expect(peak).toBe(3);
   });
 
   it('settles its in-flight record once the consumer returns', async () => {
