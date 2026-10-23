@@ -232,7 +232,7 @@ index 61c13663..7ba1dc06 100644
          const builder = new StandaloneBuilder(config);
          await builder.build();
 diff --git a/packages/core/src/runtime.ts b/packages/core/src/runtime.ts
-index e88087d9..287a8105 100644
+index e88087d9..82db7e9a 100644
 --- a/packages/core/src/runtime.ts
 +++ b/packages/core/src/runtime.ts
 @@ -37,7 +37,6 @@ import {
@@ -260,7 +260,68 @@ index e88087d9..287a8105 100644
  import { withRunInputs } from './runtime/invocations.js';
  import {
    dispatchRunCompletedHooks,
-@@ -639,44 +639,6 @@ function nextEventLogLoad(log: LoadedEventLog): ReplayEventLog {
+@@ -122,6 +122,7 @@ import {
+   resumeTimingForMessage,
+   resumeTrackingFromMessage,
+ } from './runtime/resume-latency.js';
++import { memoizeEventLog } from './runtime/event-log-memo.js';
+ import { runIdCreatedAt } from './runtime/run-id-time.js';
+ import {
+   DEFAULT_STEP_MAX_RETRIES,
+@@ -466,21 +467,43 @@ async function recordFatalRunError({
+   );
+ }
+ 
++/** A log's `wait_created` events, and the waits its `wait_completed` events close. */
++const waitsOf = memoizeEventLog(
++  () => ({
++    created: [] as Extract<Event, { eventType: 'wait_created' }>[],
++    completed: new Set<string | undefined>(),
++  }),
++  (waits, e) => {
++    if (e.eventType === 'wait_created') waits.created.push(e);
++    else if (e.eventType === 'wait_completed')
++      waits.completed.add(e.correlationId);
++  }
++);
++
++/** The first terminal run event in a log, by run ID. */
++const terminalRunEventsOf = memoizeEventLog(
++  () => new Map<string, Event>(),
++  (found, e) => {
++    if (
++      !found.has(e.runId) &&
++      (e.eventType === 'run_completed' ||
++        e.eventType === 'run_failed' ||
++        e.eventType === 'run_cancelled')
++    ) {
++      found.set(e.runId, e);
++    }
++  }
++);
++
+ function findRecordedTerminalRunEvent(
+   events: Event[],
+   runId: string
+ ): Event | undefined {
+   // Terminal run events are always last by construction (no event creation
+-  // succeeds against a terminal run), but scan the full array for
++  // succeeds against a terminal run), but the whole log is checked for
+   // defense-in-depth: a World/backend ordering bug shouldn't make us miss an
+-  // actual termination signal.
+-  return events.find(
+-    (e) =>
+-      e.runId === runId &&
+-      (e.eventType === 'run_completed' ||
+-        e.eventType === 'run_failed' ||
+-        e.eventType === 'run_cancelled')
+-  );
++  // actual termination signal. The memo reads each event once per log.
++  return terminalRunEventsOf(events).get(runId);
+ }
+ 
+ function hasRecordedTerminalRunEvent(events: Event[], runId: string): boolean {
+@@ -639,44 +662,6 @@ function nextEventLogLoad(log: LoadedEventLog): ReplayEventLog {
    };
  }
  
@@ -305,7 +366,47 @@ index e88087d9..287a8105 100644
  /** The workflow code a delivery replays, and the marker when it is dynamic. */
  interface ResolvedWorkflowCode {
    code: string;
-@@ -5651,7 +5613,7 @@ export function workflowEntrypoint(
+@@ -3206,12 +3191,8 @@ export function workflowEntrypoint(
+ 
+                       // Complete elapsed waits
+                       const now = Date.now();
+-                      const completedWaitIds = new Set(
+-                        eventLog.events
+-                          .filter((e) => e.eventType === 'wait_completed')
+-                          .map((e) => e.correlationId)
+-                      );
+-                      const waitsToComplete = eventLog.events
++                      const waits = waitsOf(eventLog.events);
++                      const waitsToComplete = waits.created
+                         .filter(
+                           (
+                             e
+@@ -3219,9 +3200,8 @@ export function workflowEntrypoint(
+                             Event,
+                             { eventType: 'wait_created' }
+                           > & { correlationId: string } =>
+-                            e.eventType === 'wait_created' &&
+                             e.correlationId !== undefined &&
+-                            !completedWaitIds.has(e.correlationId) &&
++                            !waits.completed.has(e.correlationId) &&
+                             now >= (e.eventData.resumeAt as Date).getTime()
+                         )
+                         .map((e) => ({
+@@ -3278,11 +3258,9 @@ export function workflowEntrypoint(
+                       // ignores `sinceCursor`, a truncated delta, a concurrent
+                       // absorb that lost the cursor race, or an
+                       // EntityConflictError, whose rejection carries no delta.
+-                      const completedWaitIdsAfterWrites = new Set(
++                      const completedWaitIdsAfterWrites = waitsOf(
+                         eventLog.events
+-                          .filter((e) => e.eventType === 'wait_completed')
+-                          .map((e) => e.correlationId)
+-                      );
++                      ).completed;
+                       const missingWaitCompletions = waitsToComplete.filter(
+                         (waitEvent) =>
+                           !completedWaitIdsAfterWrites.has(
+@@ -5651,7 +5629,7 @@ export function workflowEntrypoint(
          kind: spanKind,
          attributes: {
            ...Attribute.WorkflowRouteType('flow'),
@@ -356,6 +457,270 @@ index 0c40f16e..84a91162 100644
 +  computeInstanceId ??= `cinst_${ulid()}`;
 +  return computeInstanceId;
 +}
+diff --git a/packages/core/src/runtime/event-log-memo.test.ts b/packages/core/src/runtime/event-log-memo.test.ts
+new file mode 100644
+index 00000000..2b366126
+--- /dev/null
++++ b/packages/core/src/runtime/event-log-memo.test.ts
+@@ -0,0 +1,93 @@
++import type { Event } from '@workflow/world';
++import { slotToEventId } from '@workflow/world';
++import { describe, expect, it } from 'vitest';
++import {
++  eventLogRevision,
++  markEventLogRewritten,
++  memoizeEventLog,
++} from './event-log-memo.js';
++import {
++  appendUniqueEvents,
++  findEventSlotGap,
++  insertEventByEventId,
++  mergeReportedEvents,
++} from './helpers.js';
++
++const event = (slot: number): Event =>
++  ({
++    eventId: slotToEventId(slot),
++    runId: 'wrun_memo',
++    eventType: 'step_started',
++    correlationId: `step_${slot}`,
++    createdAt: new Date(0),
++  }) as Event;
++
++/** A memo that records which events it read. */
++function readingMemo() {
++  const read: string[] = [];
++  const memo = memoizeEventLog(
++    () => new Set<string>(),
++    (ids, e) => {
++      read.push(e.eventId);
++      ids.add(e.eventId);
++    }
++  );
++  return { read, memo };
++}
++
++describe('memoizeEventLog', () => {
++  it('reads each appended event once across calls', () => {
++    const { read, memo } = readingMemo();
++    const log = [event(1), event(2)];
++    expect(memo(log).size).toBe(2);
++    log.push(event(3));
++    expect(memo(log).size).toBe(3);
++    expect(memo(log).size).toBe(3);
++    expect(read).toEqual([1, 2, 3].map(slotToEventId));
++  });
++
++  it('starts over after a rewrite is marked', () => {
++    const { read, memo } = readingMemo();
++    const log = [event(1), event(2)];
++    memo(log);
++    log[0] = event(5);
++    markEventLogRewritten(log);
++    expect(eventLogRevision(log)).toBe(1);
++    expect([...memo(log)]).toEqual([5, 2].map(slotToEventId));
++    expect(read).toHaveLength(4);
++  });
++
++  it('starts over when the log shrank or an event was inserted below its read position', () => {
++    const { memo } = readingMemo();
++    const log = [event(1), event(3)];
++    memo(log);
++    log.splice(1, 0, event(2));
++    expect([...memo(log)].sort()).toEqual([1, 2, 3].map(slotToEventId));
++    log.length = 1;
++    expect([...memo(log)]).toEqual([slotToEventId(1)]);
++  });
++});
++
++describe('event log helpers on one growing log', () => {
++  it('see holes and duplicates across appends and in-place rewrites', () => {
++    const log = [event(1), event(2), event(4)];
++    expect(findEventSlotGap(log)?.firstMissingSlot).toBe(3);
++
++    // A skipped-slot report fills the hole, sorting the log in place.
++    expect(mergeReportedEvents(log, [event(3)])).toBe(1);
++    expect(findEventSlotGap(log)).toBeUndefined();
++
++    appendUniqueEvents(log, [event(4), event(6)]);
++    expect(log.map((e) => e.eventId)).toEqual(
++      [1, 2, 3, 4, 6].map(slotToEventId)
++    );
++    expect(findEventSlotGap(log)?.firstMissingSlot).toBe(5);
++
++    insertEventByEventId(log, event(5));
++    expect(findEventSlotGap(log)).toBeUndefined();
++    appendUniqueEvents(log, [event(5), event(7)]);
++    expect(log.map((e) => e.eventId)).toEqual(
++      [1, 2, 3, 4, 5, 6, 7].map(slotToEventId)
++    );
++  });
++});
+diff --git a/packages/core/src/runtime/event-log-memo.ts b/packages/core/src/runtime/event-log-memo.ts
+new file mode 100644
+index 00000000..0a166295
+--- /dev/null
++++ b/packages/core/src/runtime/event-log-memo.ts
+@@ -0,0 +1,66 @@
++import type { Event } from '@workflow/world';
++
++/*
++ * Facts derived from a loaded event log, kept per log array and extended
++ * with only the events appended since the last read.
++ *
++ * The replay loop keeps one log array per invocation, grows it with `push`,
++ * and re-derives the same facts from it on every iteration: its event ids,
++ * its slots, whether it holds a terminal run event. Reading the whole log
++ * each time made every step cost O(events) and a run O(events²).
++ *
++ * Appending is the only mutation a memo follows. A helper that rewrites a log
++ * in place (`mergeReportedEvents` sorts, `insertEventByEventId` splices) calls
++ * `markEventLogRewritten`. A memo also starts over when the log shrank or the
++ * event at its read position moved, which catches an insertion below it.
++ */
++
++// per-copy-ok: keyed on log arrays, which one copy's replay loop creates,
++// rewrites and reads. Another copy never holds the key.
++const revisions = new WeakMap<readonly Event[], number>();
++
++/** Bumps `events`' revision: its existing positions may hold other events now. */
++export function markEventLogRewritten(events: readonly Event[]): void {
++  revisions.set(events, eventLogRevision(events) + 1);
++}
++
++/** How many times `events` was rewritten in place. Appends do not count. */
++export function eventLogRevision(events: readonly Event[]): number {
++  return revisions.get(events) ?? 0;
++}
++
++interface Memo<T> {
++  revision: number;
++  read: number;
++  last: Event | undefined;
++  state: T;
++}
++
++/**
++ * Returns a function that folds a log's events into `init()` with `add`,
++ * reading each event of an append-only log once across calls.
++ */
++export function memoizeEventLog<T>(
++  init: () => T,
++  add: (state: T, event: Event) => void
++): (events: readonly Event[]) => T {
++  const memos = new WeakMap<readonly Event[], Memo<T>>();
++  return (events) => {
++    const revision = eventLogRevision(events);
++    let memo = memos.get(events);
++    if (
++      memo === undefined ||
++      memo.revision !== revision ||
++      memo.read > events.length ||
++      events[memo.read - 1] !== memo.last
++    ) {
++      memo = { revision, read: 0, last: undefined, state: init() };
++      memos.set(events, memo);
++    }
++    for (; memo.read < events.length; memo.read++) {
++      add(memo.state, events[memo.read]);
++    }
++    memo.last = events[memo.read - 1];
++    return memo.state;
++  };
++}
+diff --git a/packages/core/src/runtime/helpers.ts b/packages/core/src/runtime/helpers.ts
+index 9d81c2f0..7f014451 100644
+--- a/packages/core/src/runtime/helpers.ts
++++ b/packages/core/src/runtime/helpers.ts
+@@ -37,6 +37,7 @@ import * as Attribute from '../telemetry/semantic-conventions.js';
+ import { getSpanKind, trace } from '../telemetry.js';
+ import { version as workflowCoreVersion } from '../version.js';
+ import { isDynamicWorkflowsEnabled } from './constants.js';
++import { markEventLogRewritten, memoizeEventLog } from './event-log-memo.js';
+ import { getWorldLazy } from './get-world-lazy.js';
+ 
+ /** Default timeout for health checks in milliseconds */
+@@ -514,11 +515,17 @@ function recordRequestedEventCursor(
+   requestedCursors.add(cursor);
+ }
+ 
++const eventIdsOf = memoizeEventLog(
++  () => new Set<string>(),
++  (ids, event) => ids.add(event.eventId)
++);
++
+ /**
+  * Appends events whose IDs are not already present in `target`.
+  *
+  * Pass the IDs currently present in `target` when appending repeatedly to the
+- * same array. The set is updated alongside `target`.
++ * same array. The set is updated alongside `target`. Without one, the IDs come
++ * from a memo of `target`, so repeated appends do not rescan it.
+  *
+  * Events are appended in the order the World returned them, and are not
+  * re-sorted. Every append source is already in canonical order relative to the
+@@ -536,7 +543,7 @@ export function appendUniqueEvents(
+     return;
+   }
+ 
+-  const ids = targetIds ?? new Set(target.map((event) => event.eventId));
++  const ids = targetIds ?? eventIdsOf(target);
+   for (const event of events) {
+     if (ids.has(event.eventId)) {
+       continue;
+@@ -578,6 +585,7 @@ export function insertEventByEventId(target: Event[], event: Event): void {
+     i--;
+   }
+   target.splice(i, 0, event);
++  markEventLogRewritten(target);
+ }
+ 
+ function assertEventPaginationProgress(
+@@ -853,6 +861,7 @@ export function mergeReportedEvents(
+     target.sort((a, b) =>
+       a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0
+     );
++    markEventLogRewritten(target);
+   }
+   return added;
+ }
+@@ -948,6 +957,17 @@ export interface EventSlotGap {
+   maxSlot: number;
+ }
+ 
++const eventSlotsOf = memoizeEventLog(
++  () => ({ occupied: new Set<number>(), maxSlot: 0 }),
++  (slots, event) => {
++    const slot = requireEventSlot(event.eventId);
++    slots.occupied.add(slot);
++    if (slot > slots.maxSlot) {
++      slots.maxSlot = slot;
++    }
++  }
++);
++
+ /**
+  * The hole in a loaded log, or `undefined` when there is none to find.
+  *
+@@ -977,15 +997,9 @@ export interface EventSlotGap {
+ export function findEventSlotGap(
+   events: readonly Event[]
+ ): EventSlotGap | undefined {
+-  const occupied = new Set<number>();
+-  let maxSlot = 0;
+-  for (const event of events) {
+-    const slot = requireEventSlot(event.eventId);
+-    occupied.add(slot);
+-    if (slot > maxSlot) {
+-      maxSlot = slot;
+-    }
+-  }
++  // The replay loop checks its log before every replay, so this reads only
++  // the events appended since the last check.
++  const { occupied, maxSlot } = eventSlotsOf(events);
+   if (maxSlot === 0) {
+     return undefined;
+   }
 diff --git a/packages/core/src/runtime/inline-window.ts b/packages/core/src/runtime/inline-window.ts
 new file mode 100644
 index 00000000..00e502c8
@@ -402,6 +767,70 @@ index 00000000..00e502c8
 +
 +  return ms('2m');
 +}
+diff --git a/packages/core/src/runtime/open-hook-wait-state.ts b/packages/core/src/runtime/open-hook-wait-state.ts
+index 72b68994..30a342d4 100644
+--- a/packages/core/src/runtime/open-hook-wait-state.ts
++++ b/packages/core/src/runtime/open-hook-wait-state.ts
+@@ -1,4 +1,5 @@
+ import type { Event } from '@workflow/world';
++import { memoizeEventLog } from './event-log-memo.js';
+ 
+ /**
+  * Which out-of-band writers a replay's event log currently admits, computed
+@@ -19,6 +20,27 @@ export interface OpenHookAndWaitState {
+   earliestOpenWaitResumeAtMs: number | undefined;
+ }
+ 
++/** The hooks and waits a log leaves open, folded in log order. */
++const openHooksAndWaitsOf = memoizeEventLog(
++  () => ({ hooks: new Set<string>(), waits: new Map<string, number>() }),
++  ({ hooks, waits }, event) => {
++    switch (event.eventType) {
++      case 'hook_created':
++        hooks.add(event.correlationId);
++        break;
++      case 'hook_disposed':
++        hooks.delete(event.correlationId);
++        break;
++      case 'wait_created':
++        waits.set(event.correlationId, resumeAtMs(event.eventData?.resumeAt));
++        break;
++      case 'wait_completed':
++        waits.delete(event.correlationId);
++        break;
++    }
++  }
++);
++
+ /**
+  * Whether the run has a hook and/or wait that an out-of-band writer could
+  * append an event for between an inline step's `step_completed` write and
+@@ -44,24 +66,7 @@ export interface OpenHookAndWaitState {
+  * delta.
+  */
+ export function openHookAndWaitState(events: Event[]): OpenHookAndWaitState {
+-  const hooks = new Set<string>();
+-  const waits = new Map<string, number>();
+-  for (const event of events) {
+-    switch (event.eventType) {
+-      case 'hook_created':
+-        hooks.add(event.correlationId);
+-        break;
+-      case 'hook_disposed':
+-        hooks.delete(event.correlationId);
+-        break;
+-      case 'wait_created':
+-        waits.set(event.correlationId, resumeAtMs(event.eventData?.resumeAt));
+-        break;
+-      case 'wait_completed':
+-        waits.delete(event.correlationId);
+-        break;
+-    }
+-  }
++  const { hooks, waits } = openHooksAndWaitsOf(events);
+   let earliestOpenWaitResumeAtMs: number | undefined;
+   for (const at of waits.values()) {
+     if (
 diff --git a/packages/core/src/runtime/quickjs-entrypoint.ts b/packages/core/src/runtime/quickjs-entrypoint.ts
 index 0b7ac75e..7342c53a 100644
 --- a/packages/core/src/runtime/quickjs-entrypoint.ts
@@ -555,8 +984,74 @@ index 00000000..edb10a15
 +  expect(replays).toHaveLength(1);
 +  expect(replays[0].payload).toMatchObject({ runId: workflowRun.runId });
 +});
+diff --git a/packages/core/src/runtime/quickjs-runtime.test.ts b/packages/core/src/runtime/quickjs-runtime.test.ts
+index b584f6e2..119c1711 100644
+--- a/packages/core/src/runtime/quickjs-runtime.test.ts
++++ b/packages/core/src/runtime/quickjs-runtime.test.ts
+@@ -1842,6 +1842,61 @@ describe('VM snapshot/restore', () => {
+     }
+   });
+ 
++  it('drops settled step ops, so the pending scans do not grow with the run', async () => {
++    // Every suspension and every event scans __pending. Keeping finished
++    // steps there made each step cost O(steps so far).
++    const { startQuickJSWorkflow } = await import('./quickjs-runtime.js');
++    const run = makeRun();
++    const steps = 40;
++    const session = await startQuickJSWorkflow({
++      workflowCode: `
++        var step = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step//test//add");
++        async function workflow() {
++          var most = 0;
++          for (var i = 0; i < ${steps}; i++) {
++            await step(i);
++            most = Math.max(most, globalThis.__pending.length);
++          }
++          return most;
++        }
++        globalThis.__private_workflows.set("workflow//test//workflow", workflow);
++      `,
++      workflowId: 'workflow//test//workflow',
++      workflowRun: run,
++      events: [runCreatedEvent(run)],
++    });
++    try {
++      let result = session.result;
++      for (let i = 0; i < steps; i++) {
++        assert(result.suspended);
++        const cid = result.suspended.pendingOperations[0].correlationId;
++        const createdAt = new Date('2025-01-01T00:00:01Z');
++        result = await session.continueWithEvents([
++          {
++            eventId: `evnt_${i}_created`,
++            runId: run.runId,
++            eventType: 'step_created' as const,
++            correlationId: cid,
++            eventData: { stepName: 'step//test//add' },
++            createdAt,
++          },
++          {
++            eventId: `evnt_${i}_completed`,
++            runId: run.runId,
++            eventType: 'step_completed' as const,
++            correlationId: cid,
++            eventData: { result: i },
++            createdAt,
++          },
++        ] as never);
++      }
++      assert(result.completed);
++      expect(unwrapResult(result.completed.result)).toBeLessThanOrEqual(2);
++    } finally {
++      session.dispose();
++    }
++  });
++
+   it('exposes the current process.env after a restore, not the captured one', async () => {
+     const { startQuickJSWorkflow } = await import('./quickjs-runtime.js');
+     const run = makeRun();
 diff --git a/packages/core/src/runtime/quickjs-runtime.ts b/packages/core/src/runtime/quickjs-runtime.ts
-index 65d48359..4959eebe 100644
+index 65d48359..600a88c0 100644
 --- a/packages/core/src/runtime/quickjs-runtime.ts
 +++ b/packages/core/src/runtime/quickjs-runtime.ts
 @@ -1140,23 +1140,37 @@ const quickjsAssets = globalSingleton(
@@ -612,6 +1107,31 @@ index 65d48359..4959eebe 100644
      // On failure, clear the cache so a later invocation can retry rather
      // than being stuck with a rejected promise forever.
      quickjsAssets.promise.catch(() => {
+@@ -3055,12 +3069,22 @@ function dumpPendingOps(
+     // never collected again by either the suspension or the drain
+     // filter, so their cached bytes are dead weight; surface their cids
+     // so the host can evict them (see the byte-cache eviction below).
++    // Settled ops other than hooks are also dropped from __pending: every
++    // suspension and event scans it, so keeping them made each step cost
++    // O(steps so far). A created hook stays, because abort() and the
++    // terminal drain still look it up.
+     var settled = [];
+-    globalThis.__pending.forEach(function(p){
++    var pending = globalThis.__pending;
++    var kept = 0;
++    for (var i = 0; i < pending.length; i++) {
++      var p = pending[i];
+       if (p.hasCreatedEvent && !globalThis.__resolvers[p.correlationId] && !p.abortRequested) {
+         settled.push(p.correlationId);
++        if (p.type !== "hook") continue;
+       }
+-    });
++      pending[kept++] = p;
++    }
++    pending.length = kept;
+     return { settled: settled, ops: ops.map(function(p){
+       var q = {};
+       for (var k in p) {
 diff --git a/packages/core/src/runtime/step-executor.test.ts b/packages/core/src/runtime/step-executor.test.ts
 index 5344ff10..3c24e082 100644
 --- a/packages/core/src/runtime/step-executor.test.ts
@@ -673,6 +1193,56 @@ index 746489d4..5584b06b 100644
 +    computeInstanceId: getComputeInstanceId(),
      ...(params.requestId ? { requestId: params.requestId } : {}),
    };
+ 
+diff --git a/packages/core/src/runtime/step-latency.ts b/packages/core/src/runtime/step-latency.ts
+index 26ccda0a..61a9db2c 100644
+--- a/packages/core/src/runtime/step-latency.ts
++++ b/packages/core/src/runtime/step-latency.ts
+@@ -1,4 +1,5 @@
+ import type { Event } from '@workflow/world';
++import { memoizeEventLog } from './event-log-memo.js';
+ 
+ /**
+  * Client-side latency measurement (TTFS / STSO / RSFS) threaded from the
+@@ -167,6 +168,20 @@ const TTFS_DISQUALIFYING_EVENT_TYPES: ReadonlySet<Event['eventType']> = new Set(
+   ]
+ );
+ 
++/** Correlation IDs of the steps a log records as completed or failed. */
++const terminalStepIdsOf = memoizeEventLog(
++  () => new Set<string>(),
++  (ids, event) => {
++    if (
++      (event.eventType === 'step_completed' ||
++        event.eventType === 'step_failed') &&
++      event.correlationId !== undefined
++    ) {
++      ids.add(event.correlationId);
++    }
++  }
++);
++
+ /**
+  * Decide, from the orchestrator's view of the event log, whether the inline
+  * step batch about to execute qualifies for TTFS and/or STSO measurement.
+@@ -273,17 +288,7 @@ export function computeStepLatencyTracking(params: {
+       lastEvent.eventType === 'step_failed')
+   ) {
+     prevStepEndMs = +(lastEvent.occurredAt ?? lastEvent.createdAt);
+-    const terminalStepIds = new Set<string>();
+-    for (const event of events) {
+-      if (
+-        (event.eventType === 'step_completed' ||
+-          event.eventType === 'step_failed') &&
+-        event.correlationId !== undefined
+-      ) {
+-        terminalStepIds.add(event.correlationId);
+-      }
+-    }
+-    stepCount = terminalStepIds.size;
++    stepCount = terminalStepIdsOf(events).size;
+     eventCount = events.length;
+   }
  
 diff --git a/packages/core/src/runtime/suspension-handler.test.ts b/packages/core/src/runtime/suspension-handler.test.ts
 index c82489cf..24ab7306 100644
@@ -775,3 +1345,129 @@ index e5e05215..57b21a09 100644
   * Uses OTEL `faas.instance` (execution-environment id, reused across
   * invocations to the same function):
   * https://opentelemetry.io/docs/specs/semconv/attributes-registry/faas/
+diff --git a/packages/core/src/workflow.test.ts b/packages/core/src/workflow.test.ts
+index 523edeb3..cef7fd56 100644
+--- a/packages/core/src/workflow.test.ts
++++ b/packages/core/src/workflow.test.ts
+@@ -8,6 +8,7 @@ import { DEFERRED_CHECK_DELAY_MS } from './events-consumer.js';
+ import type { WorkflowSuspension } from './global.js';
+ import { ReplayPayloadCache } from './replay-payload-cache.js';
+ import { compileDynamicWorkflow } from './runtime/dynamic-workflow.js';
++import { markEventLogRewritten } from './runtime/event-log-memo.js';
+ import { setWorld } from './runtime/world.js';
+ import {
+   dehydrateStepReturnValue,
+@@ -414,6 +415,41 @@ async function workflow() {
+       });
+     });
+ 
++    it('declines resume when the log it was fed from was rewritten in place', async () => {
++      const run = await sessionRun('wrun_retained_rewritten');
++      const workflowCode = `
++        const step = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step");
++        async function workflow() { await step(); }
++        ${getWorkflowTransformCode('workflow')}`;
++      const createdAt = new Date('2024-01-01T00:00:00.000Z');
++      const events: Event[] = [
++        {
++          eventId: 'event-a',
++          runId: run.runId,
++          eventType: 'run_created',
++          createdAt,
++        },
++        {
++          eventId: 'event-b',
++          runId: run.runId,
++          eventType: 'run_started',
++          createdAt,
++        },
++      ] as Event[];
++
++      const suspended = await replay(run, workflowCode, events);
++      assert(suspended.type === 'suspended');
++
++      // Same array, same last event, but an earlier position now holds
++      // another event: only the marked rewrite tells resume to compare.
++      events[0] = { ...events[0], eventId: 'event-a-rewritten' } as Event;
++      markEventLogRewritten(events);
++      events.push({ ...events[1], eventId: 'event-c' } as Event);
++      expect(await resumeWorkflow(suspended.session, events)).toEqual({
++        type: 'replay',
++      });
++    });
++
+     it('demotes to replay (not failure) after mid-execution divergence', async () => {
+       const run = await sessionRun('wrun_retained_mid_divergence');
+       const workflowCode = `
+diff --git a/packages/core/src/workflow.ts b/packages/core/src/workflow.ts
+index 56fce10a..f0a58a71 100644
+--- a/packages/core/src/workflow.ts
++++ b/packages/core/src/workflow.ts
+@@ -24,6 +24,7 @@ import type { WorkflowOrchestratorContext } from './private.js';
+ import { isDeliveryIdle } from './private.js';
+ import { describeDivergenceContext } from './replay-divergence.js';
+ import { ReplayPayloadCache } from './replay-payload-cache.js';
++import { eventLogRevision } from './runtime/event-log-memo.js';
+ import { getPortLazy } from './runtime/get-port-lazy.js';
+ import { runIdCreatedAt } from './runtime/run-id-time.js';
+ import { handleSuspension } from './runtime/suspension-handler.js';
+@@ -1317,23 +1318,37 @@ async function createWorkflowSessionInner(
+     workflowFn(...args)
+   );
+ 
++  // The array the consumer's events were last copied from, and its revision
++  // then (see event-log-memo.ts).
++  let fedFrom: { events: readonly Event[]; revision: number } = {
++    events,
++    revision: eventLogRevision(events),
++  };
++
+   const session: WorkflowSession = {
+     workflowRun,
+     argumentCount: args.length,
+     async resume(nextEvents) {
+       switch (state.type) {
+         case 'suspended': {
+-          // The full O(known events) prefix compare is required: the runtime
+-          // usually grows one array in place, but its wait-completion and
+-          // stale-reload paths REPLACE the array with a fresh full fetch, so
+-          // a rewritten prefix is a real input, not paranoia. The compares
+-          // are cheap string equality and dwarfed by the replay they avoid.
++          // The runtime usually grows one array in place, so when the same
++          // array comes back with only appends since it was copied, its prefix
++          // is what the consumer holds. Its wait-completion and stale-reload
++          // paths REPLACE the array with a fresh full fetch, and a report merge
++          // rewrites it in place, so anything else takes the full
++          // O(known events) prefix compare.
+           const knownEvents = eventsConsumer.events;
++          const known = knownEvents.length;
++          const appendedOnly =
++            nextEvents === fedFrom.events &&
++            eventLogRevision(nextEvents) === fedFrom.revision &&
++            nextEvents[known - 1] === knownEvents[known - 1];
+           const isStrictExtension =
+-            nextEvents.length > knownEvents.length &&
+-            knownEvents.every(
+-              (event, index) => event.eventId === nextEvents[index].eventId
+-            );
++            nextEvents.length > known &&
++            (appendedOnly ||
++              knownEvents.every(
++                (event, index) => event.eventId === nextEvents[index].eventId
++              ));
+           if (!isStrictExtension) {
+             state = { type: 'replay' };
+             return { type: 'replay' };
+@@ -1342,7 +1357,11 @@ async function createWorkflowSessionInner(
+           state = { type: 'running', interruption };
+           workflowContext.suspensionGeneration++;
+           workflowTraceContext.refresh();
+-          eventsConsumer.append(nextEvents.slice(knownEvents.length));
++          eventsConsumer.append(nextEvents.slice(known));
++          fedFrom = {
++            events: nextEvents,
++            revision: eventLogRevision(nextEvents),
++          };
+           return waitForExecution(workflowBody, interruption);
+         }
+         case 'replay':
