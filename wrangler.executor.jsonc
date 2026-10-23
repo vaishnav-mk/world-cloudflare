@@ -15,7 +15,10 @@
     { "name": "QUEUE_SHARD", "class_name": "QueueShard", "script_name": "workflow-sdk-cloudflare" },
     { "name": "RUN_STREAMS", "class_name": "RunStreams", "script_name": "workflow-sdk-cloudflare" }
   ] },
-  "r2_buckets": [{ "binding": "DLQ", "bucket_name": "workflow-sdk-dlq" }],
+  "r2_buckets": [
+    { "binding": "DLQ", "bucket_name": "workflow-sdk-dlq" },
+    { "binding": "PAYLOADS", "bucket_name": "workflow-sdk-payloads" }
+  ],
   "services": [{ "binding": "CONSUMER", "service": "workflow-sdk-cloudflare", "entrypoint": "QueueConsumer" }],
   // The SDK makes about one Durable Object call per event; the 10,000 default ends long inline invocations.
   "limits": { "cpu_ms": 300000, "subrequests": 1000000 },

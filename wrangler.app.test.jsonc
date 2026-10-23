@@ -14,6 +14,9 @@
     { "name": "RUN_STREAMS", "class_name": "RunStreams" }
   ] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldStore", "QueueShard", "RunStreams"] }],
-  "r2_buckets": [{ "binding": "DLQ", "bucket_name": "workflow-sdk-test-dlq" }],
+  "r2_buckets": [
+    { "binding": "DLQ", "bucket_name": "workflow-sdk-test-dlq" },
+    { "binding": "PAYLOADS", "bucket_name": "workflow-sdk-test-payloads" }
+  ],
   "services": [{ "binding": "CONSUMER", "service": "workflow-sdk-cloudflare-test", "entrypoint": "QueueConsumer" }]
 }

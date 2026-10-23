@@ -13,6 +13,9 @@
     { "name": "WORLD_STORE", "class_name": "WorldStore" }
   ] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunStreams", "QueueShard", "Sink", "WorldStore"] }],
-  "r2_buckets": [{ "binding": "DLQ", "bucket_name": "worlds-test-dlq" }],
+  "r2_buckets": [
+    { "binding": "DLQ", "bucket_name": "worlds-test-dlq" },
+    { "binding": "PAYLOADS", "bucket_name": "worlds-test-payloads" }
+  ],
   "services": [{ "binding": "CONSUMER", "service": "worlds-test", "entrypoint": "QueueConsumer" }]
 }

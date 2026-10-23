@@ -12,6 +12,8 @@ export type WorldEnv = {
   /** Service binding to the Worker's own `QueueConsumer` entrypoint. */
   CONSUMER: { consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> };
   DLQ: R2Bucket;
+  /** Payloads and stream chunks too large to keep in a Durable Object, keyed `runs/<runId>/<id>`. */
+  PAYLOADS: R2Bucket;
   DEPLOYMENT_ID: string;
   /** JSON map from deployment ID to a retained executor script name. */
   EXECUTOR_ROUTES?: string;
