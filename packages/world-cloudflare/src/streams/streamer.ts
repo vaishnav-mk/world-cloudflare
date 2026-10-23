@@ -1,21 +1,26 @@
 import type { GetChunksOptions, Streamer } from '@workflow/world';
 import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from '../constants.js';
+import { createPayloads, isPayloadRef } from '../lib/payloads.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
 const encoder = new TextEncoder();
 const toBytes = (chunk: string | Uint8Array) => typeof chunk === 'string' ? encoder.encode(chunk) : chunk;
 
-/** The World's `Streamer`. Each run's streams live in that run's `RunStreams` object. */
-export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS'>): Streamer {
+/**
+ * The World's `Streamer`. Each run's streams live in that run's `RunStreams` object. Large chunks
+ * go to R2 first, and the object keeps a ref to each.
+ */
+export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>): Streamer {
   const streamsOf = (runId: string) => transientAsWorldError(env.RUN_STREAMS.getByName(runId));
+  const payloads = createPayloads(env.PAYLOADS);
   return {
     streams: {
       write: async (runId, name, chunk) => {
-        await streamsOf(runId).write(name, toBytes(chunk));
+        await streamsOf(runId).write(name, await payloads.offload(runId, toBytes(chunk)));
       },
       writeMulti: async (runId, name, chunks) => {
-        await streamsOf(runId).writeMulti(name, chunks.map(toBytes));
+        await streamsOf(runId).writeMulti(name, await Promise.all(chunks.map((chunk) => payloads.offload(runId, toBytes(chunk)))));
       },
       close: (runId, name) => streamsOf(runId).close(name),
       list: (runId) => streamsOf(runId).list(),
@@ -25,7 +30,7 @@ export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS'>): Streamer {
         if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT) {
           throw new RangeError('Invalid stream cursor or limit');
         }
-        return streamsOf(runId).chunks(name, start, limit);
+        return payloads.resolveAll(await streamsOf(runId).chunks(name, start, limit));
       },
       /** A negative `startIndex` counts back from the end of the stream. */
       get: async (runId, name, startIndex = 0) => {
@@ -37,8 +42,11 @@ export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS'>): Streamer {
           async pull(controller) {
             const page = await stub.read(name, next);
             for (const chunk of page.data) {
-              controller.enqueue(chunk.data);
+              const offloaded = isPayloadRef(chunk.data);
+              controller.enqueue(await payloads.resolve(chunk.data));
               next = chunk.index + 1;
+              // At most one large chunk per pull, so a page of them is never all in memory at once.
+              if (offloaded) return;
             }
             if (page.done && !page.hasMore && page.data.length === 0) controller.close();
           },
