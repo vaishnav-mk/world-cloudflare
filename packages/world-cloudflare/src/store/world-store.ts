@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { EntityConflictError, WorkflowRunNotFoundError } from '@workflow/errors';
 import {
-  CreateEventSchema, isTerminalWorkflowRunStatus, mintedSpecVersion, requireEventSlot, slotToEventId,
+  CreateEventSchema, isTerminalWorkflowRunStatus, mintedSpecVersion, slotToEventId,
   type AnyEventRequest, type BatchEventItemResult, type BatchEventRequest, type CreateEventBatchParams,
   type CreateEventParams, type Event, type EventBatchResult, type EventResult, type GetWorkflowRunParams, type Hook,
   type ListEventsByCorrelationIdParams, type ListEventsParams, type ListHooksParams, type ListWorkflowRunStepsParams,
@@ -10,8 +10,8 @@ import {
 } from '@workflow/world';
 import migrations from '../../drizzle/store/migrations.js';
 import {
-  DIRECTORY_KINDS, DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_PUBLISH_BACKOFF_MS,
-  MAX_TERMINAL_WAIT_MS, MIN_ALARM_DELAY_MS, QUEUE_SHARD_NAME, REDRIVE_DELAY_MS, STORE_NAME,
+  DIRECTORY_KINDS, DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS,
+  MIN_ALARM_DELAY_MS, QUEUE_SHARD_NAME, REDRIVE_DELAY_MS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
@@ -279,31 +279,14 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   /** Inside the write's transaction: a run store owes the directory its run row, and disposed hooks. */
   #oweDirectory(data: AnyEventRequest, result: EventResult): void {
-    if (this.#isDirectory || result.event === undefined || !DIRECTORY_KINDS.has(data.eventType)) return;
-    const { runId } = result.event;
-    if (data.eventType === EventType.HookDisposed) this.#directoryOutbox.release(runId, data.correlationId);
-    this.#directoryOutbox.mark(runId, requireEventSlot(result.event.eventId));
+    if (!this.#isDirectory) this.#directoryOutbox.owe(data, result);
   }
 
-  /**
-   * Pushes what this run store owes the directory, with the run row as it is now. A failure leaves
-   * it owed and the alarm retries with backoff, so a stale index heals itself.
-   */
+  /** A failed push stays owed and the alarm retries it with backoff, so a stale index heals itself. */
   async #pushToDirectory(): Promise<void> {
     if (this.#isDirectory) return;
-    const debt = this.#directoryOutbox.due(Date.now());
-    if (debt === undefined) return;
-    const run = this.#db.getRun(debt.runId);
-    const slot = this.#db.lastSlot(debt.runId);
-    try {
-      await this.#directory().indexRun(run, slot, debt.released);
-      this.#directoryOutbox.pushed(debt.runId, slot, debt.released);
-    } catch (error) {
-      console.error('Run index push failed', { runId: debt.runId, error });
-      const at = Date.now() + Math.min(MAX_PUBLISH_BACKOFF_MS, (debt.attempts + 1) ** 2 * 1_000);
-      this.#directoryOutbox.postpone(debt.runId, at);
-      await this.#armAlarm(at, 'run index retry');
-    }
+    const retryAt = await this.#directoryOutbox.push(this.#db, this.#directory());
+    if (retryAt !== undefined) await this.#armAlarm(retryAt, 'run index retry');
   }
 
   // Directory only, called by run stores.

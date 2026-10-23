@@ -3,11 +3,9 @@ import { isTerminalWorkflowRunStatus, type Hook, type WorkflowRun } from '@workf
 import type { Db } from './db.js';
 import { takeToken } from './events/hooks.js';
 
-/**
- * The directory's side of a run that lives in its own store. Call these inside `transactionSync`.
- * The directory keeps an index copy of the run, for `runs.list` and `runs.getMany`, and a copy of
- * each hook whose token the run holds, for token uniqueness and `hooks.get*`.
- */
+// The directory's side of a run that lives in its own store. Call these inside `transactionSync`.
+// The directory keeps an index copy of the run, for `runs.list` and `runs.getMany`, and a copy of
+// each hook whose token the run holds, for token uniqueness and `hooks.get*`.
 
 /**
  * Records the run's row as of `slot` and releases the hooks it disposed of. A run that just
