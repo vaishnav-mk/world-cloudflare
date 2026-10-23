@@ -42,6 +42,17 @@ it('round-trips World calls with dates, bytes and SDK errors intact', async () =
   expect(missing).toBeInstanceOf(WorkflowRunNotFoundError);
 });
 
+it('round-trips a payload kept in R2', async () => {
+  const remote = remoteWorld();
+  const input = new Uint8Array(3 * 1024 * 1024).map((_, index) => index % 251);
+  const created = await remote.events.create(null, {
+    eventType: 'run_created', eventData: { deploymentId: 'test-v1', workflowName: 'remote', input },
+  });
+  const runId = created.run!.runId;
+  expect((await env.PAYLOADS.list({ prefix: `runs/${runId}/` })).objects).toHaveLength(1);
+  expect(Buffer.from((await remote.runs.get(runId)).input as Uint8Array).equals(input)).toBe(true);
+});
+
 it('streams bytes through streams.get', async () => {
   const remote = remoteWorld();
   const runId = `wrun_${crypto.randomUUID()}`;
