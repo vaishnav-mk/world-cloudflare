@@ -6,20 +6,20 @@ Measured on 2026-10-19 against a staging deployment on Workers Paid, using `scri
 
 Payloads and stream chunks over 1 MiB (`PAYLOAD_INLINE_MAX_BYTES`) now go to R2. The World client in the calling Worker writes them to the `PAYLOADS` bucket under `runs/<runId>/<uuid>` before the Durable Object call, and the object stores only a small ref. Reads fetch the bytes from R2 in the same Worker, so large values cross neither Durable Object RPC nor SQLite.
 
-| What | Before, inline (staging) | After, through R2 (local workerd) | What stops it now |
-| --- | --- | --- | --- |
-| Step output | 5.75 MiB; 6 MiB failed | 105 MiB; 110 MiB failed | The workflow's QuickJS VM runs out of memory reading the value |
-| Step input (one step's output passed to the next) | 4 MiB; 8 MiB failed | 100 MiB; 200 MiB failed | Same |
-| Run output | 4 MiB; 5 MiB failed | 100 MiB; 200 MiB failed | Same |
-| One stream chunk | 5 MiB; 6 MiB failed | 70 MiB; 72 MiB failed | The SDK's stream reader rejects frames of 100,000,000 bytes or more, and a chunk serializes to about 1.33 times its size |
-| Hook payload (a JSON string) | 1,040,000 bytes; 1,100,000 failed | 40 MB; 50 MB failed | workerd ran out of V8 heap (about 1.4 GB) resuming the hook. Step outputs of 105 MiB pass the same World code, so the cost is in handling one large JSON string |
-| `POST /runs` and `POST /hooks/:token` body | 1 MiB | 100,000,000 bytes | The 100 MB request body limit of the Free and Pro plans (200 MB on Business) |
+| What | Before, inline (staging) | After, through R2 (local workerd) | After, through R2 (staging, QuickJS) | What stops it now |
+| --- | --- | --- | --- | --- |
+| Step output | 5.75 MiB; 6 MiB failed | 105 MiB; 110 MiB failed | 16 MiB in 47 s; 20 MiB never finished | The workflow's QuickJS VM runs out of memory reading the value |
+| Step input (one step's output passed to the next) | 4 MiB; 8 MiB failed | 100 MiB; 200 MiB failed | Not measured | Same |
+| Run output | 4 MiB; 5 MiB failed | 100 MiB; 200 MiB failed | Not measured | Same |
+| One stream chunk | 5 MiB; 6 MiB failed | 70 MiB; 72 MiB failed | Not measured | The SDK's stream reader rejects frames of 100,000,000 bytes or more, and a chunk serializes to about 1.33 times its size |
+| Hook payload (a JSON string) | 1,040,000 bytes; 1,100,000 failed | 40 MB; 50 MB failed | Not measured | workerd ran out of V8 heap (about 1.4 GB) resuming the hook. Step outputs of 105 MiB pass the same World code, so the cost is in handling one large JSON string |
+| `POST /runs` and `POST /hooks/:token` body | 1 MiB | 100,000,000 bytes | Not measured | The 100 MB request body limit of the Free and Pro plans (200 MB on Business) |
 
 Before, every failure was `SQLITE_TOOBIG` except the hook payload, which hit the example API's 1 MiB body cap.
 
 Payloads are random bytes, so compression cannot shrink them. The local numbers come from runs of the `workflows/limits.ts` probes in the end-to-end test Worker. `pnpm run test:e2e` covers a 20 MiB step output passed to the next step, a 20 MiB run output, a 12 MiB stream chunk and a 20 MB hook payload.
 
-**Production will be lower.** Local workerd has no 128 MB memory limit per isolate, and production has not been measured since this change. Serializing, compressing and reading back one value holds several copies of it at once, so expect a single value to top out somewhere around 20 to 30 MiB on Workers. Measure it with `scripts/remote-limits.mjs`, whose default matrix now probes these sizes.
+**Production is lower.** Local workerd has no 128 MB memory limit per isolate. On staging with the QuickJS engine, an 8 MiB step output finished in 5 s, 12 MiB in 44 s and 16 MiB in 47 s (both after retries), and 20 MiB stored its `step_completed` and then never progressed: feeding the value back into the workflow VM holds several copies of it (the R2 read, decompression, deserialization, the VM's own copy) and the invocation runs out of memory, then retries. 50 MiB failed inside the step. So on QuickJS one value tops out between 16 and 20 MiB in production, below Vercel's 50 MB. Measure it with `scripts/remote-limits.mjs`.
 
 Other costs of large payloads:
 - **Memory adds up.** A replay reads the run's whole event log with payloads, so every large step output, run input and hook payload in a run counts against the same isolate, not only the largest one. Replay leaves out step inputs. `getChunks` resolves a whole page of chunks at once, while `streams.get` reads one large chunk at a time.
@@ -49,8 +49,35 @@ Every Wrangler config now sets `WORKFLOW_COMPRESSION_CODEC=gzip`, and an end-to-
 | 1,000 parallel steps | 155 s | 3,003 |
 
 - **Sequential steps** cost about 40 ms each.
-- **Fan-out** gets slower faster than linearly.
-- **Event cap.** The SDK stops a run at 25,000 events, about 8,300 steps at three events each, unless `WORKFLOW_MAX_EVENTS` raises it.
+- **Fan-out** got slower faster than linearly; see [queue delivery](#queue-delivery) for what changed.
+- **No event cap.** The SDK takes the per-run event ceiling from the World's `run_started` result, and this World returns none, so `WORKFLOW_MAX_EVENTS` does nothing and runs are not stopped at 25,000 events. A 30,000-step run (90,003 events) completed on staging; see below.
+
+### A 30,000-step run on staging
+
+The same `sequentialSteps` run of 30,000 steps (90,003 events), on staging with the QuickJS engine and executors:
+
+| Build | Result |
+| --- | --- |
+| Before VM snapshots | 51,825 events after 3,911 s, 65% of it in replay pauses that grew to 225 s, nearing the 240 s replay budget |
+| Snapshots, inline window, orphan recovery | 64,430 events after 3,804 s, 14% paused, each step slower than the last |
+| Plus the step throughput fix below | Completed in 1,402 s (23 minutes), 81 s paused, a 4 to 8 s pause every 2 minutes |
+
+Vercel's documented limits are 10,000 steps and 25,000 events per run.
+
+## Queue delivery
+
+The queue shard delivers messages to the flow handler through durability's fanout. Three changes made it faster and fairer:
+- **Parallel deliveries.** `QueueConsumer.consume` ran a batch of up to 10 deliveries one after another. It now runs them together and returns each one's outcome, so a failure retries only that delivery.
+- **Lanes.** Durability runs one batch per target at a time, and a batch lasts as long as its slowest flow, which can be the SDK's 2 minute inline window. One long run held up every other run's next delivery: a run started during a 6,000-step run waited 118 s to start. Messages now hash by run ID onto 8 lanes (`FLOW_LANES`), each its own target; the same test gives a median start of 0.48 s and a maximum of 0.52 s.
+- **Batches.** `events.createBatch` (one transaction, a savepoint per event) and `queueBatch` (three round trips per batch, one fanout transaction) are implemented. The node and isolate engines batch fan-out writes through them; the QuickJS engine still writes each pending step on its own.
+
+| 1,000 parallel steps, lab Worker, QuickJS | Time |
+| --- | --- |
+| Before | 188 s |
+| Batched writes | 163 s |
+| Plus parallel deliveries | 66 s |
+
+A delivery cut off by a reset of the queue shard (a deploy, a storage error, eviction) used to wait out its 14 minute attempt timeout. The shard now records each delivery in an `inflight` table while it runs; a fresh instance finds rows left by the previous one and sends them again, and the `scheduled` handler wakes the shard every minute so that happens promptly. The SDK tolerates the duplicate.
 
 ## Step throughput and log size
 
