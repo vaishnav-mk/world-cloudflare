@@ -30,9 +30,10 @@ export class DirectoryOutbox {
     this.#qb.insert({ tableName: 'directory_releases', data: { hook_id: hookId, run_id: runId }, onConflict: 'IGNORE' }).execute();
   }
 
-  pending(): DirectoryDebt | undefined {
+  /** The push owed now, if any. A push that failed waits out its backoff. */
+  due(now: number): DirectoryDebt | undefined {
     const row = findRow(this.#qb.fetchOne<'directory_outbox', 'run_id' | 'attempts'>({
-      tableName: 'directory_outbox', fields: ['run_id', 'attempts'],
+      tableName: 'directory_outbox', fields: ['run_id', 'attempts'], where: { conditions: 'next_at <= ?', params: [now] },
     }));
     if (row === undefined) return undefined;
     const released = allRows(this.#qb.fetchAll<'directory_releases', 'hook_id'>({

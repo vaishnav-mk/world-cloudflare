@@ -144,7 +144,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   async createEvent(runId: string | null, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
     const data = CreateEventSchema.parse(request);
-    const tokens = await this.#tokensFor(runId, data);
+    const tokens = await this.#beforeWrite(runId, data);
     await this.#armFor([data]);
     // No awaits inside: the slot, event, state and outbox rows commit together.
     const result = this.ctx.storage.transactionSync(() => {
@@ -166,6 +166,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   ): Promise<EventBatchResult> {
     checkBatch(events);
     this.#own(runId);
+    if (this.#isDirectory) this.#refuseRunCopy(runId);
     const parsed = events.map((item) => ({ ...item, event: CreateEventSchema.parse(item.event) }));
     await this.#armFor(parsed.map(({ event }) => event));
     const storage = this.ctx.storage;
@@ -236,13 +237,13 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   /**
-   * How a write learns about hook tokens. The directory decides them itself, and refuses writes to
-   * runs that only have an index copy there. A run store holds one run, and claims a new hook's
-   * token from the directory before the write.
+   * Checks this store takes the write, and how it learns about hook tokens. The directory decides
+   * tokens itself, and refuses writes to runs it only indexes. A run store takes writes for its
+   * one run, and claims a new hook's token from the directory before the write.
    */
-  async #tokensFor(runId: string | null, data: AnyEventRequest): Promise<Tokens> {
+  async #beforeWrite(runId: string | null, data: AnyEventRequest): Promise<Tokens> {
     if (this.#isDirectory) {
-      if (runId !== null && this.#db.isRunCopy(runId)) throw new Error(`Run ${runId} lives in its own store, not the directory`);
+      if (runId !== null) this.#refuseRunCopy(runId);
       return { kind: TokenClaim.Local };
     }
     if (runId === null || runId !== this.ctx.id.name) throw new WorkflowRunNotFoundError(String(runId));
@@ -258,6 +259,11 @@ export class WorldStore extends DurableObject<WorldEnv> {
       default:
         return { kind: TokenClaim.None };
     }
+  }
+
+  /** The directory's copy of a run that lives in its own store is only an index entry: it takes no writes. */
+  #refuseRunCopy(runId: string): void {
+    if (this.#db.isRunCopy(runId)) throw new Error(`Run ${runId} lives in its own store, not the directory`);
   }
 
   /** Claims a new hook's token. A write the transaction rejects anyway claims nothing. */
@@ -285,7 +291,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
    */
   async #pushToDirectory(): Promise<void> {
     if (this.#isDirectory) return;
-    const debt = this.#directoryOutbox.pending();
+    const debt = this.#directoryOutbox.due(Date.now());
     if (debt === undefined) return;
     const run = this.#db.getRun(debt.runId);
     const slot = this.#db.lastSlot(debt.runId);
