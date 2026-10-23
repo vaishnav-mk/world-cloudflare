@@ -15,6 +15,11 @@ export const runs = sqliteTable('runs', {
   created_at: integer('created_at').notNull(),
   status: text('status').notNull(),
   workflow_name: text('workflow_name').notNull(),
+  /**
+   * Set only on the directory's index copy of a run that lives in its own store: the run's last
+   * event slot when the copy was pushed. Null for a run this store holds.
+   */
+  index_slot: integer('index_slot'),
 }, (table) => [index('runs_created').on(table.created_at, table.id)]);
 
 export const steps = sqliteTable('steps', {
@@ -76,6 +81,20 @@ export const dispatchOutbox = sqliteTable('dispatch_outbox', {
   index('dispatch_outbox_pending').on(table.status, table.next_at),
 ]);
 
+/** A run store's pending push of its run row to the directory, at the slot that changed it. */
+export const directoryOutbox = sqliteTable('directory_outbox', {
+  run_id: text('run_id').primaryKey(),
+  slot: integer('slot').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  next_at: integer('next_at').notNull(),
+});
+
+/** Hooks a run store disposed of, released in the directory with the next push. */
+export const directoryReleases = sqliteTable('directory_releases', {
+  hook_id: text('hook_id').primaryKey(),
+  run_id: text('run_id').notNull(),
+});
+
 /** Row types for workers-qb, keyed by table name. */
 export type StoreSchema = {
   runs: typeof runs.$inferSelect;
@@ -84,4 +103,6 @@ export type StoreSchema = {
   waits: typeof waits.$inferSelect;
   events: typeof events.$inferSelect;
   dispatch_outbox: typeof dispatchOutbox.$inferSelect;
+  directory_outbox: typeof directoryOutbox.$inferSelect;
+  directory_releases: typeof directoryReleases.$inferSelect;
 };
