@@ -1,8 +1,9 @@
 import { EntityConflictError } from '@workflow/errors';
 import { isTerminalWorkflowRunStatus, type Hook, type WorkflowRun } from '@workflow/world';
-import { ChangeKind, EventType } from '../../enums.js';
+import { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import { unreachable } from '../../lib/unreachable.js';
 import type { EventOf } from '../../types.js';
+import type { Db } from '../db.js';
 import type { Change, HookEvent, Tx } from './types.js';
 
 /** Hooks created by this World report these fixed owner fields. */
@@ -29,39 +30,59 @@ function requireRunHook(tx: Tx, hookId: string): void {
 }
 
 /**
- * Claims the hook's token, which is unique across runs. A token held by a finished run whose
- * retention has lapsed is reclaimed; one held by any other run journals `hook_conflict` instead.
+ * Creates the hook, or journals `hook_conflict` when another run holds its token. The directory
+ * decides from its own hooks table; a run store brings the directory's answer, claimed beforehand.
  */
 function createHook(tx: Tx, run: WorkflowRun, data: EventOf<EventType.HookCreated>): Change {
   const { token } = data.eventData;
   if (data.eventData.force) throw new Error('Forced hook claims are not supported');
   if (tx.db.findHook(data.correlationId)) throw new EntityConflictError(`Hook ${data.correlationId} already exists`);
-  const holder = tx.db.findHookByToken(token);
-  if (holder) {
-    if (!canReclaim(tx, holder)) {
-      return { kind: ChangeKind.HookConflict, run, conflict: {
-        eventType: EventType.HookConflict, correlationId: data.correlationId, specVersion: tx.specVersion,
-        eventData: { token, conflictingRunId: holder.runId },
-      } };
+  const conflict = (holderRunId: string): Change => ({ kind: ChangeKind.HookConflict, run, conflict: {
+    eventType: EventType.HookConflict, correlationId: data.correlationId, specVersion: tx.specVersion,
+    eventData: { token, conflictingRunId: holderRunId },
+  } });
+  switch (tx.tokens.kind) {
+    case TokenClaim.Local: {
+      const holderRunId = takeToken(tx.db, token, tx.now);
+      if (holderRunId !== undefined) return conflict(holderRunId);
+      return { kind: ChangeKind.HookCreated, run, hook: newHook(run, data, tx.specVersion, tx.now) };
     }
-    tx.db.deleteHook(holder.hookId);
+    case TokenClaim.Granted:
+      return { kind: ChangeKind.HookCreated, run, hook: tx.tokens.hook };
+    case TokenClaim.Held:
+      return conflict(tx.tokens.holderRunId);
+    case TokenClaim.None:
+      throw new Error('hook_created needs a token claim from the directory');
+    default:
+      return unreachable(tx.tokens);
   }
-  const hook: Hook = {
+}
+
+/** The hook a `hook_created` makes for `run`. */
+export function newHook(run: WorkflowRun, data: EventOf<EventType.HookCreated>, specVersion: number, now: Date): Hook {
+  return {
     ...OWNER,
-    runId: tx.runId, hookId: data.correlationId, token,
+    runId: run.runId, hookId: data.correlationId, token: data.eventData.token,
     metadata: data.eventData.metadata, isWebhook: data.eventData.isWebhook ?? true,
     isSystem: data.eventData.isSystem ?? false, tokenRetentionUntil: data.eventData.tokenRetentionUntil,
-    specVersion: tx.specVersion, createdAt: tx.now,
+    specVersion, createdAt: now,
     resumeContext: {
       deploymentId: run.deploymentId, workflowName: run.workflowName,
       runSpecVersion: run.specVersion, encryptionPublicKey: run.encryptionPublicKey,
     },
   };
-  return { kind: ChangeKind.HookCreated, run, hook };
 }
 
-function canReclaim(tx: Tx, holder: Hook): boolean {
-  const holderRun = tx.db.findRun(holder.runId);
-  const retentionLapsed = !holder.tokenRetentionUntil || holder.tokenRetentionUntil.getTime() <= tx.now.getTime();
-  return Boolean(holderRun && isTerminalWorkflowRunStatus(holderRun.status) && retentionLapsed);
+/**
+ * Takes `token` in this store's hooks table, reclaiming it from a finished run whose retention has
+ * lapsed. Returns the run that holds it otherwise. The caller writes the new hook.
+ */
+export function takeToken(db: Db, token: string, now: Date): string | undefined {
+  const holder = db.findHookByToken(token);
+  if (holder === undefined) return undefined;
+  const holderRun = db.findRun(holder.runId);
+  const retentionLapsed = !holder.tokenRetentionUntil || holder.tokenRetentionUntil.getTime() <= now.getTime();
+  if (holderRun === undefined || !isTerminalWorkflowRunStatus(holderRun.status) || !retentionLapsed) return holder.runId;
+  db.deleteHook(holder.hookId);
+  return undefined;
 }

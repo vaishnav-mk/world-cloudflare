@@ -1,5 +1,5 @@
 import type { AnyEventRequest, Hook, Step, Wait, WorkflowRun } from '@workflow/world';
-import type { ChangeKind, EventType } from '../../enums.js';
+import type { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import type { EventOf } from '../../types.js';
 import type { Db } from '../db.js';
 import type { Outbox } from '../outbox.js';
@@ -21,10 +21,21 @@ export type HookConflictEvent = {
   eventData: { token: string; conflictingRunId: string };
 };
 
+/**
+ * The answer to a hook-token claim. The directory decides locally; a run store asks the directory
+ * before its transaction, because a token is unique across runs.
+ */
+export type Tokens =
+  | { kind: TokenClaim.Local }
+  | { kind: TokenClaim.Granted; hook: Hook }
+  | { kind: TokenClaim.Held; holderRunId: string }
+  | { kind: TokenClaim.None };
+
 /** Everything one event write needs. It all runs inside a single synchronous transaction. */
 export type Tx = {
   db: Db;
   outbox: Outbox;
+  tokens: Tokens;
   runId: string;
   now: Date;
   specVersion: number;

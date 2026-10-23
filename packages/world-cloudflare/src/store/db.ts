@@ -47,6 +47,32 @@ export class Db {
     }).execute();
   }
 
+  /**
+   * Directory: writes the index copy of a run that lives in its own store, unless the copy already
+   * reflects `slot` or later. Never overwrites a run this store holds.
+   */
+  putRunCopy(run: WorkflowRun, slot: number): void {
+    this.#qb.insert({
+      tableName: 'runs',
+      data: {
+        id: run.runId, data: encode(run), created_at: run.createdAt.getTime(),
+        status: run.status, workflow_name: run.workflowName, index_slot: slot,
+      },
+      onConflict: {
+        column: 'id',
+        data: { ...replaceData, status: new Raw('excluded.status'), index_slot: new Raw('excluded.index_slot') },
+        where: 'runs.index_slot IS NOT NULL AND runs.index_slot < excluded.index_slot',
+      },
+    }).execute();
+  }
+
+  /** Directory: whether `id` is an index copy, for a run that lives in its own store. */
+  isRunCopy(id: string): boolean {
+    return findRow(this.#qb.fetchOne({
+      tableName: 'runs', fields: ['id'], where: { conditions: ['id = ?', 'index_slot IS NOT NULL'], params: [id] },
+    })) !== undefined;
+  }
+
   // Steps.
 
   findStep(runId: string, stepId: string): Step | undefined {

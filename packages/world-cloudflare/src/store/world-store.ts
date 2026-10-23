@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
-import { EntityConflictError } from '@workflow/errors';
+import { EntityConflictError, WorkflowRunNotFoundError } from '@workflow/errors';
 import {
-  isTerminalWorkflowRunStatus, slotToEventId,
+  CreateEventSchema, isTerminalWorkflowRunStatus, mintedSpecVersion, requireEventSlot, slotToEventId,
   type AnyEventRequest, type BatchEventItemResult, type BatchEventRequest, type CreateEventBatchParams,
   type CreateEventParams, type Event, type EventBatchResult, type EventResult, type GetWorkflowRunParams, type Hook,
   type ListEventsByCorrelationIdParams, type ListEventsParams, type ListHooksParams, type ListWorkflowRunStepsParams,
@@ -10,40 +10,53 @@ import {
 } from '@workflow/world';
 import migrations from '../../drizzle/store/migrations.js';
 import {
-  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS, MIN_ALARM_DELAY_MS,
-  QUEUE_SHARD_NAME, REDRIVE_DELAY_MS,
+  DIRECTORY_KINDS, DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_PUBLISH_BACKOFF_MS,
+  MAX_TERMINAL_WAIT_MS, MIN_ALARM_DELAY_MS, QUEUE_SHARD_NAME, REDRIVE_DELAY_MS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
-import { EventType, MessageKind, RunStatus, WaitStatus } from '../enums.js';
+import { EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
 import { toJson } from '../lib/json.js';
+import { transientAsWorldError } from '../lib/transient.js';
 import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
-import type { DispatchKind, OutboxClaim, ResolveDataMode, WorldEnv } from '../types.js';
+import type { DispatchKind, EventOf, OutboxClaim, ResolveDataMode, WorldEnv } from '../types.js';
 import { Db } from './db.js';
+import { claimHookToken, indexRun } from './directory.js';
+import { DirectoryOutbox } from './directory-outbox.js';
 import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './dispatch.js';
 import { applyEvent } from './events/apply.js';
 import { checkBatch } from './events/batch.js';
+import { newHook } from './events/hooks.js';
+import type { Tokens } from './events/types.js';
 import { Outbox } from './outbox.js';
 import { listEvents, listRecords } from './pages.js';
 import { toEvent } from './rows.js';
 import { hookView, runView, stepView } from './views.js';
 
-// shortcut: one object for all runs caps run creation; per-run sharding is on the store-sharding branch.
+// shortcut: the directory is one object; it takes about three index pushes per run plus hook
+// claims, so partition the index by run ID if it ever bottlenecks.
 /**
- * Every run's event log and materialized state, in one SQLite Durable Object.
+ * A run's event log and materialized state, in a SQLite Durable Object named by the run ID. Each
+ * run's store makes its event slots, state changes and outbox rows transactional.
  *
- * One object makes event slots, state changes and cross-run hook-token uniqueness transactional.
- * Retained executors call these methods over RPC, so keep their names and signatures stable.
+ * The store named `STORE_NAME` is the directory: it keeps an index copy of every run for
+ * `runs.list` and `runs.getMany`, and the hook-token registry that keeps tokens unique across
+ * runs. It also still holds every run created before per-run stores, with their own logic.
+ * Retained executors call these methods over RPC on the directory, so keep names and signatures stable.
  */
 export class WorldStore extends DurableObject<WorldEnv> {
   readonly #db: Db;
   readonly #outbox: Outbox;
+  readonly #directoryOutbox: DirectoryOutbox;
   readonly #waiters = new Waiters();
+  readonly #isDirectory: boolean;
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
     this.#db = new Db(ctx.storage.sql);
     this.#outbox = new Outbox(ctx.storage.sql);
+    this.#directoryOutbox = new DirectoryOutbox(ctx.storage.sql);
+    this.#isDirectory = ctx.id.name === STORE_NAME;
     migrateOnStart(ctx, migrations);
   }
 
@@ -84,10 +97,12 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async getStep(runId: string, stepId: string, params?: { resolveData?: 'all' }): Promise<Step>;
   async getStep(runId: string, stepId: string, params?: { resolveData?: ResolveDataMode }): Promise<Step | StepWithoutData>;
   async getStep(runId: string, stepId: string, params?: { resolveData?: ResolveDataMode }): Promise<Step | StepWithoutData> {
+    this.#own(runId);
     return stepView(this.#db.getStep(runId, stepId), params?.resolveData);
   }
 
   async listSteps(params: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>> {
+    this.#own(params.runId);
     const page = listRecords<Step>(this.#db, 'steps', params);
     return { ...page, data: page.data.map((step) => stepView(step, params.resolveData)) };
   }
@@ -103,6 +118,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async listHooks(params: ListHooksParams): Promise<PaginatedResponse<Hook>> {
+    if (params.runId !== undefined) this.#own(params.runId);
     const page = listRecords<Hook>(this.#db, 'hooks', params);
     return { ...page, data: page.data.map((hook) => hookView(hook, params.resolveData)) };
   }
@@ -110,23 +126,34 @@ export class WorldStore extends DurableObject<WorldEnv> {
   // Events.
 
   async getEvent(runId: string, eventId: string, resolveData?: ResolveDataMode): Promise<Event> {
+    this.#own(runId);
     const slot = Number(eventId.replace(/^evnt_/, ''));
     if (!Number.isSafeInteger(slot) || slot < 1 || slotToEventId(slot) !== eventId) throw new Error('Invalid event ID');
     return toEvent(this.#db.getEvent(runId, slot), resolveData);
   }
 
   async listEvents(params: ListEventsParams): Promise<PaginatedResponse<Event>> {
+    this.#own(params.runId);
     return listEvents(this.#db, params);
   }
 
   async listEventsByCorrelationId(params: ListEventsByCorrelationIdParams): Promise<PaginatedResponse<Event>> {
+    this.#own(params.runId);
     return listEvents(this.#db, params);
   }
 
   async createEvent(runId: string | null, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
-    // No awaits inside: the slot, event, state and outbox row commit together.
-    const result = this.ctx.storage.transactionSync(() => applyEvent(this.#db, this.#outbox, runId, request, params));
-    await this.#afterCommit([{ request, result }]);
+    const data = CreateEventSchema.parse(request);
+    const tokens = await this.#tokensFor(runId, data);
+    await this.#armFor([data]);
+    // No awaits inside: the slot, event, state and outbox rows commit together.
+    const result = this.ctx.storage.transactionSync(() => {
+      const result = applyEvent(this.#db, this.#outbox, tokens, runId, data, params);
+      this.#oweDirectory(data, result);
+      return result;
+    });
+    this.#wake([result]);
+    await this.#pushToDirectory();
     return result;
   }
 
@@ -138,48 +165,164 @@ export class WorldStore extends DurableObject<WorldEnv> {
     runId: string, events: BatchEventRequest[], params: CreateEventBatchParams = {},
   ): Promise<EventBatchResult> {
     checkBatch(events);
+    this.#own(runId);
+    const parsed = events.map((item) => ({ ...item, event: CreateEventSchema.parse(item.event) }));
+    await this.#armFor(parsed.map(({ event }) => event));
     const storage = this.ctx.storage;
-    const outcomes = storage.transactionSync(() => events.map(({ event, occurredAt, computeInstanceId }) => {
+    // A batch cannot hold hook_created, so it never needs a token claim.
+    const tokens: Tokens = this.#isDirectory ? { kind: TokenClaim.Local } : { kind: TokenClaim.None };
+    const outcomes = storage.transactionSync(() => parsed.map(({ event, occurredAt, computeInstanceId }) => {
       try {
         // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
-        return storage.transactionSync(() => applyEvent(this.#db, this.#outbox, runId, event, {
-          resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
-        }));
+        return storage.transactionSync(() => {
+          const result = applyEvent(this.#db, this.#outbox, tokens, runId, event, {
+            resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
+          });
+          this.#oweDirectory(event, result);
+          return result;
+        });
       } catch (error) {
         if (EntityConflictError.is(error)) return error;
         throw error;
       }
     }));
     const results: BatchEventItemResult[] = [];
-    const committed: { request: AnyEventRequest; result: EventResult }[] = [];
-    for (const [index, outcome] of outcomes.entries()) {
+    const committed: EventResult[] = [];
+    for (const outcome of outcomes) {
       if (outcome instanceof Error || outcome.event === undefined) {
         const message = outcome instanceof Error ? outcome.message : 'The run is finished';
         results.push({ status: 409, error: 'conflict', message });
         continue;
       }
-      committed.push({ request: events[index].event, result: outcome });
+      committed.push(outcome);
       const { event, run, step, wait } = outcome;
       results.push({ status: 200, event, run, step, wait });
     }
-    await this.#afterCommit(committed);
+    this.#wake(committed);
+    await this.#pushToDirectory();
     return { results };
   }
 
+  #wake(results: EventResult[]): void {
+    for (const { event } of results) if (event !== undefined) this.#waiters.wake(event.runId);
+  }
+
   /**
-   * Wakes event subscribers and makes sure the queue messages the events owe get published. One
-   * alarm check covers all of them: each check is a storage round trip.
+   * Arms the alarm for what these events will owe, before they commit, so a crash just after the
+   * commit cannot strand an outbox row: a queue message per dispatch event, and a run store's push
+   * to the directory. One alarm check covers all of them: each check is a storage round trip.
    */
-  async #afterCommit(committed: { request: AnyEventRequest; result: EventResult }[]): Promise<void> {
+  async #armFor(events: AnyEventRequest[]): Promise<void> {
     let at = Number.POSITIVE_INFINITY;
-    for (const { request, result } of committed) {
-      if (result.event === undefined) continue;
-      this.#waiters.wake(result.event.runId);
-      if (!DISPATCH_KINDS.has(request.eventType)) continue;
-      const resumeAt = request.eventType === EventType.WaitCreated ? result.wait?.resumeAt : undefined;
-      at = Math.min(at, resumeAt ? Math.max(Date.now() + 1, resumeAt.getTime()) : Date.now() + DISPATCH_RECOVERY_DELAY_MS);
+    for (const data of events) {
+      if (data.eventType === EventType.WaitCreated) {
+        at = Math.min(at, Math.max(Date.now() + 1, data.eventData.resumeAt.getTime()));
+      } else if (DISPATCH_KINDS.has(data.eventType) || (!this.#isDirectory && DIRECTORY_KINDS.has(data.eventType))) {
+        at = Math.min(at, Date.now() + DISPATCH_RECOVERY_DELAY_MS);
+      }
     }
     if (at !== Number.POSITIVE_INFINITY) await this.#armAlarm(at, 'dispatch recovery');
+  }
+
+  // Per-run stores and the directory.
+
+  /** A run store answers only for its own run. The directory answers for any run, as before. */
+  #own(runId: string): void {
+    if (!this.#isDirectory) this.#db.getRun(runId);
+  }
+
+  #directory() {
+    return transientAsWorldError(this.env.WORLD_STORE.getByName(STORE_NAME));
+  }
+
+  /**
+   * How a write learns about hook tokens. The directory decides them itself, and refuses writes to
+   * runs that only have an index copy there. A run store holds one run, and claims a new hook's
+   * token from the directory before the write.
+   */
+  async #tokensFor(runId: string | null, data: AnyEventRequest): Promise<Tokens> {
+    if (this.#isDirectory) {
+      if (runId !== null && this.#db.isRunCopy(runId)) throw new Error(`Run ${runId} lives in its own store, not the directory`);
+      return { kind: TokenClaim.Local };
+    }
+    if (runId === null || runId !== this.ctx.id.name) throw new WorkflowRunNotFoundError(String(runId));
+    switch (data.eventType) {
+      case EventType.HookCreated:
+        return this.#claimToken(runId, data);
+      case EventType.RunStarted:
+        // A lazy start creates a run it cannot find, so first rule out a run held by the directory.
+        if (this.#db.findRun(runId) === undefined && await this.#directory().holdsRun(runId)) {
+          throw new WorkflowRunNotFoundError(runId);
+        }
+        return { kind: TokenClaim.None };
+      default:
+        return { kind: TokenClaim.None };
+    }
+  }
+
+  /** Claims a new hook's token. A write the transaction rejects anyway claims nothing. */
+  async #claimToken(runId: string, data: EventOf<EventType.HookCreated>): Promise<Tokens> {
+    const run = this.#db.getRun(runId);
+    if (isTerminalWorkflowRunStatus(run.status) || data.eventData.force || this.#db.findHook(data.correlationId)) {
+      return { kind: TokenClaim.None };
+    }
+    const hook = newHook(run, data, data.specVersion ?? run.specVersion ?? mintedSpecVersion(), new Date());
+    const holderRunId = await this.#directory().claimHookToken(hook);
+    return holderRunId === null ? { kind: TokenClaim.Granted, hook } : { kind: TokenClaim.Held, holderRunId };
+  }
+
+  /** Inside the write's transaction: a run store owes the directory its run row, and disposed hooks. */
+  #oweDirectory(data: AnyEventRequest, result: EventResult): void {
+    if (this.#isDirectory || result.event === undefined || !DIRECTORY_KINDS.has(data.eventType)) return;
+    const { runId } = result.event;
+    if (data.eventType === EventType.HookDisposed) this.#directoryOutbox.release(runId, data.correlationId);
+    this.#directoryOutbox.mark(runId, requireEventSlot(result.event.eventId));
+  }
+
+  /**
+   * Pushes what this run store owes the directory, with the run row as it is now. A failure leaves
+   * it owed and the alarm retries with backoff, so a stale index heals itself.
+   */
+  async #pushToDirectory(): Promise<void> {
+    if (this.#isDirectory) return;
+    const debt = this.#directoryOutbox.pending();
+    if (debt === undefined) return;
+    const run = this.#db.getRun(debt.runId);
+    const slot = this.#db.lastSlot(debt.runId);
+    try {
+      await this.#directory().indexRun(run, slot, debt.released);
+      this.#directoryOutbox.pushed(debt.runId, slot, debt.released);
+    } catch (error) {
+      console.error('Run index push failed', { runId: debt.runId, error });
+      const at = Date.now() + Math.min(MAX_PUBLISH_BACKOFF_MS, (debt.attempts + 1) ** 2 * 1_000);
+      this.#directoryOutbox.postpone(debt.runId, at);
+      await this.#armAlarm(at, 'run index retry');
+    }
+  }
+
+  // Directory only, called by run stores.
+
+  /** Records a run store's latest run row in the run index, and releases the tokens it gave up. */
+  async indexRun(run: WorkflowRun, slot: number, released: string[]): Promise<void> {
+    this.#requireDirectory();
+    if (!Number.isSafeInteger(slot) || slot < 1) throw new RangeError('Invalid index slot');
+    this.ctx.storage.transactionSync(() => indexRun(this.#db, run, slot, released, new Date()));
+  }
+
+  /** Claims a token for a run store's new hook. Returns the run that holds it, or null once granted. */
+  async claimHookToken(hook: Hook): Promise<string | null> {
+    this.#requireDirectory();
+    return this.ctx.storage.transactionSync(() => claimHookToken(this.#db, hook, new Date()));
+  }
+
+  /** Whether the directory holds this run itself, rather than an index copy: a run created before per-run stores. */
+  async holdsRun(runId: string): Promise<boolean> {
+    this.#requireDirectory();
+    return this.#db.findRun(runId) !== undefined && !this.#db.isRunCopy(runId);
+  }
+
+  #requireDirectory(): void {
+    if (!this.#isDirectory) throw new Error('Only the directory keeps the run index and hook tokens');
   }
 
   /** Replays events after `cursor` (a slot), or waits for the next commit. `done` once a finished run is drained. */
@@ -245,38 +388,47 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async pendingRunStartSlot(runId: string): Promise<number> {
+    this.#own(runId);
     return this.#outbox.pendingSlot(runId, EventType.RunCreated);
   }
 
   async markRunStartsPublished(runId: string, upToSlot: number): Promise<void> {
+    this.#own(runId);
     this.#outbox.publishThrough(runId, upToSlot, EventType.RunCreated);
   }
 
   async pendingHookWakeSlot(runId: string): Promise<number> {
+    this.#own(runId);
     return this.#outbox.pendingSlot(runId, EventType.HookReceived);
   }
 
   async markHookWakesPublished(runId: string, upToSlot: number): Promise<void> {
+    this.#own(runId);
     this.#outbox.publishThrough(runId, upToSlot, EventType.HookReceived);
   }
 
   async pendingStepDispatchSlot(runId: string, stepId: string, stepName: string): Promise<number> {
+    this.#own(runId);
     return pendingStepSlot(this.#db, this.#outbox, runId, stepId, stepName);
   }
 
   async markStepDispatchPublished(runId: string, slot: number): Promise<void> {
+    this.#own(runId);
     this.#outbox.publishSlot(runId, slot, EventType.StepCreated);
   }
 
   async pendingWaitDispatchSlot(runId: string, correlationId: string): Promise<number> {
+    this.#own(runId);
     return pendingWaitSlot(this.#db, this.#outbox, runId, correlationId);
   }
 
   async markWaitDispatchPublished(runId: string, slot: number): Promise<void> {
+    this.#own(runId);
     this.#outbox.publishSlot(runId, slot, EventType.WaitCreated);
   }
 
   async reopenPublishedHookWakes(runId: string): Promise<number> {
+    this.#own(runId);
     const run = this.#db.findRun(runId);
     if (run === undefined || isTerminalWorkflowRunStatus(run.status)) return 0;
     // A run that never started lost its start message; a started one lost a hook wake.
@@ -285,11 +437,13 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async reopenPublishedStepDispatch(runId: string, stepId: string, stepName: string): Promise<number> {
+    this.#own(runId);
     if (!isPendingStep(this.#db, runId, stepId, stepName)) return 0;
     return this.#reopen(runId, Date.now() + REDRIVE_DELAY_MS, EventType.StepCreated, stepId);
   }
 
   async reopenPublishedWaitDispatch(runId: string, correlationId: string): Promise<number> {
+    this.#own(runId);
     const wait = this.#db.findWait(runId, correlationId);
     if (this.#db.findRun(runId)?.status !== RunStatus.Running || wait?.status !== WaitStatus.Waiting) return 0;
     const at = Math.max(Date.now() + REDRIVE_DELAY_MS, wait.resumeAt?.getTime() ?? 0);
@@ -298,8 +452,9 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   async drainOutbox(): Promise<number> {
     const drained = await drainOutbox(this.#db, this.#outbox, this.env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME));
-    const next = this.#outbox.nextDueAt();
-    if (next !== null) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, next));
+    await this.#pushToDirectory();
+    const due = [this.#outbox.nextDueAt(), this.#directoryOutbox.nextDueAt()].filter((at) => at !== null);
+    if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));
     return drained;
   }
 
@@ -313,7 +468,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return reopened;
   }
 
-  /** Moves the alarm earlier when needed. The outbox row is already committed, so the cron covers a failure. */
+  /** Moves the alarm earlier when needed. On failure the cron covers the directory's rows, the next write a run store's. */
   async #armAlarm(at: number, purpose: string): Promise<void> {
     try {
       const alarm = await this.ctx.storage.getAlarm();

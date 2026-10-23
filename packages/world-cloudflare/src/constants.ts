@@ -1,7 +1,11 @@
 import { EventType } from './enums.js';
 import type { DispatchKind } from './types.js';
 
-/** Durable Object names. One store and one queue shard serve every run. */
+/**
+ * Durable Object names. Each run has its own store, named by its run ID; the store named
+ * `STORE_NAME` is the directory, and still holds runs created before per-run stores. One queue
+ * shard serves every run.
+ */
 export const STORE_NAME = 'global';
 export const QUEUE_SHARD_NAME = 'flow';
 
@@ -48,6 +52,12 @@ export const SNAPSHOT_PART_BYTES = 1_900_000;
 /** Events whose commit owes a queue message. */
 export const DISPATCH_KINDS: ReadonlySet<string> = new Set<DispatchKind>([
   EventType.RunCreated, EventType.HookReceived, EventType.StepCreated, EventType.WaitCreated,
+]);
+
+/** Events whose commit a run store pushes to the directory: run changes, and hook disposals. */
+export const DIRECTORY_KINDS: ReadonlySet<string> = new Set<string>([
+  EventType.RunCreated, EventType.RunStarted, EventType.RunCompleted, EventType.RunFailed, EventType.RunCancelled,
+  EventType.AttrSet, EventType.HookDisposed,
 ]);
 
 /** Dispatch outbox recovery. */

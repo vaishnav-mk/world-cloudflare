@@ -1,6 +1,6 @@
 import { EntityConflictError, WorkflowRunNotFoundError } from '@workflow/errors';
 import {
-  CreateEventSchema, getQueueTopicPrefix, getRunQueueNamespace, isTerminalWorkflowRunStatus, mintedSpecVersion,
+  getQueueTopicPrefix, getRunQueueNamespace, isTerminalWorkflowRunStatus, mintedSpecVersion,
   requireEventSlot, ValidQueueName,
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type WorkflowRun,
 } from '@workflow/world';
@@ -13,17 +13,18 @@ import { changeHook } from './hooks.js';
 import { appendEvent, eventResult, journalOf } from './journal.js';
 import { checkRunAccepts, createRun, updateRun } from './runs.js';
 import { changeStep } from './steps.js';
-import type { Change, Tx } from './types.js';
+import type { Change, Tokens, Tx } from './types.js';
 import { changeWait } from './waits.js';
 
 /**
- * Validates and writes one event with every state change it causes: the run, step, hook or wait,
- * and any queue message it owes. Call it inside `transactionSync`, so all of it commits together.
+ * Validates and writes one event, parsed with `CreateEventSchema`, with every state change it
+ * causes: the run, step, hook or wait, and any queue message it owes. Call it inside
+ * `transactionSync`, so all of it commits together.
  */
 export function applyEvent(
-  db: Db, outbox: Outbox, requestedRunId: string | null, request: AnyEventRequest, params: CreateEventParams = {},
+  db: Db, outbox: Outbox, tokens: Tokens, requestedRunId: string | null, data: AnyEventRequest,
+  params: CreateEventParams = {},
 ): EventResult {
-  const data = CreateEventSchema.parse(request);
   checkParams(data, params);
   const runId = requestedRunId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
   if (runId === null) throw new Error('runId is required');
@@ -32,7 +33,7 @@ export function applyEvent(
 
   const existing = db.findRun(runId);
   const specVersion = data.specVersion ?? existing?.specVersion ?? mintedSpecVersion();
-  const tx: Tx = { db, outbox, runId, now: new Date(), specVersion };
+  const tx: Tx = { db, outbox, tokens, runId, now: new Date(), specVersion };
   const created = createRun(tx, data, existing);
   const run = created?.run ?? existing;
   if (run === undefined) throw new WorkflowRunNotFoundError(runId);
