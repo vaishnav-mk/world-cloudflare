@@ -42,7 +42,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | Waits: create and complete | ✓ | ✓ | ✓ | 45 s sleep tested remotely |
 | Hooks: create, receive, dispose | ✓ | ✓ | ✓ | |
 | Hook tokens unique across runs, `hook_conflict` | ✓ | ✓ | ✗ | The run's shard claims the token on the token's shard before its write. A freed token is free just after the freeing write, not with it |
-| Token retention after a run finishes | ✓ | ✓ | ✗ | |
+| Token retention after a run finishes | ✓ | ✓ | ✗ | Readers stop seeing the hook once its retention ends |
 | `hook_received` rejected after a run finishes | ✓ | ✓ | ✗ | `RunExpiredError` |
 | `resumeId` dedup for `hook_received` | ✓ | ✓ | ✗ | A retry returns the first event, even after the run ends; another payload under the same `resumeId` is a 409 |
 | `attr_set`: 64 keys, 8 KiB per write | ✓ | ✓ | ✗ | Limits come from the SDK |
@@ -96,7 +96,8 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✓ | In the run's `RunStreams` object, in 1.9 MB parts; stored in plaintext ([limits](limits.md#long-runs)) |
 | Encryption and key rotation | ✗ | ✗ | ✗ | Storage, snapshots and DLQ hold plaintext |
 | Analytics | ✗ | ✗ | ✗ | |
-| `hookRetention`, `hookForceClaim`, `hookResumeDedup` | ✗ | ✗ | ✗ | Not advertised |
+| `hookRetention`, `hookResumeDedup` | ✓ | ✓ | ✗ | Advertised |
+| `hookForceClaim` | ✗ | ✗ | ✗ | Not advertised |
 | `inBandFence`, `maxConcurrency`, `invoke` | ✗ | ✗ | ✗ | Not advertised |
 | `deploymentAffinity` | ✗ | ✗ | ✗ | Routing works but the executor registry is a config variable |
 

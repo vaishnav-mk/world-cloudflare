@@ -141,7 +141,9 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async listHooks(params: ListHooksParams): Promise<PaginatedResponse<Hook>> {
     if (params.runId !== undefined) this.#own(params.runId);
     const page = listRecords<Hook>(this.#db, 'hooks', params);
-    return { ...page, data: page.data.map((hook) => hookView(hook, params.resolveData)) };
+    const now = new Date();
+    const live = page.data.filter((hook) => !this.#db.isExpiredHook(hook, now));
+    return { ...page, data: live.map((hook) => hookView(hook, params.resolveData)) };
   }
 
   // Events.

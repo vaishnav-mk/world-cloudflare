@@ -30,9 +30,10 @@ export class TokenRegistry {
     return row === undefined ? undefined : { hook: decode<Hook>(row.data), finished: row.finished === 1 };
   }
 
-  get(token: string): Hook {
+  /** The hook holding `token`. A finished run's hook past its retention is gone to readers, as on its run's shard. */
+  get(token: string, now = new Date()): Hook {
     const held = this.find(token);
-    if (held === undefined) throw new HookNotFoundError(token);
+    if (held === undefined || (held.finished && retentionLapsed(held.hook, now))) throw new HookNotFoundError(token);
     return held.hook;
   }
 

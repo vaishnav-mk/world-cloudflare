@@ -5,7 +5,7 @@ import {
   getQueueTopicPrefix, mintedSpecVersion, slotToEventId, SPEC_VERSION_MAX_SUPPORTED,
   ValidQueueName, workflowRunIdSchema,
 } from '@workflow/world';
-import { EntityConflictError, RunExpiredError } from '@workflow/errors';
+import { EntityConflictError, HookNotFoundError, RunExpiredError } from '@workflow/errors';
 import { createWorld } from '@workflow/world-cloudflare';
 
 const world = createWorld(env);
@@ -271,6 +271,30 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.events.create(contender, {
       eventType: 'hook_created', correlationId: 'new-owner', eventData: { token },
     })).hook?.runId).toBe(contender);
+  });
+
+  it('hides a retained hook once its retention ends and lets another run take its token', async () => {
+    const owner = await newRun();
+    const token = crypto.randomUUID();
+    const hookId = `hook_${crypto.randomUUID()}`;
+    await world.events.create(owner, { eventType: 'hook_created', correlationId: hookId, eventData: {
+      token, tokenRetentionUntil: new Date(Date.now() + 500),
+    } });
+    await world.events.create(owner, { eventType: 'run_completed', eventData: { output: bytes('done') } });
+    expect((await world.hooks.get(hookId)).token).toBe(token);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(HookNotFoundError.is(await world.hooks.get(hookId).catch((error: unknown) => error))).toBe(true);
+    expect(HookNotFoundError.is(await world.hooks.getByToken(token).catch((error: unknown) => error))).toBe(true);
+    expect((await world.hooks.list({ runId: owner })).data).toEqual([]);
+    const claimer = await newRun();
+    expect((await world.events.create(claimer, {
+      eventType: 'hook_created', correlationId: `hook_${crypto.randomUUID()}`, eventData: { token },
+    })).hook?.runId).toBe(claimer);
+    expect((await world.hooks.getByToken(token)).runId).toBe(claimer);
+  });
+
+  it('advertises exactly the capabilities it implements', () => {
+    expect(world.capabilities).toEqual({ hookRetention: { active: true }, hookResumeDedup: true });
   });
 
   it('validates queue names and delays, keeps keyed message IDs stable, and delays delivery', async () => {

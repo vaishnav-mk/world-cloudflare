@@ -10,6 +10,12 @@ import type { WorldEnv } from './types.js';
 export function createWorld(env: WorldEnv = platformEnv): World {
   return {
     specVersion: mintedSpecVersion(),
+    capabilities: {
+      // Hooks keep `tokenRetentionUntil` past their run's end; see `Db.isExpiredHook`.
+      hookRetention: { active: true },
+      // A unique `(run_id, resume_id)` index, and the store returns the committed event to a retry.
+      hookResumeDedup: true,
+    },
     ...createStorage(env),
     ...createQueue(env),
     ...createStreamer(env),

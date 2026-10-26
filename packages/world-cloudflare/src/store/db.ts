@@ -1,5 +1,5 @@
 import { HookNotFoundError, WorkflowRunNotFoundError } from '@workflow/errors';
-import { slotToEventId, type Hook, type Step, type Wait, type WorkflowRun } from '@workflow/world';
+import { isTerminalWorkflowRunStatus, slotToEventId, type Hook, type Step, type Wait, type WorkflowRun } from '@workflow/world';
 import { DOQB, FetchTypes, OrderTypes, Raw } from 'workers-qb';
 import { decode, encode } from '../lib/codec.js';
 import { allRows, findRow, requireRow } from '../lib/qb.js';
@@ -84,8 +84,18 @@ export class Db {
 
   getHook(hookId: string): Hook {
     const hook = this.findHook(hookId);
-    if (hook === undefined) throw new HookNotFoundError(hookId);
+    if (hook === undefined || this.isExpiredHook(hook, new Date())) throw new HookNotFoundError(hookId);
     return hook;
+  }
+
+  /**
+   * Whether a hook's run has finished and its retention, if any, has ended. Such a hook is gone to
+   * readers; its row stays until another run reclaims the token.
+   */
+  isExpiredHook(hook: Hook, now: Date): boolean {
+    const run = this.findRun(hook.runId);
+    const retained = hook.tokenRetentionUntil !== undefined && hook.tokenRetentionUntil.getTime() > now.getTime();
+    return run !== undefined && isTerminalWorkflowRunStatus(run.status) && !retained;
   }
 
   insertHook(hook: Hook): void {
