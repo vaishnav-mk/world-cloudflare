@@ -14,6 +14,7 @@ A [Workflow SDK](https://workflow-sdk.dev) v5 World that runs on Cloudflare Work
 | `patches/` | SDK patch that adds a Workers build target |
 | [`docs/contract-parity.md`](docs/contract-parity.md) | What is implemented and what is tested |
 | [`docs/limits.md`](docs/limits.md) | Measured payload, step, CPU and concurrency limits |
+| [`docs/isolate-engine.md`](docs/isolate-engine.md) | The native V8 workflow engine (`WORKFLOW_VM=isolate`), measured against QuickJS |
 
 ## Run it
 
@@ -23,7 +24,7 @@ Requires Node 24, pnpm and Git. Start with the setup script rather than `pnpm in
 ./scripts/setup-sdk.sh
 pnpm run typecheck
 pnpm test            # workerd storage, queue, stream and contract tests
-pnpm run test:e2e    # real SDK runs in workerd
+pnpm run test:e2e    # real SDK runs in workerd, on QuickJS and the isolate engine
 pnpm build           # workflow build and a Wrangler dry run
 ```
 
@@ -81,3 +82,4 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 - Steps run at least once, so give their side effects idempotency keys.
 - The SDK patch is pinned to one SDK commit; rebase it before upgrading the SDK.
 - QuickJS probably needs more CPU than the Free plan's 10 ms limit.
+- QuickJS replays slowly at large logs: about 54 s at 30,000 events. The opt-in isolate engine replays natively; see [isolate engine](docs/isolate-engine.md).
