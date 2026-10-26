@@ -180,7 +180,8 @@ it('stores incompressible step output larger than 64 KiB', async () => {
   expect(events.length).toBeLessThan(2 * 256 * 1024);
 });
 
-it('saves a VM snapshot and restores the next invocation from it', async () => {
+// VM snapshots belong to the QuickJS engine.
+it.skipIf(process.env.WORKFLOW_VM !== 'quickjs')('saves a VM snapshot and restores the next invocation from it', async () => {
   const snapshots = world.experimental_snapshots!;
   using saves = vi.spyOn(snapshots, 'save');
   using loads = vi.spyOn(snapshots, 'load');
