@@ -74,12 +74,12 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 
 ## Limits
 
-- One Durable Object holds every run and one queue shard delivers every message, so both cap throughput.
-- Payloads and stream chunks over 1 MiB go to R2. On staging with QuickJS a 16 MiB step output works and 20 MiB does not, because the workflow VM runs out of memory, so the World rejects any serialized payload over 18 MiB with a 413 and the step fails instead of retrying forever. HTTP bodies are capped at 100 MB. Measurements are in [limits](docs/limits.md#payload-sizes).
+- One Durable Object holds every run and one queue shard (8 delivery lanes) delivers every message, so run creation tops out at tens of runs per second.
+- Payloads and stream chunks over 1 MiB go to R2. On Workers with QuickJS a 16 MiB step output works and 20 MiB does not, because the workflow VM runs out of memory, so the World rejects any serialized payload over 18 MiB with a 413 and the step fails instead of retrying forever. HTTP bodies are capped at 100 MB. Measurements are in [limits](docs/limits.md#payloads).
 - R2 payload objects are never deleted, including ones left by writes that failed.
 - A step that exceeds the CPU limit is retried until the queue gives up, and holds up its delivery lane meanwhile. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
 - No encryption, retention or forced hook claims. Payloads and VM snapshots are stored in plaintext. See [contract parity](docs/contract-parity.md).
 - Steps run at least once, so give their side effects idempotency keys.
 - The SDK patch is pinned to one SDK commit; rebase it before upgrading the SDK.
 - QuickJS probably needs more CPU than the Free plan's 10 ms limit.
-- QuickJS replays slowly at large logs: about 54 s at 30,000 events. The opt-in isolate engine replays natively; see [isolate engine](docs/isolate-engine.md).
+- Workflow code runs in QuickJS by default, with VM snapshots so a new invocation does not replay the whole log. The opt-in isolate engine (`WORKFLOW_VM=isolate`) runs it natively in V8; see [isolate engine](docs/isolate-engine.md).

@@ -8,12 +8,12 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 | `QueueShard` | Queue messages, delays, retries and idempotency keys; dead letters go to R2 |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
-Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It is v1 and unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
+Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
 
 ## Requirements
 
 - The Workflow SDK built with this repo's [patch](../../patches/workflow-sdk-cloudflare-workers.patch), which adds `workflow build --target cloudflare-workers`.
-- `WORKFLOW_VM=quickjs` and the `nodejs_compat` flag, because workerd has no working `node:vm`.
+- `WORKFLOW_VM=quickjs` (or `isolate`, see [isolate engine](../../docs/isolate-engine.md)) and the `nodejs_compat` flag, because workerd has no working `node:vm`.
 - A Wrangler rule that bundles the migration SQL as text: `"rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]`.
 - `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1` to turn on VM snapshots. The World has no encryption keys, so without it the SDK replays each run's whole event log on every invocation. Snapshots hold the run's memory in plaintext, as the store already holds its payloads.
 
@@ -54,15 +54,11 @@ Add a `* * * * *` cron so `drainOutbox` can recover dispatches whose alarm was l
 
 ## Large payloads
 
-Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 MiB message limit, so the World keeps large values in R2.
+Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 MiB message limit, so the World client keeps large values in R2. It runs in the calling Worker:
+- **Writes.** Before a write reaches its Durable Object, each binary `eventData` field and stream chunk over 1 MiB goes to `PAYLOADS` at `runs/<runId>/<uuid>`, and the object stores a ref. The R2 write finishes first, so a committed ref always has its object. A serialized payload over 18 MiB is rejected with a 413, because reading it back would run the workflow out of memory.
+- **Reads.** Every read swaps refs back for their bytes, as the SDK expects; `resolveData: 'none'` reads nothing from R2.
 
-- **Writes.** The World client runs in the calling Worker. Before `events.create` or a stream write reaches its Durable Object, it puts each stream chunk and each binary `eventData` field (the event's payload, and dynamic workflow code) over 1 MiB into `PAYLOADS` at `runs/<runId>/<uuid>`. The object stores a ref instead: a 0xff byte, `r2:` and the key. The R2 write finishes before the event commits, so a committed ref always has its object.
-- **Reads.** Every `runs`, `steps`, `events`, `hooks` and `streams` read, and the result of `events.create`, swaps refs back for their bytes from R2 in the same Worker. `resolveData: 'none'` drops payloads before they leave the object, so it reads nothing from R2.
-- **Opaque bytes.** Payloads stay the SDK's serialized, possibly gzipped, bytes. Small bytes that happen to start like a ref go to R2 too, so a stored ref is never user data.
-
-The SDK expects the World to resolve refs. Core asks for payloads with `resolveData` and uses the bytes it gets back as they are (`packages/core/src/runtime/helpers.ts`, where replay calls `events.list`). The Vercel World keeps large payloads behind refs in its backend and asks it to resolve them (`remoteRefBehavior: 'resolve'` in `packages/world-vercel/src/events.ts` and `runs.ts`), and `resolveData: 'none'` drops them (`stripEventDataRefs` in `packages/world/src/events.ts`). Refs never reach the SDK from either World.
-
-Every Worker that runs World client code needs the `PAYLOADS` binding, including retained executors. An executor deployed before this change reads a ref as if it were the payload and fails the run, so don't send hook payloads over 1 MiB to runs pinned to such an executor. [Limits](../../docs/limits.md#payload-sizes) has the measured sizes and the open costs: memory, and objects left behind by failed writes.
+Every Worker that runs World client code needs the `PAYLOADS` binding, including retained executors. [Limits](../../docs/limits.md#payloads) has the measured sizes and the open costs.
 
 ## Retained executors
 
