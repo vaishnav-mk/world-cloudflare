@@ -194,6 +194,8 @@ describe('World v5 contract (workerd bindings)', () => {
     expect(RunExpiredError.is(late)).toBe(true);
     await world.events.create(owner, { eventType: 'hook_disposed', correlationId: 'owned' });
     expect((await world.hooks.list({ runId: owner })).data).toEqual([]);
+    // The release reaches the token's shard just after the disposal, in the background.
+    await expect.poll(() => world.hooks.getByToken(token).then(() => 'held', () => 'free')).toBe('free');
     expect((await world.events.create(contender, {
       eventType: 'hook_created', correlationId: 'new-owner', eventData: { token },
     })).hook?.runId).toBe(contender);
