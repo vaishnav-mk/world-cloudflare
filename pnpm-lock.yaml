@@ -65,8 +65,8 @@ importers:
         specifier: 0.45.4
         version: 0.45.4
       durability:
-        specifier: 4.1.2
-        version: 4.1.2(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2))
+        specifier: 4.2.0
+        version: 4.2.0(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2))
       ulid:
         specifier: 3.0.2
         version: 3.0.2
@@ -102,7 +102,7 @@ packages:
     engines: {node: '>=22.0.0'}
 
   '@cloudflare/unenv-preset@2.16.2':
-    resolution: {integrity: sha512-JBP1+Z7ZSNG/d4mRP+y8VC5dka3tZVMLEZRvS+rzQ4DGV1EoxRFQckcJTTkXbHSQiTj0DtNI01Zwb/V2fX0mvQ==}
+    resolution: {integrity: sha512-JBP1+Z7ZSNG/d4mRP+y8VC5dka3tZVMLEZRvS+rzQ4DGV1EoxRFQckcJTTkXbHSQiTj0DtNI01Zwb/V2fX0mvQ==, tarball: https://registry.npmjs.org/@cloudflare/unenv-preset/-/unenv-preset-2.16.2.tgz}
     peerDependencies:
       unenv: 2.0.0-rc.24
       workerd: '>1.20260305.0 <2.0.0-0'
@@ -155,8 +155,8 @@ packages:
   '@durability/storage@0.1.1':
     resolution: {integrity: sha512-FPJQwIOuUbAeI4/1xg/kW3a4iME8XwyGkTktyI0d9qbHplggtzdBVu2yw/YG+na53B0GoxL23+BDK7lcZY3M9w==}
 
-  '@durability/transforms@0.4.0':
-    resolution: {integrity: sha512-BpUOZbYonGcel68QDrvrIdgLPCi0uuGtuKo9rf5JwaLwtKtc/6unVsMijk81L7aSMH1D9ONGjqMtyCj0sZdyMg==}
+  '@durability/transforms@0.5.0':
+    resolution: {integrity: sha512-oAz0cBONX6AFHqSuUoPInEBAMPbOZadHBZErNHfW9NXontetTC/mYjdsnpYlJsIydeRmGdPJfKh38IbszwfofQ==}
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260702.1
       better-result: ^2.9.2
@@ -1102,8 +1102,8 @@ packages:
       sqlite3:
         optional: true
 
-  durability@4.1.2:
-    resolution: {integrity: sha512-0DYSqAC49ub/sAet1J1Q4knBQtxVF1AH7bXdgNzkLftDkC6WPIn+lJPKwdPQzcj3qNiLE/yrP//3bq35GzpogQ==}
+  durability@4.2.0:
+    resolution: {integrity: sha512-qaNX7TDiUfHFXDqgrF9JFlIw7ee3mde6jEaEtyobvmqPepMr5hVc2FAir8mjti5G9ex+Tm/VWIvvwNAMOvRYyw==}
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260702.1
     peerDependenciesMeta:
@@ -1558,7 +1558,7 @@ snapshots:
 
   '@durability/storage@0.1.1': {}
 
-  '@durability/transforms@0.4.0(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2))':
+  '@durability/transforms@0.5.0(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2))':
     dependencies:
       '@babel/parser': 7.29.9
       '@standard-schema/spec': 1.1.0
@@ -2086,10 +2086,10 @@ snapshots:
 
   drizzle-orm@0.45.4: {}
 
-  durability@4.1.2(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2)):
+  durability@4.2.0(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2)):
     dependencies:
       '@durability/storage': 0.1.1
-      '@durability/transforms': 0.4.0(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2))
+      '@durability/transforms': 0.5.0(better-result@2.10.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))(wrangler@4.151.1(@types/node@24.19.2))
       '@standard-schema/spec': 1.1.0
       zod: 4.6.7
     transitivePeerDependencies:

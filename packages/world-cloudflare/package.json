@@ -20,7 +20,7 @@
     "@workflow/world": "5.0.4",
     "devalue": "6.0.3",
     "drizzle-orm": "0.45.4",
-    "durability": "4.1.2",
+    "durability": "4.2.0",
     "ulid": "3.0.2",
     "workers-qb": "1.15.0"
   },
