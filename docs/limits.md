@@ -2,6 +2,22 @@
 
 Measured on 2026-10-19 against a staging deployment on Workers Paid, using `scripts/remote-limits.mjs` and the probe workflows in `workflows/limits.ts`. Payloads are random bytes, so compression cannot shrink them.
 
+## Compared with Vercel
+
+Vercel's numbers are its documented limits; ours are measured on Workers unless marked local.
+
+| Limit | Vercel | This World |
+| --- | --- | --- |
+| Steps per run | 10,000 | 30,000 sequential steps completed on staging in 1,402 s |
+| Events per run | 25,000 | 90,003 completed; the World sets no cap |
+| Replay | 240 s budget | Snapshot restore took 81 ms at 30,000 events; pauses between invocations stayed at 4 to 8 s at 75,000 events |
+| One payload | 50 MB | 16 MiB step output with QuickJS, 20 MiB with the isolate engine; the World rejects serialized payloads over 18 MiB |
+| One stream chunk | 10 MB | 70 MiB locally; not measured on Workers |
+| Run creations | 1,000 per second | 26 to 39 per second on one store before parallel delivery; much lower while the same Worker runs hundreds of flows. Per-run store sharding is on branch `store-sharding` and not yet proven faster |
+| 1,000 parallel steps | Not documented | 66 to 74 s |
+
+Run creation is the open gap. The single store object serializes every run's writes, and when flows run in the same Worker as the API, their QuickJS start-up CPU competes with `POST /runs`.
+
 ## Payload sizes
 
 Payloads and stream chunks over 1 MiB (`PAYLOAD_INLINE_MAX_BYTES`) now go to R2. The World client in the calling Worker writes them to the `PAYLOADS` bucket under `runs/<runId>/<uuid>` before the Durable Object call, and the object stores only a small ref. Reads fetch the bytes from R2 in the same Worker, so large values cross neither Durable Object RPC nor SQLite.
