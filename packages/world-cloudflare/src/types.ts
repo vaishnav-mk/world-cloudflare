@@ -57,6 +57,8 @@ export type EnqueueRequest = {
 
 /** `QueueShard.enqueueMany`'s outcome for one message. */
 export type EnqueueResult = { id: string; fresh: boolean } | { error: string };
+/** A queue message that settles an outbox row, routed through its run's store. */
+export type QueueDispatch = { request: EnqueueRequest; claim: OutboxClaim; shard: string };
 
 /** Props the dispatching consumer passes to a retained executor. */
 export type ExecutorProps = { privateDispatch?: boolean; targetDeployment?: string };

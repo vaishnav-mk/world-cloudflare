@@ -2,65 +2,38 @@ import { parse, stringify } from 'devalue';
 import {
   MessageId, QueuePrefix, ValidQueueName, type Queue, type QueueOptions, type QueuePayload,
 } from '@workflow/world';
-import { DurabilityRouting } from 'durability/routing';
 import { MessageKind } from '../enums.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
-import { toWorldError } from '../lib/transient.js';
 import { onRun } from '../store/route.js';
-import type { EnqueueRequest, EnqueueResult, OutboxClaim, WorldEnv } from '../types.js';
-import { QueueShard } from './queue-shard.js';
+import type { EnqueueRequest, EnqueueResult, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
+import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 import { queueShardFor } from './shards.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
-type Push = { shard: string; requests: EnqueueRequest[] };
 
-/** The World's `Queue`, backed by the queue shard Durable Object. */
+/** The World's `Queue`, backed by the queue shard Durable Objects. */
 export function createQueue(env: QueueEnv): Queue {
-  const shards = DurabilityRouting.client({
-    target: QueueShard,
-    namespace: () => env.QUEUE_SHARD,
-    invoke: (stub, { requests }: Push) => stub.push(requests),
-    sharding: ({ shard }) => shard,
-  });
-  /** Sends each shard its messages in one call, returning each message's result in input order. */
-  async function enqueue(ready: Ready[]): Promise<EnqueueResult[]> {
-    const byShard = new Map<string, Ready[]>();
-    for (const entry of ready) byShard.set(entry.shard, [...(byShard.get(entry.shard) ?? []), entry]);
-    const results = new Map<Ready, EnqueueResult>();
-    await Promise.all([...byShard].map(async ([shard, group]) => {
-      const pushed = await shards.push({ shard, requests: group.map(({ request }) => request) }).catch((error: unknown) => {
-        throw toWorldError(error);
-      });
-      for (const [index, entry] of group.entries()) {
-        results.set(entry, pushed.success ? pushed.value[index] ?? { error: 'Incomplete enqueue response' } : { error: pushed.error.message });
-      }
-    }));
-    return ready.map((entry) => results.get(entry) ?? { error: 'Message was not enqueued' });
-  }
+  const push = shardPusher(env.QUEUE_SHARD);
 
-  // A batch costs three round trips per shard however many messages it holds: outbox slots, enqueue, settle.
-  // The outbox calls go to each run's store, in parallel; a batch usually holds one run's messages.
+  // A message that settles an outbox row goes through its run's store, which claims the slot,
+  // pushes to the queue shard and settles the row, so the caller waits on one round trip.
+  // Other messages go straight to their queue shard.
   const queueBatch: NonNullable<Queue['queueBatch']> = async (queueName, messages) => {
     ValidQueueName.parse(queueName);
     const prepared = await Promise.all(messages.map(({ message, opts = {} }) => prepare(env, queueName, message, opts)));
     const ready = prepared.filter((entry): entry is Ready => !('error' in entry));
-    const claims = ready.flatMap(({ claim }) => (claim ? [claim] : []));
-    const slotOf = new Map<OutboxClaim, number>();
-    await Promise.all([...byRun(claims, (claim) => claim.runId)].map(async ([runId, group]) => {
-      const slots = await onRun(env.WORLD_STORE, runId, (store) => store.pendingDispatchSlots(group), answersUnknown);
-      for (const [index, claim] of group.entries()) slotOf.set(claim, slots[index] ?? 0);
-    }));
-    const enqueued = await enqueue(ready);
-    const results = new Map<Ready, EnqueueResult>(ready.map((entry, index) => [entry, enqueued[index]]));
-    const published = ready.flatMap((entry) => {
-      const slot = entry.claim ? slotOf.get(entry.claim) : 0;
-      const result = results.get(entry);
-      return entry.claim && slot && result && 'fresh' in result && result.fresh ? [{ claim: entry.claim, slot }] : [];
-    });
-    await Promise.all([...byRun(published, ({ claim }) => claim.runId)].map(([runId, group]) =>
-      onRun(env.WORLD_STORE, runId, (store) => store.markDispatchesPublished(group), answersUnknown)));
+    const claimed = ready.filter((entry): entry is QueueDispatch => entry.claim !== undefined);
+    const direct = ready.filter((entry) => entry.claim === undefined);
+    const results = new Map<Ready, EnqueueResult>();
+    await Promise.all([
+      push(direct).then((pushed) => direct.forEach((entry, index) => results.set(entry, pushed[index]))),
+      ...[...byRun(claimed)].map(async ([runId, group]) => {
+        const pushed = await onRun(env.WORLD_STORE, runId, (store) => store.dispatch(group), answersUnknown);
+        group.forEach((entry, index) => results.set(entry, pushed[index] ?? { error: 'Incomplete enqueue response' }));
+      }),
+    ]);
     return prepared.map((entry) => {
       if ('error' in entry) return { messageId: null, error: entry.error, retryable: false };
       const result = results.get(entry);
@@ -112,9 +85,9 @@ export function createQueue(env: QueueEnv): Queue {
 /** The directory answers outbox calls for a run it lacks, such as one whose `run_created` is still in flight. */
 const answersUnknown = { answersUnknown: true };
 
-function byRun<T>(items: T[], runIdOf: (item: T) => string): Map<string, T[]> {
-  const groups = new Map<string, T[]>();
-  for (const item of items) groups.set(runIdOf(item), [...(groups.get(runIdOf(item)) ?? []), item]);
+function byRun(items: QueueDispatch[]): Map<string, QueueDispatch[]> {
+  const groups = new Map<string, QueueDispatch[]>();
+  for (const item of items) groups.set(item.claim.runId, [...(groups.get(item.claim.runId) ?? []), item]);
   return groups;
 }
 

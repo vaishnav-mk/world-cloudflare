@@ -19,9 +19,10 @@ import { toJson } from '../lib/json.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
+import { shardPusher } from '../queue/push.js';
 import { queueShardFor } from '../queue/shards.js';
 import { storeShardFor } from './route.js';
-import type { DispatchKind, EventOf, OutboxClaim, ResolveDataMode, WorldEnv } from '../types.js';
+import type { DispatchKind, EnqueueResult, EventOf, OutboxClaim, QueueDispatch, ResolveDataMode, WorldEnv } from '../types.js';
 import { Db } from './db.js';
 import { claimHookToken, indexRun } from './directory.js';
 import { DirectoryOutbox } from './directory-outbox.js';
@@ -55,6 +56,7 @@ function freesTokens(data: AnyEventRequest, result: EventResult): boolean {
 export class WorldStore extends DurableObject<WorldEnv> {
   readonly #db: Db;
   readonly #outbox: Outbox;
+  readonly #pushQueue: ReturnType<typeof shardPusher>;
   readonly #directoryOutbox: DirectoryOutbox;
   readonly #waiters = new Waiters();
   readonly #isDirectory: boolean;
@@ -65,6 +67,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     super(ctx, env);
     this.#db = new Db(ctx.storage.sql);
     this.#outbox = new Outbox(ctx.storage.sql);
+    this.#pushQueue = shardPusher(env.QUEUE_SHARD);
     this.#directoryOutbox = new DirectoryOutbox(ctx.storage.sql);
     this.#isDirectory = ctx.id.name === STORE_NAME;
     migrateOnStart(ctx, migrations);
@@ -383,6 +386,21 @@ export class WorldStore extends DurableObject<WorldEnv> {
           return unreachable(claim);
       }
     }));
+  }
+
+  /**
+   * Publishes queue messages that settle this store's outbox rows: claims their slots, pushes them
+   * to their queue shards, and settles the rows the queue accepted fresh, all in one call.
+   */
+  async dispatch(entries: QueueDispatch[]): Promise<EnqueueResult[]> {
+    const slots = await this.pendingDispatchSlots(entries.map(({ claim }) => claim));
+    const results = await this.#pushQueue(entries);
+    await this.markDispatchesPublished(entries.flatMap(({ claim }, index) => {
+      const slot = slots[index] ?? 0;
+      const result = results[index];
+      return slot && 'fresh' in result && result.fresh ? [{ claim, slot }] : [];
+    }));
+    return results;
   }
 
   /** Settles the outbox rows of messages the queue accepted, in one call. */
