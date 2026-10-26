@@ -81,6 +81,29 @@ export const dispatchOutbox = sqliteTable('dispatch_outbox', {
   index('dispatch_outbox_pending').on(table.status, table.next_at),
 ]);
 
+/**
+ * On a token shard: the hook that holds each token hashing to the shard, copied at claim time. A
+ * token is unique across every run because only its shard grants it.
+ */
+export const tokens = sqliteTable('tokens', {
+  token: text('token').primaryKey(),
+  hook_id: text('hook_id').notNull(),
+  data: text('data').notNull(),
+  /** 1 once the holder run has finished: the token is then free after the hook's retention. */
+  finished: integer('finished').notNull().default(0),
+});
+
+/** Token releases a store owes the token shards: a disposed hook (`disposed` 1), or a hook whose run finished. */
+export const tokenReleases = sqliteTable('token_releases', {
+  hook_id: text('hook_id').primaryKey(),
+  token: text('token').notNull(),
+  disposed: integer('disposed').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  next_at: integer('next_at').notNull(),
+});
+
+// The directory's run index used these two. Nothing writes them now; they stay because schema changes are additive.
+
 /** A run store's pending push of its run row to the directory, at the slot that changed it. */
 export const directoryOutbox = sqliteTable('directory_outbox', {
   run_id: text('run_id').primaryKey(),
@@ -105,4 +128,6 @@ export type StoreSchema = {
   dispatch_outbox: typeof dispatchOutbox.$inferSelect;
   directory_outbox: typeof directoryOutbox.$inferSelect;
   directory_releases: typeof directoryReleases.$inferSelect;
+  tokens: typeof tokens.$inferSelect;
+  token_releases: typeof tokenReleases.$inferSelect;
 };

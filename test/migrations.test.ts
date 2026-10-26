@@ -13,7 +13,8 @@ const tables = (sql: SqlStorage) => sql.exec<{ name: string }>(
 it('creates each object’s tables on first use', async () => {
   await runInDurableObject(env.WORLD_STORE.getByName(crypto.randomUUID()), (_store, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining([
-      'directory_outbox', 'directory_releases', 'dispatch_outbox', 'events', 'hooks', 'runs', 'steps', 'waits',
+      'directory_outbox', 'directory_releases', 'dispatch_outbox', 'events', 'hooks', 'runs', 'steps', 'token_releases',
+      'tokens', 'waits',
     ]));
   });
   await runInDurableObject(env.QUEUE_SHARD.getByName(crypto.randomUUID()), (_shard, state) => {
@@ -29,7 +30,10 @@ it('applies the baselines over tables created before Drizzle, keeping their rows
     { namespace: env.WORLD_STORE, migrations: storeMigrations,
       seed: `INSERT INTO runs (id, data, created_at, status, workflow_name) VALUES ('kept', 'x', 1, 'pending', 'w')`,
       read: 'SELECT id FROM runs',
-      newer: ['DROP TABLE directory_outbox', 'DROP TABLE directory_releases', 'ALTER TABLE runs DROP COLUMN index_slot'] },
+      newer: [
+        'DROP TABLE directory_outbox', 'DROP TABLE directory_releases', 'ALTER TABLE runs DROP COLUMN index_slot',
+        'DROP TABLE tokens', 'DROP TABLE token_releases',
+      ] },
     { namespace: env.QUEUE_SHARD, migrations: queueMigrations,
       seed: `INSERT INTO queue_dedup (key, id, queue_name, payload_digest, delay_ms) VALUES ('kept', 'm', 'q', 'd', 0)`,
       read: 'SELECT key AS id FROM queue_dedup', newer: ['DROP TABLE inflight'] },
