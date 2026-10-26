@@ -47,6 +47,15 @@ export async function sequentialSteps(count: number) {
   return total;
 }
 
+/** Runs `count` steps, then sleeps a second so a fresh invocation replays the whole log, then one more step. */
+export async function replayAfterSteps(count: number) {
+  'use workflow';
+  let total = 0;
+  for (let index = 0; index < clamp(count, MAX_COUNT); index++) total = await increment(total);
+  await sleep(1000);
+  return increment(total);
+}
+
 /** Runs `count` steps at once. */
 export async function parallelSteps(count: number) {
   'use workflow';

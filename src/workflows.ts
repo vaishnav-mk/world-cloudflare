@@ -1,6 +1,7 @@
 import { approval, delayed, demo, failPermanently, longDelay, progress, retryOnce } from '../workflows/demo.js';
 import {
-  cpuStep, hookPayload, parallelSteps, runOutput, sequentialSteps, sleepHours, stepInput, stepOutput, streamChunk,
+  cpuStep, hookPayload, parallelSteps, replayAfterSteps, runOutput, sequentialSteps, sleepHours, stepInput, stepOutput,
+  streamChunk,
 } from '../workflows/limits.js';
 
 /** Workflows `POST /runs` may start, by request name. IDs are the ones `workflow build` generates. */
@@ -18,6 +19,7 @@ export const workflows = {
   streamChunk: Object.assign(streamChunk, { workflowId: 'workflow//./workflows/limits//streamChunk' }),
   sequentialSteps: Object.assign(sequentialSteps, { workflowId: 'workflow//./workflows/limits//sequentialSteps' }),
   parallelSteps: Object.assign(parallelSteps, { workflowId: 'workflow//./workflows/limits//parallelSteps' }),
+  replayAfterSteps: Object.assign(replayAfterSteps, { workflowId: 'workflow//./workflows/limits//replayAfterSteps' }),
   sleepHours: Object.assign(sleepHours, { workflowId: 'workflow//./workflows/limits//sleepHours' }),
   cpuStep: Object.assign(cpuStep, { workflowId: 'workflow//./workflows/limits//cpuStep' }),
   hookPayload: Object.assign(hookPayload, { workflowId: 'workflow//./workflows/limits//hookPayload' }),
