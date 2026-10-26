@@ -11,7 +11,7 @@ import {
 import migrations from '../../drizzle/store/migrations.js';
 import {
   DIRECTORY_KINDS, DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS,
-  MIN_ALARM_DELAY_MS, QUEUE_SHARD_NAME, REDRIVE_DELAY_MS, STORE_NAME,
+  MIN_ALARM_DELAY_MS, REDRIVE_DELAY_MS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
@@ -19,6 +19,7 @@ import { toJson } from '../lib/json.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
+import { queueShardFor } from '../queue/shards.js';
 import type { DispatchKind, EventOf, OutboxClaim, ResolveDataMode, WorldEnv } from '../types.js';
 import { Db } from './db.js';
 import { claimHookToken, indexRun } from './directory.js';
@@ -471,7 +472,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async drainOutbox(): Promise<number> {
-    const drained = await drainOutbox(this.#db, this.#outbox, this.env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME));
+    const drained = await drainOutbox(this.#db, this.#outbox, (key) => this.env.QUEUE_SHARD.getByName(queueShardFor(key)));
     if (!this.#isDirectory) await this.#push();
     const due = [this.#outbox.nextDueAt(), this.#directoryOutbox.nextDueAt()].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));

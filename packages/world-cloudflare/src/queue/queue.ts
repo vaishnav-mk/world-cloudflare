@@ -2,20 +2,45 @@ import { parse, stringify } from 'devalue';
 import {
   MessageId, QueuePrefix, ValidQueueName, type Queue, type QueueOptions, type QueuePayload,
 } from '@workflow/world';
-import { QUEUE_SHARD_NAME } from '../constants.js';
+import { DurabilityRouting } from 'durability/routing';
 import { MessageKind } from '../enums.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
-import { transientAsWorldError } from '../lib/transient.js';
+import { toWorldError } from '../lib/transient.js';
 import { onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, OutboxClaim, WorldEnv } from '../types.js';
+import { QueueShard } from './queue-shard.js';
 import { executorFor } from './routes.js';
+import { queueShardFor } from './shards.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
-type Ready = { request: EnqueueRequest; claim?: OutboxClaim };
+type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
+type Push = { shard: string; requests: EnqueueRequest[] };
 
 /** The World's `Queue`, backed by the queue shard Durable Object. */
 export function createQueue(env: QueueEnv): Queue {
-  // A batch costs three round trips however many messages it holds: outbox slots, enqueue, settle.
+  const shards = DurabilityRouting.client({
+    target: QueueShard,
+    namespace: () => env.QUEUE_SHARD,
+    invoke: (stub, { requests }: Push) => stub.push(requests),
+    sharding: ({ shard }) => shard,
+  });
+  /** Sends each shard its messages in one call, returning each message's result in input order. */
+  async function enqueue(ready: Ready[]): Promise<EnqueueResult[]> {
+    const byShard = new Map<string, Ready[]>();
+    for (const entry of ready) byShard.set(entry.shard, [...(byShard.get(entry.shard) ?? []), entry]);
+    const results = new Map<Ready, EnqueueResult>();
+    await Promise.all([...byShard].map(async ([shard, group]) => {
+      const pushed = await shards.push({ shard, requests: group.map(({ request }) => request) }).catch((error: unknown) => {
+        throw toWorldError(error);
+      });
+      for (const [index, entry] of group.entries()) {
+        results.set(entry, pushed.success ? pushed.value[index] ?? { error: 'Incomplete enqueue response' } : { error: pushed.error.message });
+      }
+    }));
+    return ready.map((entry) => results.get(entry) ?? { error: 'Message was not enqueued' });
+  }
+
+  // A batch costs three round trips per shard however many messages it holds: outbox slots, enqueue, settle.
   // The outbox calls go to each run's store, in parallel; a batch usually holds one run's messages.
   const queueBatch: NonNullable<Queue['queueBatch']> = async (queueName, messages) => {
     ValidQueueName.parse(queueName);
@@ -27,10 +52,7 @@ export function createQueue(env: QueueEnv): Queue {
       const slots = await onRun(env.WORLD_STORE, runId, (store) => store.pendingDispatchSlots(group), answersUnknown);
       for (const [index, claim] of group.entries()) slotOf.set(claim, slots[index] ?? 0);
     }));
-    const enqueued = ready.length
-      ? await transientAsWorldError(env.QUEUE_SHARD.getByName(QUEUE_SHARD_NAME)).enqueueMany(ready.map(({ request }) => request))
-      : [];
-    if (enqueued.length !== ready.length) throw new Error('Incomplete enqueue response');
+    const enqueued = await enqueue(ready);
     const results = new Map<Ready, EnqueueResult>(ready.map((entry, index) => [entry, enqueued[index]]));
     const published = ready.flatMap((entry) => {
       const slot = entry.claim ? slotOf.get(entry.claim) : 0;
@@ -112,6 +134,7 @@ async function prepare(
       deduplicationKey: key, payloadDigest: digest,
     },
     claim: outboxClaim(message),
+    shard: queueShardFor(key ?? ('runId' in message && typeof message.runId === 'string' ? message.runId : '')),
   };
 }
 

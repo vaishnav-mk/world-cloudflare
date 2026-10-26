@@ -1,13 +1,13 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DurabilityFanout, DurabilityScheduler, type DurabilityFanoutMessage, type StoredMessage } from 'durability';
+import { DurabilityRouting, type EnqueueResult as RoutedResult } from 'durability/routing';
 import { parse } from 'devalue';
 import migrations from '../../drizzle/queue/migrations.js';
 import {
-  DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_LANES, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS,
+  DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, DeliveryResult, MessageKind } from '../enums.js';
-import { fnv1a32Hex } from '../lib/hash.js';
 import { unreachable } from '../lib/unreachable.js';
 import { onRun } from '../store/route.js';
 import type { Delivery, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
@@ -16,12 +16,8 @@ import { InflightTable } from './inflight.js';
 
 type FanoutMessage = DurabilityFanoutMessage<Envelope>;
 
-/** Fanout targets: the lanes, and `flow` itself for messages queued before lanes existed. */
-const TARGETS = [FLOW_TARGET, ...Array.from({ length: FLOW_LANES }, (_, lane) => `${FLOW_TARGET}-${lane}`)];
-
 /** What `enqueueMany` does with one message: settled already, or sent to the fanout. */
-type Send = { message: OutgoingMessage; key?: string; fresh: boolean };
-type Plan = { done: EnqueueResult } | Send;
+type Plan = { done: EnqueueResult } | { message: OutgoingMessage; key?: string; fresh: boolean };
 
 /** The run wake a dead-lettered message carried, so the store can reopen its outbox row. */
 type DeadLetter =
@@ -29,21 +25,25 @@ type DeadLetter =
   | { kind: MessageKind.WaitContinuation; runId: string; correlationId: string }
   | { kind: MessageKind.HookWake; runId: string };
 
-// shortcut: one shard object with 8 lanes serves every run; shard by run if enqueue throughput caps runs.
-/** Delayed, retried delivery of workflow queue messages to the `CONSUMER` entrypoint. */
+/** One queue shard: delayed, retried delivery of its runs' messages to the `CONSUMER` entrypoint. */
 export class QueueShard extends DurableObject<WorldEnv> {
   readonly #dedup = new DedupTable(this.ctx.storage.sql);
   readonly #inflight = new InflightTable(this.ctx.storage.sql);
-  readonly #scheduler = new DurabilityScheduler({ context: this.ctx, alarmConcurrency: TARGETS.length });
+  readonly #scheduler = new DurabilityScheduler({ context: this.ctx });
+  // Feeds the load snapshots `push` returns to the routing client.
+  readonly #routing = new DurabilityRouting();
   readonly #fanout = new DurabilityFanout<Envelope>({
     scheduler: this.#scheduler,
+    routing: this.#routing,
     retries: {
       maxAttempts: Number(this.env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS),
       delay: (attempt) => Math.min(MAX_QUEUE_RETRY_DELAY_MS, attempt * 1000),
     },
-    targets: Object.fromEntries(TARGETS.map((target) => [target, {
-      ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages: FanoutMessage[]) => this.#deliver(messages),
-    }])),
+    targets: {
+      [FLOW_TARGET]: {
+        ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages) => this.#deliver(messages),
+      },
+    },
     dlq: (message) => this.#deadLetter(message),
   });
 
@@ -74,30 +74,29 @@ export class QueueShard extends DurableObject<WorldEnv> {
     const plans = messages.map((request) => this.#plan(request));
     const sends = plans.flatMap((plan) => ('message' in plan ? [plan] : []));
     const ids = new Map<Plan, string>();
-    const failures = new Map<Plan, string>();
-    const byLane = new Map<string, Send[]>();
-    for (const send of sends) {
-      const lane = laneFor(send.message.encoded);
-      byLane.set(lane, [...(byLane.get(lane) ?? []), send]);
-    }
-    for (const [lane, group] of byLane) {
-      const result = await this.#fanout.enqueue(
-        group.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })), { targets: [lane] },
-      );
-      for (const [index, send] of group.entries()) {
-        if (!result.success) {
-          failures.set(send, result.error.message);
-          continue;
+    let failure = 'Message was not enqueued';
+    if (sends.length) {
+      const result = await this.#fanout.enqueue(sends.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })));
+      if (result.success) {
+        for (const [index, send] of sends.entries()) {
+          ids.set(send, result.value[index]);
+          if (send.key) this.#dedup.markAccepted(send.key);
         }
-        ids.set(send, result.value[index]);
-        if (send.key) this.#dedup.markAccepted(send.key);
+      } else {
+        failure = result.error.message;
       }
     }
     return plans.map((plan) => {
       if ('done' in plan) return plan.done;
       const id = ids.get(plan);
-      return id === undefined ? { error: failures.get(plan) ?? 'Message was not enqueued' } : { id, fresh: plan.fresh };
+      return id === undefined ? { error: failure } : { id, fresh: plan.fresh };
     });
+  }
+
+  /** `enqueueMany` for durability's routing client, which reads the shard's load from the result. */
+  async push(requests: EnqueueRequest[]): Promise<RoutedResult<EnqueueResult[]>> {
+    const value = await this.enqueueMany(requests);
+    return { success: true, value, load: await this.#fanout.load() };
   }
 
   /** Claims a message's deduplication key, deciding whether to send it and as what. */
@@ -205,18 +204,6 @@ export class QueueShard extends DurableObject<WorldEnv> {
         unreachable(letter);
     }
   }
-}
-
-/** The lane for a message, by its run, so one run's messages share a lane. */
-export function laneFor(encoded: string): string {
-  let payload: unknown;
-  try {
-    payload = parse(encoded);
-  } catch {
-    payload = undefined;
-  }
-  const runId = isRecord(payload) && typeof payload.runId === 'string' ? payload.runId : '';
-  return `${FLOW_TARGET}-${Number.parseInt(fnv1a32Hex(runId), 16) % FLOW_LANES}`;
 }
 
 function readDeadLetter(payload: unknown): DeadLetter | undefined {

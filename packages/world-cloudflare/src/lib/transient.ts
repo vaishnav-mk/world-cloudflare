@@ -19,7 +19,8 @@ export function transientAsWorldError<T extends object>(stub: T): T {
   });
 }
 
-function toWorldError(error: unknown): unknown {
+/** The error to throw for a Durable Object failure: a retryable 503 when the platform marks it transient. */
+export function toWorldError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   // SAFETY: Durable Object errors carry these optional flags; any other Error has neither.
   const { retryable, overloaded } = error as DurableObjectError;

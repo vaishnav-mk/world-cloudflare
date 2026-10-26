@@ -78,11 +78,11 @@ export const MAX_QUEUE_RETRY_DELAY_MS = 30_000;
  */
 export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
 /**
- * Delivery lanes in the queue shard. Durability runs one batch per target at a time, and a batch
- * lasts as long as its slowest flow (up to the SDK's inline window), so runs hash onto lanes and
- * one long run holds up only the runs on its own lane.
+ * Queue shards. Durability delivers one batch per shard at a time, and a batch lasts as long as its
+ * slowest flow (up to the SDK's inline window), so runs hash onto shards: a long run holds up only
+ * the runs on its own shard, and each shard is its own Durable Object.
  */
-export const FLOW_LANES = 8;
+export const QUEUE_SHARDS = 16;
 
 /** Workers for Platforms script names in `EXECUTOR_ROUTES`. */
 export const EXECUTOR_SCRIPT_PATTERN = /^[a-zA-Z0-9_-]{1,63}$/;

@@ -43,7 +43,9 @@ export function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlati
 }
 
 /** Publishes due outbox rows. Returns how many rows were due. */
-export async function drainOutbox(db: Db, outbox: Outbox, shard: DurableObjectStub<QueueShard>): Promise<number> {
+export async function drainOutbox(
+  db: Db, outbox: Outbox, shardFor: (key: string) => DurableObjectStub<QueueShard>,
+): Promise<number> {
   const due = outbox.due(Date.now(), OUTBOX_DRAIN_BATCH);
   for (const row of due) {
     const plan = planFor(db, outbox, row);
@@ -55,7 +57,7 @@ export async function drainOutbox(db: Db, outbox: Outbox, shard: DurableObjectSt
         outbox.postpone(row, Date.now() + WAIT_RETRY_DELAY_MS);
         break;
       case DispatchAction.Publish:
-        await publish(outbox, shard, row, plan.message, plan.stillOwed);
+        await publish(outbox, shardFor, row, plan.message, plan.stillOwed);
         break;
     }
   }
@@ -99,7 +101,8 @@ function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
 }
 
 async function publish(
-  outbox: Outbox, shard: DurableObjectStub<QueueShard>, row: OutboxRow, message: Message, stillOwed: () => boolean,
+  outbox: Outbox, shardFor: (key: string) => DurableObjectStub<QueueShard>, row: OutboxRow, message: Message,
+  stillOwed: () => boolean,
 ): Promise<void> {
   // A dead-lettered key is spent forever, so each redrive needs a new one.
   const key = row.redrive ? `${message.key}:redrive-${row.redrive}` : message.key;
@@ -107,7 +110,8 @@ async function publish(
   const [id, digest] = await Promise.all([messageIdFor(key), sha256Hex(body)]);
   if (!stillOwed()) return;
   try {
-    await shard.enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
+    // The shard that holds this key's deduplication, the same one the SDK's own publish reaches.
+    await shardFor(key).enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
     outbox.publishRow(row);
   } catch (error) {
     console.error('Workflow dispatch recovery failed', { runId: row.run_id, slot: row.slot, error });
