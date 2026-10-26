@@ -28,7 +28,7 @@ type DeadLetter =
   | { kind: MessageKind.WaitContinuation; runId: string; correlationId: string }
   | { kind: MessageKind.HookWake; runId: string };
 
-// shortcut: one shard for every queue; partition by run once delivery throughput is measured.
+// shortcut: one shard object with 8 lanes serves every run; shard by run if enqueue throughput caps runs.
 /** Delayed, retried delivery of workflow queue messages to the `CONSUMER` entrypoint. */
 export class QueueShard extends DurableObject<WorldEnv> {
   readonly #dedup = new DedupTable(this.ctx.storage.sql);
@@ -197,6 +197,8 @@ export class QueueShard extends DurableObject<WorldEnv> {
         // Reopens the run's start instead if it never started.
         await store.reopenPublishedHookWakes(letter.runId);
         break;
+      default:
+        unreachable(letter);
     }
   }
 }
