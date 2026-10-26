@@ -67,6 +67,79 @@ describe('World v5 contract (workerd bindings)', () => {
     );
   });
 
+  it('gets one event by ID, with or without its payload', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    await world.events.create(runId, {
+      eventType: 'step_created', correlationId: 'step', eventData: { stepName: 'work', input: bytes('argument') },
+    });
+    expect(await world.events.get(runId, slotToEventId(3))).toMatchObject({
+      runId, eventId: slotToEventId(3), eventType: 'step_created', correlationId: 'step',
+      eventData: { stepName: 'work', input: bytes('argument') },
+    });
+    const bare = await world.events.get(runId, slotToEventId(3), { resolveData: 'none' });
+    expect(bare).toHaveProperty('eventData.stepName', 'work');
+    expect(bare).not.toHaveProperty('eventData.input');
+    await expect(world.events.get(runId, slotToEventId(4))).rejects.toThrow('not found');
+    await expect(world.events.get(await newRun(), slotToEventId(3))).rejects.toThrow('not found');
+    await expect(world.events.get(runId, 'evnt_3')).rejects.toThrow('Invalid event ID');
+  });
+
+  it("lists one correlation ID's events within its run, in slot order and a page at a time", async () => {
+    const runId = await newRun();
+    const other = await newRun();
+    const step = (correlationId: string) => ({
+      eventType: 'step_created' as const, correlationId, eventData: { stepName: 'work', input: bytes('argument') },
+    });
+    await world.events.create(runId, { eventType: 'run_started' });
+    await world.events.create(other, { eventType: 'run_started' });
+    await world.events.create(runId, step('a'));
+    await world.events.create(runId, step('b'));
+    await world.events.create(other, step('a'));
+    await world.events.create(runId, { eventType: 'step_started', correlationId: 'a' });
+    await world.events.create(runId, { eventType: 'step_completed', correlationId: 'a', eventData: { result: bytes('result') } });
+    const page = (pagination?: { limit?: number; cursor?: string; sortOrder?: 'asc' | 'desc' }) =>
+      world.events.listByCorrelationId({ runId, correlationId: 'a', pagination });
+    const first = await page({ limit: 2 });
+    expect(first.data.map((event) => [event.eventId, event.eventType])).toEqual([
+      [slotToEventId(3), 'step_created'], [slotToEventId(5), 'step_started'],
+    ]);
+    expect(first.hasMore).toBe(true);
+    const second = await page({ limit: 2, cursor: first.cursor! });
+    expect(second.data.map((event) => event.eventId)).toEqual([slotToEventId(6)]);
+    expect(second.data[0]).toHaveProperty('eventData.result', bytes('result'));
+    expect(second.hasMore).toBe(false);
+    expect((await page({ sortOrder: 'desc' })).data.map((event) => event.eventId)).toEqual([6, 5, 3].map(slotToEventId));
+    const bare = await world.events.listByCorrelationId({ runId, correlationId: 'a', resolveData: 'none' });
+    expect(bare.data[2]).not.toHaveProperty('eventData.result');
+  });
+
+  it('collapses retries of one hook resume onto its first event and refuses a resumeId reused for another payload', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    await world.events.create(runId, { eventType: 'hook_created', correlationId: 'hook', eventData: { token: crypto.randomUUID() } });
+    const resume = (payload: string) => ({
+      eventType: 'hook_received' as const, correlationId: 'hook', eventData: { payload: bytes(payload) },
+    });
+    const params = { resumeId: 'resume-1', resumePayloadDigest: 'digest-a' };
+    const [first, concurrent] = await Promise.all([
+      world.events.create(runId, resume('a'), params), world.events.create(runId, resume('a'), params),
+    ]);
+    expect(concurrent.event).toEqual(first.event);
+    expect(first.event?.resumeId).toBe('resume-1');
+    expect((await world.events.create(runId, resume('a'), params)).event).toEqual(first.event);
+    const reused = await world.events.create(runId, resume('b'), { resumeId: 'resume-1', resumePayloadDigest: 'digest-b' })
+      .then(() => null, (error: unknown) => error);
+    expect(EntityConflictError.is(reused)).toBe(true);
+    // Another resume ID is another resume of the same hook.
+    await world.events.create(runId, resume('b'), { resumeId: 'resume-2', resumePayloadDigest: 'digest-b' });
+    const received = (await world.events.list({ runId })).data.filter((event) => event.eventType === 'hook_received');
+    expect(received.map((event) => event.resumeId)).toEqual(['resume-1', 'resume-2']);
+    // A retry that lands after the run finished still gets the committed event.
+    await world.events.create(runId, { eventType: 'run_completed', eventData: { output: bytes('done') } });
+    expect((await world.events.create(runId, resume('a'), params)).event).toEqual(first.event);
+  });
+
   it('appends a batch in order, each event with the outcome its own create would have had', async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });

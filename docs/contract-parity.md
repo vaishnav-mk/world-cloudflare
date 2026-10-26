@@ -19,7 +19,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | `steps.get`, `steps.list` | ✓ | ✓ | ✗ | |
 | `events.create`, atomic with entity state | ✓ | ✓ | ✓ | One SQLite transaction in the run's store shard |
 | `events.list` | ✓ | ✓ | ✓ | |
-| `events.get`, `events.listByCorrelationId` | ✓ | ✗ | ✗ | |
+| `events.get`, `events.listByCorrelationId` | ✓ | ✓ | ✗ | |
 | `hooks.get`, `hooks.getByToken`, `hooks.list` | ✓ | ✓ | ✓ | `list` and `getByToken` remotely. `getByToken` reads the token's shard, a run's `list` its run's shard; `get` and a global `list` ask every store |
 | `resolveData: none` and `skip-step-inputs` | ✓ | ✓ | ✗ | `skip-step-inputs` leaves out `step_created` inputs, so replay never loads them from R2 |
 | Dense per-run event slots | ✓ | ✓ | ✓ | |
@@ -44,7 +44,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | Hook tokens unique across runs, `hook_conflict` | ✓ | ✓ | ✗ | The run's shard claims the token on the token's shard before its write. A freed token is free just after the freeing write, not with it |
 | Token retention after a run finishes | ✓ | ✓ | ✗ | |
 | `hook_received` rejected after a run finishes | ✓ | ✓ | ✗ | `RunExpiredError` |
-| `resumeId` dedup for `hook_received` | ✓ | ✗ | ✗ | |
+| `resumeId` dedup for `hook_received` | ✓ | ✓ | ✗ | A retry returns the first event, even after the run ends; another payload under the same `resumeId` is a 409 |
 | `attr_set`: 64 keys, 8 KiB per write | ✓ | ✓ | ✗ | Limits come from the SDK |
 | Forced hook claims | ✗ | ✗ | ✗ | Throws |
 | In-band writer fencing | ✗ | ✗ | ✗ | Throws |
