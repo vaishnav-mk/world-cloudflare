@@ -64,7 +64,7 @@ A 30,000-step `sequentialSteps` run (90,003 events) with QuickJS and per-deploym
 
 The SDK takes the per-run event ceiling from the World's `run_started` result, and this World returns none, so runs are not stopped at 25,000 events.
 
-Snapshots are stored in plaintext, like every payload. The SDK only snapshots runs with an encryption key unless `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1`, which the Wrangler templates set.
+Snapshots are encrypted when `WORKFLOW_ENCRYPTION_SECRET` is set ([encryption](../packages/world-cloudflare/README.md#encryption)) and stored in plaintext otherwise, like every payload. Without a key the SDK only snapshots with `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1`, which the Wrangler templates set.
 
 ## Queue delivery
 

@@ -5,7 +5,7 @@
   "compatibility_date": "2026-10-17",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
-  // VM snapshots are stored unencrypted, like every payload; see docs/limits.md.
+  // Without a WORKFLOW_ENCRYPTION_SECRET secret, VM snapshots are stored unencrypted, like every payload; see docs/limits.md.
   "vars": { "DEPLOYMENT_ID": "dev-v1", "WORKFLOW_VM": "quickjs", "WORKFLOW_COMPRESSION_CODEC": "gzip", "WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED": "1" },
   "durable_objects": { "bindings": [
     { "name": "WORLD_STORE", "class_name": "WorldStore" },

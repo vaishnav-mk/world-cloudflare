@@ -24,7 +24,7 @@ Requires Node 24, pnpm and Git. Start with the setup script rather than `pnpm in
 ./scripts/setup-sdk.sh
 pnpm run typecheck
 pnpm test            # workerd storage, queue, stream and contract tests
-pnpm run test:e2e    # real SDK runs in workerd, on QuickJS and the isolate engine
+pnpm run test:e2e    # real SDK runs in workerd: QuickJS, the isolate engine, and encrypted
 pnpm build           # workflow build and a Wrangler dry run
 ```
 
@@ -45,10 +45,10 @@ The example has no authentication. Anyone who can reach it can start runs, and w
 
 ## Deploy
 
-1. Create the R2 dead-letter and payload buckets, then deploy the Worker with your copy of `wrangler.jsonc`.
+1. Create the R2 dead-letter and payload buckets, then deploy the Worker with your copy of `wrangler.jsonc`. To encrypt payloads at rest, set a secret before the first run: `openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)).
 2. Optional: to keep in-flight runs on the code that started them, give each release its own executor.
    1. Deploy a copy of `wrangler.executor.jsonc` into a Workers for Platforms dispatch namespace, bound as `EXECUTORS`.
-   2. Add its deployment ID to `EXECUTOR_ROUTES`, keeping the old entries.
+   2. Give it the main Worker's `WORKFLOW_ENCRYPTION_SECRET`, if set, and add its deployment ID to `EXECUTOR_ROUTES`, keeping the old entries.
    3. Move `DEPLOYMENT_ID` to the new release. Keep old executors until their runs drain.
 3. Run the remote tests:
 
@@ -78,7 +78,7 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 - Payloads and stream chunks over 1 MiB go to R2. On Workers with QuickJS a 16 MiB step output works and 20 MiB does not, because the workflow VM runs out of memory, so the World rejects any serialized payload over 18 MiB with a 413 and the step fails instead of retrying forever. HTTP bodies are capped at 100 MB. Measurements are in [limits](docs/limits.md#payloads).
 - R2 payload objects are never deleted, including ones left by writes that failed.
 - A step that exceeds the CPU limit is retried until the queue gives up, and holds up its delivery lane meanwhile. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
-- No encryption, retention or forced hook claims. Payloads and VM snapshots are stored in plaintext. See [contract parity](docs/contract-parity.md).
+- Payloads and VM snapshots are stored in plaintext unless the Worker has a `WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)), and that secret cannot be rotated. Finished runs are kept forever, and forced hook claims are not supported. See [contract parity](docs/contract-parity.md).
 - Steps run at least once, so give their side effects idempotency keys.
 - The SDK patch is pinned to one SDK commit; rebase it before upgrading the SDK.
 - QuickJS probably needs more CPU than the Free plan's 10 ms limit.
