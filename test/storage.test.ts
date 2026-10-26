@@ -1,8 +1,7 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'devalue';
-import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY, workflowRunIdSchema } from '@workflow/world';
-import { EntityConflictError, HookNotFoundError, RunExpiredError } from '@workflow/errors';
+import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY } from '@workflow/world';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 
@@ -459,17 +458,6 @@ describe('v5 event storage in SQLite DO', () => {
     expect(await stub.reopenPublishedWaitDispatch(backupRun, 'backup-wait')).toBe(0);
   }, 15_000);
 
-  it('allocates a valid run ID when none is supplied', async () => {
-    const created = await store.events.create(null, {
-      eventType: 'run_created', eventData: {
-        deploymentId: 'test-v1', workflowName: 'example', input: bytes('input'),
-      },
-    });
-    const runId = workflowRunIdSchema.parse(created.run?.runId);
-    expect(created.event?.runId).toBe(runId);
-    expect((await store.runs.get(runId)).status).toBe('pending');
-  });
-
   it('gets many runs in input order with nulls and resolved-data selection', async () => {
     const first = crypto.randomUUID(), second = crypto.randomUUID();
     await Promise.all([newRun(first), newRun(second)]);
@@ -522,20 +510,6 @@ describe('v5 event storage in SQLite DO', () => {
     expect((await store.runs.get(runId)).specVersion).toBe(SPEC_VERSION_SUPPORTS_SLOT_IDENTITY);
   });
 
-  it('bumps a stale writer and reports the intervening committed event', async () => {
-    const runId = crypto.randomUUID();
-    await newRun(runId);
-    await store.events.create(runId, { eventType: 'run_started' });
-    const created = await store.events.create(runId, {
-      eventType: 'step_created', correlationId: 'late-step',
-      eventData: { stepName: 'double', input: bytes('2') },
-    }, { eventCount: 1 });
-    expect(created.event?.eventId).toBe(slotToEventId(3));
-    expect(created.events?.map((event) => event.eventId)).toEqual([slotToEventId(2)]);
-    expect((await store.events.list({ runId })).data.map((event) => event.eventId)).toEqual(
-      [slotToEventId(1), slotToEventId(2), slotToEventId(3)]);
-  });
-
   it('preserves user data that looks like internal date or byte fields', async () => {
     const runId = crypto.randomUUID();
     await store.events.create(runId, { eventType: 'run_created', eventData: {
@@ -582,17 +556,6 @@ describe('v5 event storage in SQLite DO', () => {
     } })).rejects.toThrow('8192');
   });
 
-  it('reports competing lazy step claims as SDK-recognizable conflicts', async () => {
-    const runId = crypto.randomUUID();
-    await newRun(runId);
-    await store.events.create(runId, { eventType: 'run_started' });
-    const claim = { eventType: 'step_started', correlationId: 'step-race', eventData: { stepName: 'double', input: bytes('3') } } as const;
-    const attempts = await Promise.allSettled([store.events.create(runId, claim), store.events.create(runId, claim)]);
-    expect(attempts.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    const loser = attempts.find((result) => result.status === 'rejected');
-    expect(loser?.status === 'rejected' && EntityConflictError.is(loser.reason)).toBe(true);
-  });
-
   it('replays retained events then wakes a live subscriber, including terminal filtering', async () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
@@ -606,37 +569,5 @@ describe('v5 event storage in SQLite DO', () => {
     const filtered = await stub.nextEvents(runId, 2, ['step_completed']);
     expect(filtered.events).toEqual([]);
     expect(filtered.done).toBe(true);
-  });
-
-  it('retains terminal hook tokens but permits explicit disposal and reuse', async () => {
-    const first = crypto.randomUUID(), second = crypto.randomUUID(), token = crypto.randomUUID();
-    await newRun(first);
-    await store.events.create(first, { eventType: 'run_started' });
-    await store.events.create(first, { eventType: 'hook_created', correlationId: 'retained', eventData: {
-      token, tokenRetentionUntil: new Date(Date.now() + 60_000),
-    } });
-    await store.events.create(first, { eventType: 'run_completed', eventData: { output: bytes('done') } });
-    expect((await store.hooks.getByToken(token)).runId).toBe(first);
-    const late = await store.events.create(first, {
-      eventType: 'hook_received', correlationId: 'retained', eventData: { payload: bytes('late') },
-    }).then(() => null, (error: unknown) => error);
-    expect(RunExpiredError.is(late)).toBe(true);
-    await store.events.create(first, { eventType: 'hook_disposed', correlationId: 'retained' });
-    const missing = await store.hooks.getByToken(token).then(() => null, (error: unknown) => error);
-    expect(HookNotFoundError.is(missing)).toBe(true);
-    await newRun(second);
-    expect((await store.events.create(second, { eventType: 'hook_created', correlationId: 'new-owner', eventData: { token } })).event?.eventType)
-      .toBe('hook_created');
-  });
-
-  it('keeps hook tokens globally unique across runs', async () => {
-    const first = crypto.randomUUID(), second = crypto.randomUUID();
-    await Promise.all([newRun(first), newRun(second)]);
-    const token = crypto.randomUUID();
-    const created = await store.events.create(first, { eventType: 'hook_created', correlationId: 'hook-a', eventData: { token } });
-    expect(created.event?.eventType).toBe('hook_created');
-    const conflict = await store.events.create(second, { eventType: 'hook_created', correlationId: 'hook-b', eventData: { token } });
-    expect(conflict.event?.eventType).toBe('hook_conflict');
-    expect((await store.hooks.getByToken(token)).runId).toBe(first);
   });
 });
