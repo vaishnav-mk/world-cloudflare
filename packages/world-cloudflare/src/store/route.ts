@@ -1,6 +1,6 @@
 import { WorkflowRunNotFoundError } from '@workflow/errors';
-import { FAN_OUT_CONCURRENCY, STORE_NAME, STORE_SHARDS } from '../constants.js';
-import { fnv1a32Hex } from '../lib/hash.js';
+import { FAN_OUT_CONCURRENCY, STORE_NAME } from '../constants.js';
+import { storeShardFor, storeShardNames, tokenShardFor } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
@@ -10,22 +10,20 @@ type Store = ReturnType<Namespace['getByName']>;
 /** Runs the legacy store holds, created before store shards. A run never moves, and there are finitely many. */
 const legacyRuns = new Set<string>();
 
-/** Every store: each shard, then the legacy store. */
-const STORE_NAMES = [...Array.from({ length: STORE_SHARDS }, (_, index) => `store-${index}`), STORE_NAME];
 
 /** The legacy store: runs created before store shards, with their hooks. */
 export function legacyStore(namespace: Namespace): Store {
   return transientAsWorldError(namespace.getByName(STORE_NAME));
 }
 
-/** The store shard for a run ID or a hook token: a stable hash of it. */
-export function storeShardFor(key: string): string {
-  return `store-${Number.parseInt(fnv1a32Hex(key), 16) % STORE_SHARDS}`;
+/** A run's store shard. A new run's `run_created` goes straight to it. */
+export function storeShard(namespace: Namespace, runId: string): Store {
+  return transientAsWorldError(namespace.getByName(storeShardFor(runId)));
 }
 
-/** The store shard for a key. A new run's `run_created` goes straight to its shard, and a token's claims to its own. */
-export function storeShard(namespace: Namespace, key: string): Store {
-  return transientAsWorldError(namespace.getByName(storeShardFor(key)));
+/** The store shard that registers a hook token. */
+export function tokenShard(namespace: Namespace, token: string): Store {
+  return transientAsWorldError(namespace.getByName(tokenShardFor(token)));
 }
 
 /**
@@ -48,8 +46,9 @@ export async function onRun<T>(
   return result;
 }
 
-/** Makes a cross-run read on every store, `FAN_OUT_CONCURRENCY` at a time. Results are in `STORE_NAMES` order. */
+/** Makes a cross-run read on every store shard, then the legacy store, `FAN_OUT_CONCURRENCY` at a time, answering in that order. */
 export async function onEveryStore<T>(namespace: Namespace, call: (store: Store) => T): Promise<Awaited<T>[]> {
+  const STORE_NAMES = [...storeShardNames(), STORE_NAME];
   const results: Awaited<T>[] = [];
   let next = 0;
   const worker = async () => {

@@ -22,7 +22,8 @@ import { groupBy } from '../lib/group.js';
 import { createPayloads } from '../lib/payloads.js';
 import type { WorldEnv } from '../types.js';
 import { mergePages } from './pages.js';
-import { legacyStore, onEveryStore, onRun, storeShard, storeShardFor } from './route.js';
+import { storeShardFor } from '../lib/shards.js';
+import { legacyStore, onEveryStore, onRun, storeShard, tokenShard } from './route.js';
 
 type AnyRun = WorkflowRun | WorkflowRunWithoutData;
 type AnyStep = Step | StepWithoutData;
@@ -141,7 +142,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
         if (found === undefined) throw new HookNotFoundError(hookId);
         return resolveAll(found);
       },
-      getByToken: async (token, params) => resolveAll(await storeShard(stores, token).getHookByToken(token, params?.resolveData)),
+      getByToken: async (token, params) => resolveAll(await tokenShard(stores, token).getHookByToken(token, params?.resolveData)),
       list: async (params) => {
         if (params.runId !== undefined) return resolveAll(await onRun(stores, params.runId, (store) => store.listHooks(params), answersUnknown));
         return resolveAll(mergePages(await onEveryStore(stores, (store) => store.listHooks(params)), hookKey, params.pagination));

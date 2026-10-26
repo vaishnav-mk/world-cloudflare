@@ -18,6 +18,8 @@ export type WorldEnv = {
   /** JSON map from deployment ID to a retained executor script name. */
   EXECUTOR_ROUTES?: string;
   QUEUE_MAX_ATTEMPTS?: string;
+  /** JSON list of `ShardEpoch`, oldest first. Append an epoch starting in the future to add shards. */
+  SHARD_EPOCHS?: string;
 };
 
 /** The `POST` export of the app's generated `.well-known/workflow/v1/flow.mjs`. */
@@ -57,6 +59,8 @@ export type EnqueueRequest = {
 
 /** `QueueShard.enqueueMany`'s outcome for one message. */
 export type EnqueueResult = { id: string; fresh: boolean } | { error: string };
+/** From `from` (ms since the epoch, run ULID time), new runs use `store` store shards and `queue` queue shards. */
+export type ShardEpoch = { from: number; store: number; queue: number };
 /** A queue message that settles an outbox row, routed through its run's store. */
 export type QueueDispatch = { request: EnqueueRequest; claim: OutboxClaim; shard: string };
 

@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { storeShardFor } from '../packages/world-cloudflare/src/store/route.js';
+import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { parse } from 'devalue';
 import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY } from '@workflow/world';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';

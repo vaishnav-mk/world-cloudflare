@@ -1,8 +1,8 @@
 import { EventType } from './enums.js';
-import type { DispatchKind } from './types.js';
+import type { DispatchKind, ShardEpoch } from './types.js';
 
 /**
- * Durable Object names. Runs and hook tokens live on store shards (`STORE_SHARDS`); the store named
+ * Durable Object names. Runs and hook tokens live on store shards (`lib/shards.ts`); the store named
  * `STORE_NAME` is the legacy store, which still holds runs created before store shards.
  * `QUEUE_SHARD_NAME` named the single queue shard before queue shards.
  */
@@ -77,17 +77,12 @@ export const MAX_QUEUE_RETRY_DELAY_MS = 30_000;
  */
 export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
 /**
- * Queue shards. Durability delivers one batch per shard at a time, and a batch lasts as long as its
- * slowest flow (up to the SDK's inline window), so runs hash onto shards: a long run holds up only
- * the runs on its own shard, and each shard is its own Durable Object.
+ * Shard counts per epoch when `SHARD_EPOCHS` is unset. Queue shards: durability delivers one batch
+ * per shard at a time, and a batch lasts as long as its slowest flow, so a long run holds up only
+ * the runs on its own shard. Store shards: runs spread over warm objects instead of each paying to
+ * create a new Durable Object on its first write.
  */
-export const QUEUE_SHARDS = 256;
-/**
- * Store shards. Each run lives in shard `hash(runId) % STORE_SHARDS`, so runs spread over a fixed
- * pool of warm objects instead of each paying to create a new Durable Object on its first write.
- * Changing the count moves runs, so only raise it with a migration.
- */
-export const STORE_SHARDS = 128;
+export const DEFAULT_SHARD_EPOCHS: readonly ShardEpoch[] = [{ from: 0, store: 128, queue: 256 }];
 /** Store calls in flight at once when a cross-run read, such as `runs.list`, asks every store. */
 export const FAN_OUT_CONCURRENCY = 32;
 

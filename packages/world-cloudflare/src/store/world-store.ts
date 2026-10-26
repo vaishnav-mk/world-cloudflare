@@ -20,8 +20,7 @@ import { transientAsWorldError } from '../lib/transient.js';
 import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
 import { shardPusher } from '../queue/push.js';
-import { queueShardFor } from '../queue/shards.js';
-import { storeShardFor } from './route.js';
+import { queueShardFor, storeShardFor, tokenShardFor } from '../lib/shards.js';
 import type {
   DispatchKind, EnqueueResult, EventOf, HeldToken, OutboxClaim, QueueDispatch, ResolveDataMode, TokenRelease, WorldEnv,
 } from '../types.js';
@@ -51,7 +50,7 @@ function freesTokens(data: AnyEventRequest, result: EventResult): boolean {
  * A store shard, a SQLite Durable Object holding the runs that hash to it (`storeShardFor(runId)`):
  * their event logs and materialized state, whose event slots, state changes and outbox rows commit
  * in one transaction. Each shard is also the registry for the hook tokens that hash to it
- * (`storeShardFor(token)`), which keeps a token unique across runs.
+ * (`tokenShardFor(token)`), which keeps a token unique across runs.
  *
  * The store named `STORE_NAME` is the legacy store: it still holds every run created before store
  * shards, with their hooks. Retained executors call these methods over RPC, so keep names and
@@ -304,7 +303,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     const hook = newHook(run, data, data.specVersion ?? run.specVersion ?? mintedSpecVersion(), new Date());
     // Releases this store owes go first, so a run can claim again a token it just disposed of.
     await this.#push();
-    const holderRunId = await this.#store(storeShardFor(hook.token)).claimHookToken(hook);
+    const holderRunId = await this.#store(tokenShardFor(hook.token)).claimHookToken(hook);
     return holderRunId === null ? { kind: TokenClaim.Granted, hook } : { kind: TokenClaim.Held, holderRunId };
   }
 
@@ -337,7 +336,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
    * the claim on.
    */
   async claimHookToken(hook: Hook): Promise<string | null> {
-    const shard = storeShardFor(hook.token);
+    const shard = tokenShardFor(hook.token);
     if (shard !== this.ctx.id.name) return this.#store(shard).claimHookToken(hook);
     await this.#importLegacyTokens(shard);
     return this.ctx.storage.transactionSync(() => this.#tokens.claim(hook, new Date()));
@@ -345,7 +344,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   /** Applies releases from the stores whose hooks held these tokens. */
   async releaseTokens(releases: TokenRelease[]): Promise<void> {
-    const shards = new Set(releases.map(({ token }) => storeShardFor(token)));
+    const shards = new Set(releases.map(({ token }) => tokenShardFor(token)));
     for (const shard of shards) {
       if (shard !== this.ctx.id.name) throw new Error('Token released on the wrong shard');
       await this.#importLegacyTokens(shard);
@@ -358,7 +357,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   /** The hook holding `token`, read from the token's shard. */
   async getHookByToken(token: string, resolveData?: ResolveDataMode): Promise<Hook> {
-    const shard = storeShardFor(token);
+    const shard = tokenShardFor(token);
     if (shard !== this.ctx.id.name) return this.#store(shard).getHookByToken(token, resolveData);
     await this.#importLegacyTokens(shard);
     return hookView(this.#tokens.get(token), resolveData);
@@ -393,7 +392,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   /** The tokens this store's hooks hold that hash to `shard`, for that token shard's one-time import. */
   async legacyTokens(shard: string): Promise<HeldToken[]> {
-    return this.#db.hooksWithTokens((token) => storeShardFor(token) === shard).map((hook) => {
+    return this.#db.hooksWithTokens((token) => tokenShardFor(token) === shard).map((hook) => {
       const run = this.#db.findRun(hook.runId);
       return { hook, finished: run !== undefined && isTerminalWorkflowRunStatus(run.status) };
     });
@@ -550,7 +549,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async drainOutbox(): Promise<number> {
-    const drained = await drainOutbox(this.#db, this.#outbox, (key) => this.env.QUEUE_SHARD.getByName(queueShardFor(key)));
+    const drained = await drainOutbox(this.#db, this.#outbox, (key, runId) => this.env.QUEUE_SHARD.getByName(queueShardFor(key, runId)));
     await this.#push();
     const due = [this.#outbox.nextDueAt(), this.#releases.nextDueAt()].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));

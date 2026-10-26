@@ -9,7 +9,7 @@ import { onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
-import { queueShardFor } from './shards.js';
+import { queueShardFor } from '../lib/shards.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
@@ -95,6 +95,7 @@ async function prepare(
   if (!Number.isFinite(delay) || delay < 0) return { error: 'Invalid queue delay' };
   const key = idempotencyKey ? `${queueName}:${idempotencyKey}` : undefined;
   const encoded = stringify(message);
+  const runId = 'runId' in message && typeof message.runId === 'string' ? message.runId : '';
   const [id, digest] = key ? await Promise.all([messageIdFor(key), sha256Hex(encoded)]) : [crypto.randomUUID(), undefined];
   return {
     request: {
@@ -102,7 +103,7 @@ async function prepare(
       deduplicationKey: key, payloadDigest: digest,
     },
     claim: outboxClaim(message),
-    shard: queueShardFor(key ?? ('runId' in message && typeof message.runId === 'string' ? message.runId : '')),
+    shard: queueShardFor(key ?? runId, runId),
   };
 }
 

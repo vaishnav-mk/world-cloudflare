@@ -4,7 +4,7 @@ import { MAX_PUBLISH_BACKOFF_MS } from '../constants.js';
 import { groupBy } from '../lib/group.js';
 import { allRows, requireRow } from '../lib/qb.js';
 import type { TokenRelease } from '../types.js';
-import { storeShardFor } from './route.js';
+import { tokenShardFor } from '../lib/shards.js';
 import type { StoreSchema } from './tables.js';
 
 /** The method a store calls on a token's shard. */
@@ -46,7 +46,7 @@ export class TokenOutbox {
         tableName: 'token_releases', where: { conditions: 'next_at <= ?', params: [Date.now()] },
       }));
       if (due.length === 0) return retryAt;
-      await Promise.all([...groupBy(due, (row) => storeShardFor(row.token))].map(async ([name, rows]) => {
+      await Promise.all([...groupBy(due, (row) => tokenShardFor(row.token))].map(async ([name, rows]) => {
         try {
           await shard(name).releaseTokens(rows.map((row) => ({ token: row.token, hookId: row.hook_id, disposed: row.disposed === 1 })));
         } catch (error) {

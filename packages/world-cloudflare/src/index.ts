@@ -1,4 +1,4 @@
-import { QUEUE_SHARD_NAMES } from './queue/shards.js';
+import { queueShardNames } from './lib/shards.js';
 import { legacyStore, onRun } from './store/route.js';
 import type { WorldEnv } from './types.js';
 import { createWorld } from './world.js';
@@ -23,7 +23,7 @@ export type { Delivery, DeliveryOutcome, FlowHandler, WorldEnv } from './types.j
 export async function drainOutbox(env: Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD'>): Promise<number> {
   const [published] = await Promise.all([
     legacyStore(env.WORLD_STORE).drainOutbox(),
-    ...QUEUE_SHARD_NAMES.map((name) => env.QUEUE_SHARD.getByName(name).wake()),
+    ...queueShardNames().map((name) => env.QUEUE_SHARD.getByName(name).wake()),
   ]);
   return published;
 }

@@ -44,7 +44,7 @@ export function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlati
 
 /** Publishes due outbox rows. Returns how many rows were due. */
 export async function drainOutbox(
-  db: Db, outbox: Outbox, shardFor: (key: string) => DurableObjectStub<QueueShard>,
+  db: Db, outbox: Outbox, shardFor: (key: string, runId: string) => DurableObjectStub<QueueShard>,
 ): Promise<number> {
   const due = outbox.due(Date.now(), OUTBOX_DRAIN_BATCH);
   for (const row of due) {
@@ -101,7 +101,7 @@ function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
 }
 
 async function publish(
-  outbox: Outbox, shardFor: (key: string) => DurableObjectStub<QueueShard>, row: OutboxRow, message: Message,
+  outbox: Outbox, shardFor: (key: string, runId: string) => DurableObjectStub<QueueShard>, row: OutboxRow, message: Message,
   stillOwed: () => boolean,
 ): Promise<void> {
   // A dead-lettered key is spent forever, so each redrive needs a new one.
@@ -111,7 +111,7 @@ async function publish(
   if (!stillOwed()) return;
   try {
     // The shard that holds this key's deduplication, the same one the SDK's own publish reaches.
-    await shardFor(key).enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
+    await shardFor(key, row.run_id).enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
     outbox.publishRow(row);
   } catch (error) {
     console.error('Workflow dispatch recovery failed', { runId: row.run_id, slot: row.slot, error });

@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { storeShardFor } from '../packages/world-cloudflare/src/store/route.js';
+import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../packages/world-cloudflare/src/constants.js';
 import { toJson } from '../packages/world-cloudflare/src/lib/json.js';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
