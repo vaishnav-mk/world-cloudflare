@@ -82,7 +82,7 @@ export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
  * slowest flow (up to the SDK's inline window), so runs hash onto shards: a long run holds up only
  * the runs on its own shard, and each shard is its own Durable Object.
  */
-export const QUEUE_SHARDS = 64;
+export const QUEUE_SHARDS = 256;
 /**
  * Store shards. Each run lives in shard `hash(runId) % STORE_SHARDS`, so runs spread over a fixed
  * pool of warm objects instead of each paying to create a new Durable Object on its first write.
