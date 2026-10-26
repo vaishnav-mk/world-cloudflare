@@ -8,8 +8,8 @@ import { Waiters } from '../lib/waiters.js';
 import type { WorldEnv } from '../types.js';
 import type { StreamsSchema } from './tables.js';
 
-export type StreamInfo = { tailIndex: number; done: boolean };
-export type ChunkPage = {
+type StreamInfo = { tailIndex: number; done: boolean };
+type ChunkPage = {
   data: { index: number; data: Uint8Array }[];
   cursor: string | null;
   hasMore: boolean;

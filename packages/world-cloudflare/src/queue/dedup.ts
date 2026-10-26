@@ -12,7 +12,7 @@ export type OutgoingMessage = {
   targetDeployment?: string;
 };
 
-export type Claim =
+type Claim =
   | { status: ClaimStatus.New }
   | { status: ClaimStatus.Replay; message: OutgoingMessage }
   | { status: ClaimStatus.Accepted; id: string };

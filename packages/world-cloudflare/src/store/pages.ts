@@ -7,14 +7,14 @@ import { decode, encode } from '../lib/codec.js';
 import type { Db, RecordTable } from './db.js';
 import { toEvent } from './rows.js';
 
-export type RecordFilter = {
+type RecordFilter = {
   pagination?: PaginationOptions;
   runId?: string;
   workflowName?: string;
   status?: string | string[];
 };
 
-export function pageLimit(limit = DEFAULT_PAGE_LIMIT): number {
+function pageLimit(limit = DEFAULT_PAGE_LIMIT): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT) {
     throw new RangeError(`Pagination limit must be between 1 and ${MAX_PAGE_LIMIT}`);
   }

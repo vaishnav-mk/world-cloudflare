@@ -40,7 +40,7 @@ export enum RpcMethod {
 
 const METHODS: ReadonlySet<string> = new Set(Object.values(RpcMethod));
 
-export type RpcRequest = { method: RpcMethod; args: unknown[] };
+type RpcRequest = { method: RpcMethod; args: unknown[] };
 
 /** A thrown error, flattened so its class can be rebuilt on the other side. */
 export type RpcError = { name: string; message: string; props: Record<string, unknown> };
