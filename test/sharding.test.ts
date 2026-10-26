@@ -115,7 +115,7 @@ describe('store shards', () => {
     expect(runs.map((run) => run?.runId ?? null)).toEqual([second, null, legacyRun, first, second]);
   });
 
-  it('keeps hook tokens unique across shards on the token’s shard, and reads them from any store', async () => {
+  it('keeps hook tokens unique on their token shard, and reads them from any store', async () => {
     const [first, second] = await runsOnTwoShards();
     const token = crypto.randomUUID();
     const created = await world.events.create(first, hookCreated(token));
