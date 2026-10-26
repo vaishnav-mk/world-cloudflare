@@ -1,5 +1,6 @@
 import { WorkflowRunNotFoundError } from '@workflow/errors';
-import { STORE_NAME } from '../constants.js';
+import { STORE_NAME, STORE_SHARDS } from '../constants.js';
+import { fnv1a32Hex } from '../lib/hash.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
@@ -14,9 +15,14 @@ export function directory(namespace: Namespace): Store {
   return transientAsWorldError(namespace.getByName(STORE_NAME));
 }
 
-/** A run's own store. A new run's `run_created` goes straight here. */
+/** The store shard a run lives in: a stable hash of its ID. */
+export function storeShardFor(runId: string): string {
+  return `store-${Number.parseInt(fnv1a32Hex(runId), 16) % STORE_SHARDS}`;
+}
+
+/** A run's store shard. A new run's `run_created` goes straight here. */
 export function runStore(namespace: Namespace, runId: string): Store {
-  return transientAsWorldError(namespace.getByName(runId));
+  return transientAsWorldError(namespace.getByName(storeShardFor(runId)));
 }
 
 /**

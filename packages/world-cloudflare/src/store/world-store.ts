@@ -20,6 +20,7 @@ import { transientAsWorldError } from '../lib/transient.js';
 import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
 import { queueShardFor } from '../queue/shards.js';
+import { storeShardFor } from './route.js';
 import type { DispatchKind, EventOf, OutboxClaim, ResolveDataMode, WorldEnv } from '../types.js';
 import { Db } from './db.js';
 import { claimHookToken, indexRun } from './directory.js';
@@ -257,7 +258,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
       if (runId !== null) this.#refuseRunCopy(runId);
       return { kind: TokenClaim.Local };
     }
-    if (runId === null || runId !== this.ctx.id.name) throw new WorkflowRunNotFoundError(String(runId));
+    if (runId === null || storeShardFor(runId) !== this.ctx.id.name) throw new WorkflowRunNotFoundError(String(runId));
     switch (data.eventType) {
       case EventType.HookCreated:
         return this.#claimToken(runId, data);

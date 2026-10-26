@@ -82,7 +82,13 @@ export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
  * slowest flow (up to the SDK's inline window), so runs hash onto shards: a long run holds up only
  * the runs on its own shard, and each shard is its own Durable Object.
  */
-export const QUEUE_SHARDS = 16;
+export const QUEUE_SHARDS = 64;
+/**
+ * Store shards. Each run lives in shard `hash(runId) % STORE_SHARDS`, so runs spread over a fixed
+ * pool of warm objects instead of each paying to create a new Durable Object on its first write.
+ * Changing the count moves runs, so only raise it with a migration.
+ */
+export const STORE_SHARDS = 128;
 
 /** Workers for Platforms script names in `EXECUTOR_ROUTES`. */
 export const EXECUTOR_SCRIPT_PATTERN = /^[a-zA-Z0-9_-]{1,63}$/;
