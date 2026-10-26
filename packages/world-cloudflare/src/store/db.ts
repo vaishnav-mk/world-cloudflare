@@ -88,16 +88,6 @@ export class Db {
     return hook;
   }
 
-  findHookByToken(token: string): Hook | undefined {
-    return this.#entity(this.#qb.fetchOne({ tableName: 'hooks', fields: ['data'], where: { conditions: 'token = ?', params: [token] } }));
-  }
-
-  getHookByToken(token: string): Hook {
-    const hook = this.findHookByToken(token);
-    if (hook === undefined) throw new HookNotFoundError(token);
-    return hook;
-  }
-
   insertHook(hook: Hook): void {
     this.#qb.insert({
       tableName: 'hooks',

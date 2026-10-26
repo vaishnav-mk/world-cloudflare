@@ -67,7 +67,6 @@ export class WorldStore extends DurableObject<WorldEnv> {
   readonly #isLegacy: boolean;
   /** The token release push in flight, if any. */
   #pushing: Promise<void> | undefined;
-  #importedLegacyTokens = false;
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
@@ -174,8 +173,9 @@ export class WorldStore extends DurableObject<WorldEnv> {
       // No awaits inside: the slot, event, state and outbox rows commit together.
       result = this.ctx.storage.transactionSync(() => applyEvent(this.#db, this.#outbox, this.#releases, tokens, runId, data, params));
     } catch (error) {
-      // A token granted for a write that did not commit, such as one racing the run's end, goes back.
-      if (tokens.kind === TokenClaim.Granted) {
+      // A token granted for a write that did not commit, such as one racing the run's end, goes back,
+      // unless a concurrent write of the same hook committed with it.
+      if (tokens.kind === TokenClaim.Granted && this.#db.findHook(tokens.hook.hookId) === undefined) {
         this.#releases.owe(tokens.hook, true);
         this.ctx.waitUntil(this.#push());
       }
@@ -370,10 +370,11 @@ export class WorldStore extends DurableObject<WorldEnv> {
    * is enough. Other requests wait meanwhile, so a release that arrives during the copy applies after it.
    */
   async #importLegacyTokens(shard: string): Promise<void> {
-    if (this.#importedLegacyTokens) return;
+    const imported = () => this.ctx.storage.kv.get(LEGACY_TOKENS_IMPORTED) !== undefined;
+    if (imported()) return;
     let failure: { error: unknown } | undefined;
     await this.ctx.blockConcurrencyWhile(async () => {
-      if (this.ctx.storage.kv.get(LEGACY_TOKENS_IMPORTED) !== undefined) return;
+      if (imported()) return;
       try {
         const held = await this.#store(STORE_NAME).legacyTokens(shard);
         this.ctx.storage.transactionSync(() => {
@@ -386,7 +387,6 @@ export class WorldStore extends DurableObject<WorldEnv> {
       }
     });
     if (failure !== undefined) throw failure.error;
-    this.#importedLegacyTokens = true;
   }
 
   // Legacy store, called by store shards.
