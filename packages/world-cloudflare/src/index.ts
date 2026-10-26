@@ -1,5 +1,5 @@
 import { QUEUE_SHARD_NAMES } from './queue/shards.js';
-import { directory, onRun } from './store/route.js';
+import { legacyStore, onRun } from './store/route.js';
 import type { WorldEnv } from './types.js';
 import { createWorld } from './world.js';
 
@@ -15,14 +15,14 @@ export { handleWorldRpc } from './remote/server.js';
 export type { Delivery, DeliveryOutcome, FlowHandler, WorldEnv } from './types.js';
 
 /**
- * Publishes the directory's dispatches whose alarm was lost, and wakes every queue shard so each
- * redelivers what a reset cut off. Call it from a `scheduled` handler. It reaches only the
- * directory, which holds runs created before per-run stores; a run's own store arms its alarm
- * before each write that owes something, and re-arms it on the run's next write.
+ * Publishes the legacy store's dispatches whose alarm was lost, and wakes every queue shard so each
+ * redelivers what a reset cut off. Call it from a `scheduled` handler. It reaches only the legacy
+ * store, which holds runs created before store shards; a shard arms its alarm before each write
+ * that owes something, and re-arms it on its next write.
  */
 export async function drainOutbox(env: Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD'>): Promise<number> {
   const [published] = await Promise.all([
-    directory(env.WORLD_STORE).drainOutbox(),
+    legacyStore(env.WORLD_STORE).drainOutbox(),
     ...QUEUE_SHARD_NAMES.map((name) => env.QUEUE_SHARD.getByName(name).wake()),
   ]);
   return published;

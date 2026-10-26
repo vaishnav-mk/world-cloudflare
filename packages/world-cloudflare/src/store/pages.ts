@@ -28,6 +28,9 @@ export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter)
   const descending = sortOrder !== SortOrder.Asc;
   const where: string[] = [];
   const values: (string | number)[] = [];
+  // The legacy store still has the old directory's copies of sharded runs and their hooks; the shards list those.
+  if (table === 'runs') where.push('index_slot IS NULL');
+  if (table === 'hooks') where.push('NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = run_id AND runs.index_slot IS NOT NULL)');
   if (filter.runId !== undefined) {
     where.push('run_id = ?');
     values.push(filter.runId);
@@ -56,6 +59,26 @@ export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter)
     cursor: hasMore && last ? encode([last.created_at, last.id]) : null,
     hasMore,
   };
+}
+
+/**
+ * One page of a list that every store answered with the same filter and cursor, as `listRecords`
+ * would give over all their rows: each store's page holds every row of its own that could come
+ * first. The cursor is the last returned row's `[createdAt, id]`, so the next page asks every store
+ * for rows strictly after it.
+ */
+export function mergePages<T>(
+  pages: readonly PaginatedResponse<T>[], keyOf: (item: T) => [number, string], pagination: PaginationOptions = {},
+): PaginatedResponse<T> {
+  const limit = pageLimit(pagination.limit);
+  const sign = pagination.sortOrder === SortOrder.Asc ? 1 : -1;
+  const rows = pages.flatMap((page) => page.data.map((item) => ({ item, key: keyOf(item) })));
+  // Ordered as SQLite orders `created_at, id`: by number, then by string.
+  rows.sort(({ key: [atA, idA] }, { key: [atB, idB] }) => sign * (atA - atB || (idA < idB ? -1 : idA > idB ? 1 : 0)));
+  const page = rows.slice(0, limit);
+  const last = page.at(-1);
+  const hasMore = rows.length > limit || pages.some((each) => each.hasMore);
+  return { data: page.map(({ item }) => item), cursor: hasMore && last ? encode(last.key) : null, hasMore };
 }
 
 /** Events in slot order. The cursor is `eid:` plus the last event ID. */
