@@ -4,7 +4,7 @@ Status against the pinned `@workflow/world` 5.x interface (`.vendor/workflow-sdk
 
 - **Built**: implemented in this World.
 - **Workerd**: covered by `pnpm test` or `pnpm run test:e2e`.
-- **Remote**: exercised against a deployed staging Worker.
+- **Remote**: exercised against a deployed Worker.
 
 A passing typecheck is not conformance, and none of this is checked by the SDK's own `@workflow/world-testing` suite yet. The target is equivalent SDK-visible behavior; Vercel's OIDC, billing, dashboard and regions are out of scope.
 
@@ -25,7 +25,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | Dense per-run event slots | ✓ | ✓ | ✓ | |
 | Stale-writer reports (`eventCount`, `sinceCursor`) | ✓ | ✓ | ✗ | |
 | `run_created` with a null run ID | ✓ | ✓ | ✗ | The World client mints `wrun_<ulid>` |
-| Payloads over 1 MiB, in R2 | ✓ | ✓ | ✗ | Resolved by the World client, as the SDK expects; 105 MiB step outputs locally ([limits](limits.md#payload-sizes)) |
+| Payloads over 1 MiB, in R2 | ✓ | ✓ | ✓ | Resolved by the World client, as the SDK expects; 16 MiB step outputs on Workers with QuickJS ([limits](limits.md#payloads)) |
 | Existing runs keep their spec version | ✓ | ✓ | ✗ | |
 
 ## Event semantics
@@ -84,7 +84,7 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | `writeMulti` | ✓ | ✓ | ✗ | Atomic and ordered |
 | `list`, `getInfo`, `getChunks` | ✓ | ✓ | ✗ | |
 | `get`: live reads and negative start | ✓ | ✓ | ✓ | Remote reader connected before the first write |
-| Chunks over 1 MiB, in R2 | ✓ | ✓ | ✗ | 70 MiB locally; the SDK's reader rejects larger frames ([limits](limits.md#payload-sizes)) |
+| Chunks over 1 MiB, in R2 | ✓ | ✓ | ✗ | 70 MiB locally; the SDK's reader rejects larger frames ([limits](limits.md#payloads)) |
 
 ## Optional APIs and capabilities
 
@@ -93,7 +93,7 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | `createBatch` | ✓ | ✓ | ✗ | One transaction with a savepoint per event; a conflict is a 409 item. Used by the node and isolate engines, not QuickJS |
 | `cancelMany` | ✗ | ✗ | ✗ | |
 | `experimentalSetAttributes` | ✗ | ✗ | ✗ | `attr_set` works |
-| Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✓ | In the run's `RunStreams` object, in 1.9 MB parts; stored in plaintext ([limits](limits.md#vm-snapshots)) |
+| Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✓ | In the run's `RunStreams` object, in 1.9 MB parts; stored in plaintext ([limits](limits.md#long-runs)) |
 | Encryption and key rotation | ✗ | ✗ | ✗ | Storage, snapshots and DLQ hold plaintext |
 | Analytics | ✗ | ✗ | ✗ | |
 | `hookRetention`, `hookForceClaim`, `hookResumeDedup` | ✗ | ✗ | ✗ | Not advertised |
@@ -105,14 +105,14 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Item | Done | Notes |
 | --- | :---: | --- |
 | Installable `createWorld()` package | ✓ | `packages/world-cloudflare`, unpublished |
-| SDK web UI (`workflow web`) | ✓ | Through the `@workflow/world-cloudflare/remote` Node client; tested against staging |
+| SDK web UI (`workflow web`) | ✓ | Through the `@workflow/world-cloudflare/remote` Node client; tested against a deployed Worker |
 | Versioned schema migrations | ✓ | Drizzle Kit, applied by each Durable Object on start; tested over pre-Drizzle tables |
 | Published to npm | ✗ | The `@workflow` scope belongs to Vercel |
 | Listed in `worlds-manifest.json` | ✗ | |
 | SDK patch upstreamed | ✗ | Pinned to one SDK commit |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World |
 | Retention and cleanup of finished runs | ✗ | Runs, outbox and dedup rows, and R2 payloads, are kept forever |
-| Payloads over 1 MiB | ✓ | In R2; production ceiling not measured ([limits](limits.md#payload-sizes)) |
+| Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers with QuickJS, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |
 | Cleanup of orphaned R2 payloads | ✗ | A write that fails after its payload reached R2 leaves the object behind |
 | Sharding beyond one store and one queue shard | ✗ | |
 | Multi-region placement | ✗ | |
