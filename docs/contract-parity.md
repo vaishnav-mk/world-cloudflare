@@ -93,8 +93,9 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | `createBatch` | ✓ | ✓ | ✗ | One transaction with a savepoint per event; a conflict is a 409 item. Used by the node and isolate engines, not QuickJS |
 | `cancelMany` | ✓ | ✓ | ✗ | `run_cancelled` per run through `events.create`, 20 runs at a time; also over the remote client |
 | `experimentalSetAttributes` | ✗ | ✗ | ✗ | `attr_set` works |
-| Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✓ | In the run's `RunStreams` object, in 1.9 MB parts; stored in plaintext ([limits](limits.md#long-runs)) |
-| Encryption and key rotation | ✗ | ✗ | ✗ | Storage, snapshots and DLQ hold plaintext |
+| Snapshots (`experimental_snapshots`) | ✓ | ✓ | ✓ | In the run's `RunStreams` object, in 1.9 MB parts ([limits](limits.md#long-runs)); encrypted only in workerd tests |
+| Encryption (`getEncryptionKeyForRun`) | ✓ | ✓ | ✗ | Per-run HKDF keys from `WORKFLOW_ENCRYPTION_SECRET`, also served to the remote client; plaintext without the secret |
+| Key rotation | ✗ | ✗ | ✗ | A changed secret leaves encrypted runs unreadable |
 | Analytics | ✗ | ✗ | ✗ | |
 | `hookRetention`, `hookResumeDedup` | ✓ | ✓ | ✗ | Advertised |
 | `hookForceClaim` | ✗ | ✗ | ✗ | Not advertised |

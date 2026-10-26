@@ -20,6 +20,8 @@ export type WorldEnv = {
   QUEUE_MAX_ATTEMPTS?: string;
   /** JSON list of `ShardEpoch`, oldest first. Append an epoch starting in the future to add shards. */
   SHARD_EPOCHS?: string;
+  /** 32 random bytes as base64. When set, the SDK encrypts payloads and VM snapshots with per-run keys derived from it. */
+  WORKFLOW_ENCRYPTION_SECRET?: string;
 };
 
 /** The `POST` export of the app's generated `.well-known/workflow/v1/flow.mjs`. */

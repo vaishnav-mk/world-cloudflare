@@ -1,5 +1,6 @@
 import { env as platformEnv } from 'cloudflare:workers';
 import { mintedSpecVersion, type World } from '@workflow/world';
+import { createGetEncryptionKeyForRun } from './lib/encryption.js';
 import { createQueue } from './queue/queue.js';
 import { createStorage } from './store/storage.js';
 import { createSnapshots } from './streams/snapshots.js';
@@ -20,5 +21,8 @@ export function createWorld(env: WorldEnv = platformEnv): World {
     ...createQueue(env),
     ...createStreamer(env),
     ...createSnapshots(env),
+    // Without a secret the SDK stores plaintext, as before.
+    ...(env.WORKFLOW_ENCRYPTION_SECRET === undefined
+      ? {} : { getEncryptionKeyForRun: createGetEncryptionKeyForRun(env.WORKFLOW_ENCRYPTION_SECRET) }),
   };
 }

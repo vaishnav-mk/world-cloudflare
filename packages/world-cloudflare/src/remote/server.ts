@@ -24,6 +24,10 @@ export async function handleWorldRpc(request: Request, world: World, token: stri
         headers: { 'content-type': 'application/octet-stream' },
       });
     }
+    if (call.method === RpcMethod.GetEncryptionKeyForRun && world.getEncryptionKeyForRun === undefined) {
+      // A Worker without a secret stores plaintext; no key tells the client so.
+      return respond({ ok: true, value: undefined });
+    }
     return respond({ ok: true, value: await invoke(world, call.method, call.args) });
   } catch (error) {
     return respond({ ok: false, error: describe(error) });

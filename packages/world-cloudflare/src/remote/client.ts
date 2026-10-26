@@ -1,5 +1,5 @@
 import * as errors from '@workflow/errors';
-import { mintedSpecVersion, type World } from '@workflow/world';
+import { mintedSpecVersion, type World, type WorkflowRun } from '@workflow/world';
 import {
   decodeResult, encode, isRecord, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcError,
 } from './protocol.js';
@@ -67,6 +67,9 @@ export function createWorld(options: { url?: string; token?: string } = {}): Wor
     },
     queue: call(RpcMethod.Queue),
     getDeploymentId: call(RpcMethod.GetDeploymentId),
+    // The key depends only on the run ID, so send that rather than the run and its payloads.
+    getEncryptionKeyForRun: (run: WorkflowRun | string) =>
+      call(RpcMethod.GetEncryptionKeyForRun)(typeof run === 'string' ? run : run.runId),
     createQueueHandler: () => {
       throw new Error('The remote Cloudflare World cannot receive queue deliveries');
     },

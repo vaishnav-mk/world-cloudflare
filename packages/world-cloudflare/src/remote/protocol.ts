@@ -37,6 +37,7 @@ export enum RpcMethod {
   SnapshotsDelete = 'experimental_snapshots.delete',
   Queue = 'queue',
   GetDeploymentId = 'getDeploymentId',
+  GetEncryptionKeyForRun = 'getEncryptionKeyForRun',
 }
 
 const METHODS: ReadonlySet<string> = new Set(Object.values(RpcMethod));

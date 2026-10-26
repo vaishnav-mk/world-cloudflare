@@ -15,7 +15,7 @@ Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/REA
 - The Workflow SDK built with this repo's [patch](../../patches/workflow-sdk-cloudflare-workers.patch), which adds `workflow build --target cloudflare-workers`.
 - `WORKFLOW_VM=quickjs` (or `isolate`, see [isolate engine](../../docs/isolate-engine.md)) and the `nodejs_compat` flag, because workerd has no working `node:vm`.
 - A Wrangler rule that bundles the migration SQL as text: `"rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]`.
-- `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1` to turn on VM snapshots. The World has no encryption keys, so without it the SDK replays each run's whole event log on every invocation. Snapshots hold the run's memory in plaintext, as the store already holds its payloads.
+- For VM snapshots, either an [encryption secret](#encryption) or `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1`. With neither, the SDK replays each run's whole event log on every invocation. Without a secret, snapshots hold the run's memory in plaintext, as the store holds its payloads.
 
 ## Add it to a Worker
 
@@ -72,6 +72,21 @@ Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 M
 - **Reads.** Every read swaps refs back for their bytes, as the SDK expects; `resolveData: 'none'` reads nothing from R2.
 
 Every Worker that runs World client code needs the `PAYLOADS` binding, including retained executors. [Limits](../../docs/limits.md#payloads) has the measured sizes and the open costs.
+
+## Encryption
+
+Set a secret of 32 random bytes and the SDK encrypts every payload before it reaches the World: run and step inputs, outputs and errors, hook payloads and metadata, stream chunks and VM snapshots. The Durable Objects and R2 then hold AES-256-GCM ciphertext.
+
+```sh
+openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET
+```
+
+- **Keys.** `getEncryptionKeyForRun` derives each run's key with HKDF-SHA256 from the secret, with the run ID as info. The deployment ID is left out, so every release, and every retained executor, must have the same secret.
+- **What stays readable.** Names, statuses, event types, hook tokens, attributes and timestamps. The example API's `/runs/:id` and `/runs/:id/events` show ciphertext; `/result` and stream reads decrypt through the SDK.
+- **Rotation.** Not supported. A changed or deleted secret leaves every encrypted run unreadable. Runs started before the secret was set keep their plaintext payloads.
+- **The remote client** fetches run keys from `/world/rpc`, so `workflow web` can decrypt. Anyone holding `WORLD_RPC_TOKEN` can read every run.
+
+Without the secret the World stores plaintext, as before.
 
 ## Retained executors
 
