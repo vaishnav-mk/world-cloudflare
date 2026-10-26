@@ -22,6 +22,9 @@ export const FULL_EVENT_LOG_LIMIT = 100_000;
 /** Events returned with `sinceCursor` on `events.create`. */
 export const SINCE_CURSOR_LIMIT = 1000;
 
+/** Runs `runs.cancelMany` cancels at once, as core's own fallback does. */
+export const CANCEL_MANY_CONCURRENCY = 20;
+
 /** Long polls. */
 export const EVENT_POLL_MS = 15_000;
 export const EVENT_POLL_BATCH = 100;

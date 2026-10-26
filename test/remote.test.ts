@@ -40,6 +40,8 @@ it('round-trips World calls with dates, bytes and SDK errors intact', async () =
   const missing = await remote.runs.get('wrun_missing').catch((error: unknown) => error);
   expect(WorkflowRunNotFoundError.is(missing)).toBe(true);
   expect(missing).toBeInstanceOf(WorkflowRunNotFoundError);
+
+  expect((await remote.runs.cancelMany!({ runIds: [runId] })).results).toEqual([{ runId, outcome: 'cancelled' }]);
 });
 
 it('round-trips a payload kept in R2', async () => {

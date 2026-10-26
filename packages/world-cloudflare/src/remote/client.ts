@@ -41,6 +41,7 @@ export function createWorld(options: { url?: string; token?: string } = {}): Wor
       getMany: call(RpcMethod.RunsGetMany),
       list: call(RpcMethod.RunsList),
       waitForTerminalStatus: call(RpcMethod.RunsWaitForTerminalStatus),
+      cancelMany: call(RpcMethod.RunsCancelMany),
     },
     steps: { get: call(RpcMethod.StepsGet), list: call(RpcMethod.StepsList) },
     events: {

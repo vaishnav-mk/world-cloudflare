@@ -14,6 +14,7 @@ export enum RpcMethod {
   RunsGetMany = 'runs.getMany',
   RunsList = 'runs.list',
   RunsWaitForTerminalStatus = 'runs.waitForTerminalStatus',
+  RunsCancelMany = 'runs.cancelMany',
   StepsGet = 'steps.get',
   StepsList = 'steps.list',
   EventsCreate = 'events.create',

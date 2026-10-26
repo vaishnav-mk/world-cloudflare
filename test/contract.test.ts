@@ -293,6 +293,32 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.hooks.getByToken(token)).runId).toBe(claimer);
   });
 
+  it('cancels many runs with one outcome per run, in request order', async () => {
+    const [pending, running, cancelled, completed] = await Promise.all([newRun(), newRun(), newRun(), newRun()]);
+    await world.events.create(running, { eventType: 'run_started' });
+    await world.events.create(cancelled, { eventType: 'run_cancelled' });
+    await world.events.create(completed, { eventType: 'run_completed', eventData: { output: bytes('done') } });
+    const missing = `wrun_${crypto.randomUUID()}`;
+    const result = await world.runs.cancelMany!({ runIds: [completed, pending, missing, cancelled, running], cancelReason: 'cleanup' });
+    expect(result.results).toEqual([
+      { runId: completed, outcome: 'not_cancellable', status: 'completed' },
+      { runId: pending, outcome: 'cancelled' },
+      { runId: missing, outcome: 'not_found' },
+      { runId: cancelled, outcome: 'already_cancelled' },
+      { runId: running, outcome: 'cancelled' },
+    ]);
+    expect(result.summary).toEqual({ requested: 5, cancelled: 2, alreadyCancelled: 1, notCancellable: 1, notFound: 1, failed: 0 });
+    expect((await world.runs.get(running)).status).toBe('cancelled');
+    expect((await world.events.list({ runId: running })).data.at(-1)).toMatchObject({
+      eventType: 'run_cancelled', eventData: { cancelReason: 'cleanup' },
+    });
+    // More runs than are cancelled at once keep their order.
+    const many = await Promise.all(Array.from({ length: 25 }, () => newRun()));
+    expect((await world.runs.cancelMany!({ runIds: many })).results).toEqual(many.map((runId) => ({ runId, outcome: 'cancelled' })));
+    await expect(world.runs.cancelMany!({ runIds: [] })).rejects.toThrow();
+    await expect(world.runs.cancelMany!({ runIds: [pending, pending] })).rejects.toThrow('duplicates');
+  });
+
   it('advertises exactly the capabilities it implements', () => {
     expect(world.capabilities).toEqual({ hookRetention: { active: true }, hookResumeDedup: true });
   });

@@ -21,6 +21,7 @@ import { EventType } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { createPayloads } from '../lib/payloads.js';
 import type { WorldEnv } from '../types.js';
+import { cancelMany } from './cancel-many.js';
 import { mergePages } from './pages.js';
 import { storeShardFor } from '../lib/shards.js';
 import { legacyStore, onEveryStore, onRun, storeShard, tokenShard } from './route.js';
@@ -119,7 +120,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
   }
 
   return {
-    runs: { get: getRun, getMany, list: listRuns, waitForTerminalStatus },
+    runs: { get: getRun, getMany, list: listRuns, waitForTerminalStatus, cancelMany: (request) => cancelMany(request, getRun, create) },
     steps: { get: getStep, list: listSteps },
     events: {
       create,
