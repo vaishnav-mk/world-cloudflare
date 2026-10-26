@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { storeShardFor } from '../packages/world-cloudflare/src/store/route.js';
 import { parse } from 'devalue';
 import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY } from '@workflow/world';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
@@ -22,7 +23,7 @@ describe('v5 event storage in SQLite DO', () => {
     const received = await store.events.create(runId, {
       eventType: 'hook_received', correlationId: 'recover-hook', eventData: { payload: bytes('7') },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     expect(await stub.pendingHookWakeSlot(runId)).toBe(Number(received.event!.eventId.slice(5)));
     const before = (await env.SINK.getByName('sink').received()).length;
     expect(await stub.drainOutbox()).toBe(1);
@@ -39,7 +40,7 @@ describe('v5 event storage in SQLite DO', () => {
     const received = await store.events.create(runId, {
       eventType: 'hook_received', correlationId: 'dlq-hook', eventData: { payload: bytes('1') },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const slot = Number(received.event!.eventId.slice(5));
     await stub.markHookWakesPublished(runId, slot);
     expect(await stub.pendingHookWakeSlot(runId)).toBe(0);
@@ -57,7 +58,7 @@ describe('v5 event storage in SQLite DO', () => {
     const received = await store.events.create(runId, {
       eventType: 'hook_received', correlationId: 'poison-hook', eventData: { payload: bytes('7') },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const slot = Number(received.event!.eventId.slice(5));
     await stub.markHookWakesPublished(runId, slot);
     expect(await stub.pendingHookWakeSlot(runId)).toBe(0);
@@ -81,7 +82,7 @@ describe('v5 event storage in SQLite DO', () => {
       eventType: 'hook_received', correlationId: 'backup-hook', eventData: { payload: bytes('1') },
     });
     const slot = Number(received.event!.eventId.slice(5));
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     // Earlier tests leave their own dead letters behind, so count only this run's.
     const deadIds = async () => {
       const ids = new Set<string>();
@@ -109,8 +110,8 @@ describe('v5 event storage in SQLite DO', () => {
     await queue.queue(`${getQueueTopicPrefix('workflow')}example`, {
       runId, hookResumeTiming: { resumeRequestedAtMs: Date.now(), queuePublishRequestedAtMs: Date.now() },
     });
-    expect(await env.WORLD_STORE.getByName(runId).pendingHookWakeSlot(runId)).toBe(0);
-    expect(await env.WORLD_STORE.getByName(runId).drainOutbox()).toBe(0);
+    expect(await env.WORLD_STORE.getByName(storeShardFor(runId)).pendingHookWakeSlot(runId)).toBe(0);
+    expect(await env.WORLD_STORE.getByName(storeShardFor(runId)).drainOutbox()).toBe(0);
   });
 
   it('does not clear a later hook wake when a queue key reuses an earlier delivery', async () => {
@@ -127,13 +128,13 @@ describe('v5 event storage in SQLite DO', () => {
     await store.events.create(runId, { eventType: 'hook_created', correlationId: 'second', eventData: { token: crypto.randomUUID() } });
     const later = await store.events.create(runId, { eventType: 'hook_received', correlationId: 'second', eventData: { payload: bytes('2') } });
     await queue.queue(queueName, message, opts);
-    expect(await env.WORLD_STORE.getByName(runId).pendingHookWakeSlot(runId)).toBe(Number(later.event!.eventId.slice(5)));
+    expect(await env.WORLD_STORE.getByName(storeShardFor(runId)).pendingHookWakeSlot(runId)).toBe(Number(later.event!.eventId.slice(5)));
   });
 
   it('recovers a committed run_created when its initial queue publish is lost', async () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     expect(await stub.pendingRunStartSlot(runId)).toBe(1);
     const key = `run-start:${runId}:1`;
     const expectedId = `qmsg_${Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key))).toString('hex')}`;
@@ -145,7 +146,7 @@ describe('v5 event storage in SQLite DO', () => {
   it('clears initial start debt when run_started commits', async () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     expect(await stub.pendingRunStartSlot(runId)).toBe(1);
     await store.events.create(runId, { eventType: 'run_started' });
     expect(await stub.pendingRunStartSlot(runId)).toBe(0);
@@ -158,7 +159,7 @@ describe('v5 event storage in SQLite DO', () => {
     const step = await store.events.create(runId, {
       eventType: 'step_created', correlationId: 'early-step', eventData: { stepName: 'double', input: bytes('2') },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     await createQueue(env).queue(`${getQueueTopicPrefix('workflow')}example`, {
       runId, runInput: { input: bytes('input'), deploymentId: 'test-v1', workflowName: 'example', specVersion: 5 },
     });
@@ -178,7 +179,7 @@ describe('v5 event storage in SQLite DO', () => {
     const created = await store.events.create(runId, {
       eventType: 'step_created', correlationId: 'lost-step', eventData: { stepName: 'double', input: bytes('2') },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const slot = Number(created.event!.eventId.slice(5));
     expect(await stub.pendingStepDispatchSlot(runId, 'lost-step', 'double')).toBe(slot);
     expect(await stub.pendingHookWakeSlot(runId)).toBe(0);
@@ -194,7 +195,7 @@ describe('v5 event storage in SQLite DO', () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
     await store.events.create(runId, { eventType: 'run_started' });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     await store.events.create(runId, {
       eventType: 'step_created', correlationId: 'first-step', eventData: { stepName: 'double', input: bytes('2') },
     });
@@ -220,7 +221,7 @@ describe('v5 event storage in SQLite DO', () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
     await store.events.create(runId, { eventType: 'run_started' });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const queue = createQueue(env);
     const queueName = `${getQueueTopicPrefix('workflow')}example`;
     const message = { runId, stepId: 'race-step', stepName: 'double' };
@@ -245,7 +246,7 @@ describe('v5 event storage in SQLite DO', () => {
     await store.events.create(runId, {
       eventType: 'step_created', correlationId: 'same-step', eventData: { stepName: 'double', input: bytes('2') },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const queueName = `${getQueueTopicPrefix('workflow')}example`;
     const key = `${queueName}:same-step:a0eb0f08`;
     const id = `qmsg_${Buffer.from(await crypto.subtle.digest('SHA-256', bytes(key))).toString('hex')}`;
@@ -263,7 +264,7 @@ describe('v5 event storage in SQLite DO', () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
     await store.events.create(runId, { eventType: 'run_started' });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const step = await store.events.create(runId, {
       eventType: 'step_created', correlationId: 'eager', eventData: { stepName: 'double', input: bytes('2') },
     });
@@ -292,7 +293,7 @@ describe('v5 event storage in SQLite DO', () => {
     const created = await store.events.create(runId, {
       eventType: 'step_created', correlationId: 'poison-step', eventData: { stepName: 'double', input: bytes('2') },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const slot = Number(created.event!.eventId.slice(5));
     const key = `${getQueueTopicPrefix('workflow')}poison:poison-step:a0eb0f08`;
     const id = `qmsg_${Buffer.from(await crypto.subtle.digest('SHA-256', bytes(key))).toString('hex')}`;
@@ -317,7 +318,7 @@ describe('v5 event storage in SQLite DO', () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
     await store.events.create(runId, { eventType: 'run_started' });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const created = await store.events.create(runId, {
       eventType: 'step_created', correlationId: 'dlq-step', eventData: { stepName: 'double', input: bytes('2') },
     });
@@ -339,7 +340,7 @@ describe('v5 event storage in SQLite DO', () => {
     const created = await store.events.create(runId, {
       eventType: 'wait_created', correlationId: 'lost-wait', eventData: { resumeAt },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const slot = Number(created.event!.eventId.slice(5));
     expect(await stub.pendingWaitDispatchSlot(runId, 'lost-wait')).toBe(slot);
     const key = `${getQueueTopicPrefix('workflow')}example:wait-backup:${runId}:${slot}`;
@@ -358,7 +359,7 @@ describe('v5 event storage in SQLite DO', () => {
     const resumeAt = new Date(Date.now() + 30_000);
     await store.events.create(runId, { eventType: 'wait_created', correlationId: 'first-wait', eventData: { resumeAt } });
     const second = await store.events.create(runId, { eventType: 'wait_created', correlationId: 'second-wait', eventData: { resumeAt } });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     await createQueue(env).queue(`${getQueueTopicPrefix('workflow')}example`, {
       runId, waitContinuation: { correlationId: 'first-wait', attempt: 0 },
     }, { deploymentId: 'test-v1', delaySeconds: 30, idempotencyKey: 'first-wait' });
@@ -377,7 +378,7 @@ describe('v5 event storage in SQLite DO', () => {
     const created = await store.events.create(runId, {
       eventType: 'wait_created', correlationId: 'sleep', eventData: { resumeAt: new Date(Date.now() + 30_000) },
     });
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const slot = Number(created.event!.eventId.slice(5));
     await store.events.create(runId, { eventType: 'hook_created', correlationId: 'unrelated-hook', eventData: { token: crypto.randomUUID() } });
     await store.events.create(runId, { eventType: 'hook_received', correlationId: 'unrelated-hook', eventData: { payload: bytes('yes') } });
@@ -398,13 +399,13 @@ describe('v5 event storage in SQLite DO', () => {
     await store.events.create(completedRun, { eventType: 'run_started' });
     await store.events.create(completedRun, { eventType: 'wait_created', correlationId: 'done', eventData: { resumeAt: new Date(Date.now() - 1) } });
     await store.events.create(completedRun, { eventType: 'wait_completed', correlationId: 'done' });
-    expect(await env.WORLD_STORE.getByName(completedRun).pendingWaitDispatchSlot(completedRun, 'done')).toBe(0);
+    expect(await env.WORLD_STORE.getByName(storeShardFor(completedRun)).pendingWaitDispatchSlot(completedRun, 'done')).toBe(0);
     const terminalRun = crypto.randomUUID();
     await newRun(terminalRun);
     await store.events.create(terminalRun, { eventType: 'run_started' });
     await store.events.create(terminalRun, { eventType: 'wait_created', correlationId: 'cancelled', eventData: { resumeAt: new Date(Date.now() + 30_000) } });
     await store.events.create(terminalRun, { eventType: 'run_cancelled' });
-    const stub = env.WORLD_STORE.getByName(terminalRun);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(terminalRun));
     expect(await stub.pendingWaitDispatchSlot(terminalRun, 'cancelled')).toBe(0);
     expect(await stub.reopenPublishedWaitDispatch(terminalRun, 'cancelled')).toBe(0);
   });
@@ -419,7 +420,7 @@ describe('v5 event storage in SQLite DO', () => {
       }
     };
     const runId = crypto.randomUUID();
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     await store.events.create(runId, { eventType: 'run_created', eventData: {
       deploymentId: 'test-v1', workflowName: 'poison', input: bytes('input'),
     } });
@@ -450,7 +451,7 @@ describe('v5 event storage in SQLite DO', () => {
     const backupSlot = Number(backup.event!.eventId.slice(5));
     const key = `${getQueueTopicPrefix('workflow')}poison:wait-backup:${backupRun}:${backupSlot}`;
     const backupId = `qmsg_${Buffer.from(await crypto.subtle.digest('SHA-256', bytes(key))).toString('hex')}`;
-    const backupStub = env.WORLD_STORE.getByName(backupRun);
+    const backupStub = env.WORLD_STORE.getByName(storeShardFor(backupRun));
     await backupStub.drainOutbox();
     await expect.poll(() => deadMessage(backupId), { timeout: 10_000 }).toBeDefined();
     expect(parse((await deadMessage(backupId))!.body.encoded)).toEqual({
@@ -563,7 +564,7 @@ describe('v5 event storage in SQLite DO', () => {
   it('replays retained events then wakes a live subscriber, including terminal filtering', async () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     const pending = stub.nextEvents(runId, 1);
     await store.events.create(runId, { eventType: 'run_started' });
     const next = await pending;

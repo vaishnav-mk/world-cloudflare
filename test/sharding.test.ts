@@ -1,5 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { storeShardFor } from '../packages/world-cloudflare/src/store/route.js';
 import { WorkflowRunNotFoundError } from '@workflow/errors';
 import { createWorld, type WorldEnv } from '@workflow/world-cloudflare';
 import type { WorldStore } from '../packages/world-cloudflare/src/store/world-store.js';
@@ -33,8 +34,8 @@ describe('per-run stores', () => {
       { event: { eventType: 'step_created', correlationId: 'a', eventData: { stepName: 'work', input: bytes('a') } } },
       { event: { eventType: 'step_started', correlationId: 'a' } },
     ]);
-    expect(await countRows(env.WORLD_STORE.getByName(runId), 'events', runId)).toBe(4);
-    expect(await countRows(env.WORLD_STORE.getByName(runId), 'steps', runId)).toBe(1);
+    expect(await countRows(env.WORLD_STORE.getByName(storeShardFor(runId)), 'events', runId)).toBe(4);
+    expect(await countRows(env.WORLD_STORE.getByName(storeShardFor(runId)), 'steps', runId)).toBe(1);
     await expectIndexed(name, ['running']);
     expect(await countRows(directory(), 'events', runId)).toBe(0);
     expect(await countRows(directory(), 'steps', runId)).toBe(0);
@@ -60,7 +61,7 @@ describe('per-run stores', () => {
     await world.events.create(runId, { eventType: 'run_completed', eventData: { output: bytes('done') } });
     expect(await indexedStatus(name)).toEqual(['completed']);
     // It owes nothing more, so its store drops the recovery alarm instead of waking for it.
-    expect(await runInDurableObject(env.WORLD_STORE.getByName(runId), (_store, state) => state.storage.getAlarm())).toBeNull();
+    expect(await runInDurableObject(env.WORLD_STORE.getByName(storeShardFor(runId)), (_store, state) => state.storage.getAlarm())).toBeNull();
     const [run, missing] = await world.runs.getMany!([runId, 'wrun_missing']);
     expect(run).toMatchObject({ runId, status: 'completed', output: bytes('done'), attributes: { phase: 'late' } });
     expect(missing).toBeNull();
@@ -123,7 +124,7 @@ describe('per-run stores', () => {
       .toEqual(['run_created', 'run_started', 'step_created', 'hook_created']);
     expect((await world.steps.get(runId, 'step')).status).toBe('pending');
     await expectIndexed(name, ['running']);
-    expect(await countRows(env.WORLD_STORE.getByName(runId), 'events', runId)).toBe(0);
+    expect(await countRows(env.WORLD_STORE.getByName(storeShardFor(runId)), 'events', runId)).toBe(0);
     // Tokens are unique across legacy and sharded runs.
     const sharded = await newRun();
     const conflict = await world.events.create(sharded, {
@@ -133,7 +134,7 @@ describe('per-run stores', () => {
   });
 
   it('refuses run-scoped calls in a run store for a run it does not hold', async () => {
-    const stub = env.WORLD_STORE.getByName('wrun_elsewhere');
+    const stub = env.WORLD_STORE.getByName(storeShardFor('wrun_elsewhere'));
     const calls = [
       () => stub.getRun('wrun_elsewhere'), () => stub.getStep('wrun_elsewhere', 'step'),
       () => stub.listSteps({ runId: 'wrun_elsewhere' }), () => stub.listEvents({ runId: 'wrun_elsewhere' }),
@@ -153,7 +154,7 @@ describe('per-run stores', () => {
     const name = `shard-heal-${crypto.randomUUID()}`;
     const runId = await newRun(name);
     await expectIndexed(name, ['pending']);
-    const stub = env.WORLD_STORE.getByName(runId);
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     await runInDurableObject(stub, async (store: WorldStore) => {
       // SAFETY: `env` is the Durable Object's own binding record; the test swaps in a failing directory.
       const self = store as unknown as { env: WorldEnv };

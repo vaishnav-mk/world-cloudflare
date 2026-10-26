@@ -1,5 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { storeShardFor } from '../packages/world-cloudflare/src/store/route.js';
 import {
   getQueueTopicPrefix, mintedSpecVersion, slotToEventId, SPEC_VERSION_MAX_SUPPORTED,
   ValidQueueName, workflowRunIdSchema,
@@ -92,7 +93,7 @@ describe('World v5 contract (workerd bindings)', () => {
     ]);
     expect(results.map((item) => item.status)).toEqual([200, 200]);
     expect((await world.steps.get(runId, 'pair')).status).toBe('running');
-    const pending = await runInDurableObject(env.WORLD_STORE.getByName(runId), (_store, state) => state.storage.sql.exec(
+    const pending = await runInDurableObject(env.WORLD_STORE.getByName(storeShardFor(runId)), (_store, state) => state.storage.sql.exec(
       `SELECT slot FROM dispatch_outbox WHERE run_id = ? AND status = 'pending' AND slot = 3`, runId).toArray());
     expect(pending).toEqual([]);
   });

@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { storeShardFor } from '../packages/world-cloudflare/src/store/route.js';
 import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../packages/world-cloudflare/src/constants.js';
 import { toJson } from '../packages/world-cloudflare/src/lib/json.js';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
@@ -9,7 +10,7 @@ import { createStreamer } from '../packages/world-cloudflare/src/streams/streame
 const store = createStorage(env);
 const { streams } = createStreamer(env);
 // SAFETY: the stub serves WorldStore's methods; its generated RPC types reduce entities to `never`.
-const raw = (runId: string) => env.WORLD_STORE.getByName(runId) as unknown as WorldStore;
+const raw = (runId: string) => env.WORLD_STORE.getByName(storeShardFor(runId)) as unknown as WorldStore;
 /** The run and step as the run's store keeps them, before the World client resolves refs. */
 const storedRun = (runId: string) => raw(runId).getRun(runId);
 const storedStep = (runId: string) => raw(runId).getStep(runId, 'big');
