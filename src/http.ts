@@ -27,12 +27,8 @@ export async function readJson(request: Request): Promise<unknown> {
       }
       chunks.push(read.value);
     }
-    const body = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-      body.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
+    // SAFETY: request body chunks are backed by plain ArrayBuffers.
+    const body = await new Blob(chunks as Uint8Array<ArrayBuffer>[]).arrayBuffer();
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
   } catch (error) {
     throw error instanceof HttpError ? error : new HttpError(400, 'Invalid JSON');
