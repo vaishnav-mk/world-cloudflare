@@ -47,26 +47,7 @@ export class Db {
     }).execute();
   }
 
-  /**
-   * Directory: writes the index copy of a run that lives in its own store, unless the copy already
-   * reflects `slot` or later. Never overwrites a run this store holds.
-   */
-  putRunCopy(run: WorkflowRun, slot: number): void {
-    this.#qb.insert({
-      tableName: 'runs',
-      data: {
-        id: run.runId, data: encode(run), created_at: run.createdAt.getTime(),
-        status: run.status, workflow_name: run.workflowName, index_slot: slot,
-      },
-      onConflict: {
-        column: 'id',
-        data: { ...replaceData, status: new Raw('excluded.status'), index_slot: new Raw('excluded.index_slot') },
-        where: 'runs.index_slot IS NOT NULL AND runs.index_slot < excluded.index_slot',
-      },
-    }).execute();
-  }
-
-  /** Directory: whether `id` is an index copy, for a run that lives in its own store. */
+  /** Legacy store: whether `id` is the old directory's index copy of a run that lives on a store shard. */
   isRunCopy(id: string): boolean {
     return findRow(this.#qb.fetchOne({
       tableName: 'runs', fields: ['id'], where: { conditions: ['id = ?', 'index_slot IS NOT NULL'], params: [id] },
@@ -132,15 +113,29 @@ export class Db {
     this.#qb.delete({ tableName: 'hooks', where: { conditions: ['id = ?', 'run_id = ?'], params: [hookId, runId] } }).execute();
   }
 
-  /** Frees a finished run's hook tokens, except those still inside their retention window. */
-  releaseHooks(runId: string, now: Date): void {
-    const rows = allRows(this.#qb.fetchAll<'hooks', 'id' | 'data'>({
-      tableName: 'hooks', fields: ['id', 'data'], where: { conditions: 'run_id = ?', params: [runId] },
-    }));
-    for (const row of rows) {
-      const retainedUntil = decode<Hook>(row.data).tokenRetentionUntil;
-      if (retainedUntil === undefined || retainedUntil.getTime() <= now.getTime()) this.deleteHook(row.id);
+  deleteHookByToken(token: string): void {
+    this.#qb.delete({ tableName: 'hooks', where: { conditions: 'token = ?', params: [token] } }).execute();
+  }
+
+  /**
+   * Removes a finished run's hooks, except those still inside their retention window. Returns every
+   * hook the run held, whose token shards it owes a release.
+   */
+  releaseHooks(runId: string, now: Date): Hook[] {
+    const hooks = allRows(this.#qb.fetchAll<'hooks', 'data'>({
+      tableName: 'hooks', fields: ['data'], where: { conditions: 'run_id = ?', params: [runId] },
+    })).map((row) => decode<Hook>(row.data));
+    for (const hook of hooks) {
+      const retainedUntil = hook.tokenRetentionUntil;
+      if (retainedUntil === undefined || retainedUntil.getTime() <= now.getTime()) this.deleteHook(hook.hookId);
     }
+    return hooks;
+  }
+
+  /** Every hook whose token passes `keep`. Only the matches are decoded. */
+  hooksWithTokens(keep: (token: string) => boolean): Hook[] {
+    return allRows(this.#qb.fetchAll<'hooks', 'token' | 'data'>({ tableName: 'hooks', fields: ['token', 'data'] }))
+      .filter((row) => keep(row.token)).map((row) => decode<Hook>(row.data));
   }
 
   // Waits.

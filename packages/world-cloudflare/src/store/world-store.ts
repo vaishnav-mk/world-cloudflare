@@ -10,8 +10,8 @@ import {
 } from '@workflow/world';
 import migrations from '../../drizzle/store/migrations.js';
 import {
-  DIRECTORY_KINDS, DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS,
-  MIN_ALARM_DELAY_MS, REDRIVE_DELAY_MS, STORE_NAME,
+  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS,
+  MIN_ALARM_DELAY_MS, REDRIVE_DELAY_MS, RELEASE_KINDS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
@@ -22,10 +22,10 @@ import { Waiters } from '../lib/waiters.js';
 import { shardPusher } from '../queue/push.js';
 import { queueShardFor } from '../queue/shards.js';
 import { storeShardFor } from './route.js';
-import type { DispatchKind, EnqueueResult, EventOf, OutboxClaim, QueueDispatch, ResolveDataMode, WorldEnv } from '../types.js';
+import type {
+  DispatchKind, EnqueueResult, EventOf, HeldToken, OutboxClaim, QueueDispatch, ResolveDataMode, TokenRelease, WorldEnv,
+} from '../types.js';
 import { Db } from './db.js';
-import { claimHookToken, indexRun } from './directory.js';
-import { DirectoryOutbox } from './directory-outbox.js';
 import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './dispatch.js';
 import { applyEvent } from './events/apply.js';
 import { checkBatch } from './events/batch.js';
@@ -34,7 +34,12 @@ import type { Tokens } from './events/types.js';
 import { Outbox } from './outbox.js';
 import { listEvents, listRecords } from './pages.js';
 import { toEvent } from './rows.js';
+import { TokenOutbox } from './token-outbox.js';
+import { TokenRegistry } from './tokens.js';
 import { hookView, runView, stepView } from './views.js';
+
+/** Storage key a token shard sets once it has imported the legacy store's tokens. */
+const LEGACY_TOKENS_IMPORTED = 'legacy-tokens-imported';
 
 /** A write that frees hook tokens: a disposal, or the run finishing. */
 function freesTokens(data: AnyEventRequest, result: EventResult): boolean {
@@ -42,34 +47,36 @@ function freesTokens(data: AnyEventRequest, result: EventResult): boolean {
   return data.eventType === EventType.HookDisposed || (result.run !== undefined && isTerminalWorkflowRunStatus(result.run.status));
 }
 
-// shortcut: the directory is one object; it takes about three index pushes per run plus hook
-// claims, so partition the index by run ID if it ever bottlenecks.
 /**
- * A run's event log and materialized state, in a SQLite Durable Object named by the run ID. Each
- * run's store makes its event slots, state changes and outbox rows transactional.
+ * A store shard, a SQLite Durable Object holding the runs that hash to it (`storeShardFor(runId)`):
+ * their event logs and materialized state, whose event slots, state changes and outbox rows commit
+ * in one transaction. Each shard is also the registry for the hook tokens that hash to it
+ * (`storeShardFor(token)`), which keeps a token unique across runs.
  *
- * The store named `STORE_NAME` is the directory: it keeps an index copy of every run for
- * `runs.list` and `runs.getMany`, and the hook-token registry that keeps tokens unique across
- * runs. It also still holds every run created before per-run stores, with their own logic.
- * Retained executors call these methods over RPC on the directory, so keep names and signatures stable.
+ * The store named `STORE_NAME` is the legacy store: it still holds every run created before store
+ * shards, with their hooks. Retained executors call these methods over RPC, so keep names and
+ * signatures stable.
  */
 export class WorldStore extends DurableObject<WorldEnv> {
   readonly #db: Db;
   readonly #outbox: Outbox;
   readonly #pushQueue: ReturnType<typeof shardPusher>;
-  readonly #directoryOutbox: DirectoryOutbox;
+  readonly #releases: TokenOutbox;
+  readonly #tokens: TokenRegistry;
   readonly #waiters = new Waiters();
-  readonly #isDirectory: boolean;
-  /** The push to the directory in flight, if any. */
+  readonly #isLegacy: boolean;
+  /** The token release push in flight, if any. */
   #pushing: Promise<void> | undefined;
+  #importedLegacyTokens = false;
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
     this.#db = new Db(ctx.storage.sql);
     this.#outbox = new Outbox(ctx.storage.sql);
     this.#pushQueue = shardPusher(env.QUEUE_SHARD);
-    this.#directoryOutbox = new DirectoryOutbox(ctx.storage.sql);
-    this.#isDirectory = ctx.id.name === STORE_NAME;
+    this.#releases = new TokenOutbox(ctx.storage.sql);
+    this.#tokens = new TokenRegistry(ctx.storage.sql);
+    this.#isLegacy = ctx.id.name === STORE_NAME;
     migrateOnStart(ctx, migrations);
   }
 
@@ -126,8 +133,11 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return hookView(this.#db.getHook(hookId), resolveData);
   }
 
-  async getHookByToken(token: string, resolveData?: ResolveDataMode): Promise<Hook> {
-    return hookView(this.#db.getHookByToken(token), resolveData);
+  /** For `hooks.get`, which asks every store. The legacy store skips the old directory's copies of sharded hooks. */
+  async findHook(hookId: string, resolveData?: ResolveDataMode): Promise<Hook | undefined> {
+    const hook = this.#db.findHook(hookId);
+    if (hook === undefined || (this.#isLegacy && this.#db.isRunCopy(hook.runId))) return undefined;
+    return hookView(hook, resolveData);
   }
 
   async listHooks(params: ListHooksParams): Promise<PaginatedResponse<Hook>> {
@@ -159,12 +169,18 @@ export class WorldStore extends DurableObject<WorldEnv> {
     const data = CreateEventSchema.parse(request);
     const tokens = await this.#beforeWrite(runId, data);
     await this.#armFor([data]);
-    // No awaits inside: the slot, event, state and outbox rows commit together.
-    const result = this.ctx.storage.transactionSync(() => {
-      const result = applyEvent(this.#db, this.#outbox, tokens, runId, data, params);
-      this.#oweDirectory(data, result);
-      return result;
-    });
+    let result: EventResult;
+    try {
+      // No awaits inside: the slot, event, state and outbox rows commit together.
+      result = this.ctx.storage.transactionSync(() => applyEvent(this.#db, this.#outbox, this.#releases, tokens, runId, data, params));
+    } catch (error) {
+      // A token granted for a write that did not commit, such as one racing the run's end, goes back.
+      if (tokens.kind === TokenClaim.Granted) {
+        this.#releases.owe(tokens.hook, true);
+        this.ctx.waitUntil(this.#push());
+      }
+      throw error;
+    }
     this.#wake([result]);
     await this.#afterWrite(freesTokens(data, result));
     return result;
@@ -179,22 +195,18 @@ export class WorldStore extends DurableObject<WorldEnv> {
   ): Promise<EventBatchResult> {
     checkBatch(events);
     this.#own(runId);
-    if (this.#isDirectory) this.#refuseRunCopy(runId);
+    if (this.#isLegacy) this.#refuseRunCopy(runId);
     const parsed = events.map((item) => ({ ...item, event: CreateEventSchema.parse(item.event) }));
     await this.#armFor(parsed.map(({ event }) => event));
     const storage = this.ctx.storage;
     // A batch cannot hold hook_created, so it never needs a token claim.
-    const tokens: Tokens = this.#isDirectory ? { kind: TokenClaim.Local } : { kind: TokenClaim.None };
+    const tokens: Tokens = { kind: TokenClaim.None };
     const outcomes = storage.transactionSync(() => parsed.map(({ event, occurredAt, computeInstanceId }) => {
       try {
         // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
-        return storage.transactionSync(() => {
-          const result = applyEvent(this.#db, this.#outbox, tokens, runId, event, {
-            resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
-          });
-          this.#oweDirectory(event, result);
-          return result;
-        });
+        return storage.transactionSync(() => applyEvent(this.#db, this.#outbox, this.#releases, tokens, runId, event, {
+          resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
+        }));
       } catch (error) {
         if (EntityConflictError.is(error)) return error;
         throw error;
@@ -225,49 +237,51 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   /**
    * Arms the alarm for what these events will owe, before they commit, so a crash just after the
-   * commit cannot strand an outbox row: a queue message per dispatch event, and a run store's push
-   * to the directory. One alarm check covers all of them: each check is a storage round trip.
+   * commit cannot strand an outbox row: a queue message per dispatch event, and token releases.
+   * One alarm check covers all of them: each check is a storage round trip.
    */
   async #armFor(events: AnyEventRequest[]): Promise<void> {
     let at = Number.POSITIVE_INFINITY;
     for (const data of events) {
       if (data.eventType === EventType.WaitCreated) {
         at = Math.min(at, Math.max(Date.now() + 1, data.eventData.resumeAt.getTime()));
-      } else if (DISPATCH_KINDS.has(data.eventType) || (!this.#isDirectory && DIRECTORY_KINDS.has(data.eventType))) {
+      } else if (DISPATCH_KINDS.has(data.eventType) || RELEASE_KINDS.has(data.eventType)) {
         at = Math.min(at, Date.now() + DISPATCH_RECOVERY_DELAY_MS);
       }
     }
     if (at !== Number.POSITIVE_INFINITY) await this.#armAlarm(at, 'dispatch recovery');
   }
 
-  // Per-run stores and the directory.
+  // Store shards and the legacy store.
 
-  /** A run store answers only for its own run. The directory answers for any run, as before. */
+  /** A store shard answers only for its own runs. The legacy store answers for any run, as before. */
   #own(runId: string): void {
-    if (!this.#isDirectory) this.#db.getRun(runId);
+    if (!this.#isLegacy) this.#db.getRun(runId);
   }
 
-  #directory() {
-    return transientAsWorldError(this.env.WORLD_STORE.getByName(STORE_NAME));
+  /** Another store, or this one called directly. */
+  #store(name: string) {
+    return name === this.ctx.id.name ? this : transientAsWorldError(this.env.WORLD_STORE.getByName(name));
   }
 
   /**
-   * Checks this store takes the write, and how it learns about hook tokens. The directory decides
-   * tokens itself, and refuses writes to runs it only indexes. A run store takes writes for its
-   * one run, and claims a new hook's token from the directory before the write.
+   * Checks this store takes the write, and claims a new hook's token from the token's shard before
+   * it. A store shard takes writes only for runs that hash to it; the legacy store refuses writes to
+   * the old directory's index copies.
    */
   async #beforeWrite(runId: string | null, data: AnyEventRequest): Promise<Tokens> {
-    if (this.#isDirectory) {
-      if (runId !== null) this.#refuseRunCopy(runId);
-      return { kind: TokenClaim.Local };
+    if (this.#isLegacy) {
+      if (runId === null) return { kind: TokenClaim.None };
+      this.#refuseRunCopy(runId);
+    } else if (runId === null || storeShardFor(runId) !== this.ctx.id.name) {
+      throw new WorkflowRunNotFoundError(String(runId));
     }
-    if (runId === null || storeShardFor(runId) !== this.ctx.id.name) throw new WorkflowRunNotFoundError(String(runId));
     switch (data.eventType) {
       case EventType.HookCreated:
         return this.#claimToken(runId, data);
       case EventType.RunStarted:
-        // A lazy start creates a run it cannot find, so first rule out a run held by the directory.
-        if (this.#db.findRun(runId) === undefined && await this.#directory().holdsRun(runId)) {
+        // A lazy start creates a run it cannot find, so a shard first rules out a legacy run.
+        if (!this.#isLegacy && this.#db.findRun(runId) === undefined && await this.#store(STORE_NAME).holdsRun(runId)) {
           throw new WorkflowRunNotFoundError(runId);
         }
         return { kind: TokenClaim.None };
@@ -276,77 +290,122 @@ export class WorldStore extends DurableObject<WorldEnv> {
     }
   }
 
-  /** The directory's copy of a run that lives in its own store is only an index entry: it takes no writes. */
+  /** The old directory's copy of a sharded run was only an index entry: it takes no writes. */
   #refuseRunCopy(runId: string): void {
-    if (this.#db.isRunCopy(runId)) throw new Error(`Run ${runId} lives in its own store, not the directory`);
+    if (this.#db.isRunCopy(runId)) throw new Error(`Run ${runId} lives on a store shard, not the legacy store`);
   }
 
-  /** Claims a new hook's token. A write the transaction rejects anyway claims nothing. */
+  /** Claims a new hook's token from the token's shard. A write the transaction rejects anyway claims nothing. */
   async #claimToken(runId: string, data: EventOf<EventType.HookCreated>): Promise<Tokens> {
     const run = this.#db.getRun(runId);
     if (isTerminalWorkflowRunStatus(run.status) || data.eventData.force || this.#db.findHook(data.correlationId)) {
       return { kind: TokenClaim.None };
     }
     const hook = newHook(run, data, data.specVersion ?? run.specVersion ?? mintedSpecVersion(), new Date());
-    const holderRunId = await this.#directory().claimHookToken(hook);
+    // Releases this store owes go first, so a run can claim again a token it just disposed of.
+    await this.#push();
+    const holderRunId = await this.#store(storeShardFor(hook.token)).claimHookToken(hook);
     return holderRunId === null ? { kind: TokenClaim.Granted, hook } : { kind: TokenClaim.Held, holderRunId };
   }
 
-  /** Inside the write's transaction: a run store owes the directory its run row, and disposed hooks. */
-  #oweDirectory(data: AnyEventRequest, result: EventResult): void {
-    if (!this.#isDirectory) this.#directoryOutbox.owe(data, result);
-  }
-
   /**
-   * After a run store's write: a write that frees hook tokens waits for its push, so a freed token
-   * is free once the write returns. The run index alone updates in the background, off the write's path.
+   * After a write: owed token releases go to their shards in the background, so a freed token is
+   * free shortly after the write returns. A failed release stays owed and the alarm retries it.
    */
   async #afterWrite(freesTokens: boolean): Promise<void> {
-    if (this.#isDirectory) return;
-    if (!freesTokens) {
+    if (this.#releases.nextDueAt() !== null) {
       this.ctx.waitUntil(this.#push());
       return;
     }
-    await this.#push();
     // A finished run usually owes nothing now, so its store need not wake for the recovery alarm.
-    if (this.#outbox.nextDueAt() === null && this.#directoryOutbox.nextDueAt() === null) await this.ctx.storage.deleteAlarm();
+    if (freesTokens && this.#outbox.nextDueAt() === null) await this.ctx.storage.deleteAlarm();
   }
 
-  /**
-   * One push at a time; a write that commits during a push rides its loop. A failed push stays
-   * owed and the alarm retries it with backoff, so a stale index heals itself.
-   */
+  /** One push at a time; a release owed during a push rides its loop. A failed one arms the alarm. */
   #push(): Promise<void> {
-    this.#pushing ??= this.#directoryOutbox.push(this.#db, this.#directory())
-      .then((retryAt) => (retryAt === undefined ? undefined : this.#armAlarm(retryAt, 'run index retry')))
+    this.#pushing ??= this.#releases.push((name) => this.#store(name))
+      .then((retryAt) => (retryAt === undefined ? undefined : this.#armAlarm(retryAt, 'token release retry')))
       .finally(() => { this.#pushing = undefined; });
     return this.#pushing;
   }
 
-  // Directory only, called by run stores.
+  // Token shard: the registry for the tokens that hash to this store, called by every store.
 
-  /** Records a run store's latest run row in the run index, and releases the tokens it gave up. */
-  async indexRun(run: WorkflowRun, slot: number, released: string[]): Promise<void> {
-    this.#requireDirectory();
-    if (!Number.isSafeInteger(slot) || slot < 1) throw new RangeError('Invalid index slot');
-    this.ctx.storage.transactionSync(() => indexRun(this.#db, run, slot, released, new Date()));
-  }
-
-  /** Claims a token for a run store's new hook. Returns the run that holds it, or null once granted. */
+  /**
+   * Claims a token for a store's new hook. Returns the run that holds it, or null once granted. A
+   * store that is not the token's shard, such as the legacy store called by an older store, passes
+   * the claim on.
+   */
   async claimHookToken(hook: Hook): Promise<string | null> {
-    this.#requireDirectory();
-    return this.ctx.storage.transactionSync(() => claimHookToken(this.#db, hook, new Date()));
+    const shard = storeShardFor(hook.token);
+    if (shard !== this.ctx.id.name) return this.#store(shard).claimHookToken(hook);
+    await this.#importLegacyTokens(shard);
+    return this.ctx.storage.transactionSync(() => this.#tokens.claim(hook, new Date()));
   }
 
-  /** Whether the directory holds this run itself, rather than an index copy: a run created before per-run stores. */
+  /** Applies releases from the stores whose hooks held these tokens. */
+  async releaseTokens(releases: TokenRelease[]): Promise<void> {
+    const shards = new Set(releases.map(({ token }) => storeShardFor(token)));
+    for (const shard of shards) {
+      if (shard !== this.ctx.id.name) throw new Error('Token released on the wrong shard');
+      await this.#importLegacyTokens(shard);
+    }
+    const now = new Date();
+    this.ctx.storage.transactionSync(() => {
+      for (const release of releases) this.#tokens.release(release, now);
+    });
+  }
+
+  /** The hook holding `token`, read from the token's shard. */
+  async getHookByToken(token: string, resolveData?: ResolveDataMode): Promise<Hook> {
+    const shard = storeShardFor(token);
+    if (shard !== this.ctx.id.name) return this.#store(shard).getHookByToken(token, resolveData);
+    await this.#importLegacyTokens(shard);
+    return hookView(this.#tokens.get(token), resolveData);
+  }
+
+  /**
+   * Once per token shard, before its registry first answers: copies in the tokens the legacy store's
+   * hooks hold, so they still conflict. Legacy runs claim new tokens on the shards too, so one copy
+   * is enough. Other requests wait meanwhile, so a release that arrives during the copy applies after it.
+   */
+  async #importLegacyTokens(shard: string): Promise<void> {
+    if (this.#importedLegacyTokens) return;
+    let failure: { error: unknown } | undefined;
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if (this.ctx.storage.kv.get(LEGACY_TOKENS_IMPORTED) !== undefined) return;
+      try {
+        const held = await this.#store(STORE_NAME).legacyTokens(shard);
+        this.ctx.storage.transactionSync(() => {
+          this.#tokens.import(held);
+          this.ctx.storage.kv.put(LEGACY_TOKENS_IMPORTED, Date.now());
+        });
+      } catch (error) {
+        // Thrown from here it would reset the object; the request that needed the import fails instead.
+        failure = { error };
+      }
+    });
+    if (failure !== undefined) throw failure.error;
+    this.#importedLegacyTokens = true;
+  }
+
+  // Legacy store, called by store shards.
+
+  /** The tokens this store's hooks hold that hash to `shard`, for that token shard's one-time import. */
+  async legacyTokens(shard: string): Promise<HeldToken[]> {
+    return this.#db.hooksWithTokens((token) => storeShardFor(token) === shard).map((hook) => {
+      const run = this.#db.findRun(hook.runId);
+      return { hook, finished: run !== undefined && isTerminalWorkflowRunStatus(run.status) };
+    });
+  }
+
+  /** Whether the legacy store holds this run itself, rather than the old directory's index copy. */
   async holdsRun(runId: string): Promise<boolean> {
-    this.#requireDirectory();
     return this.#db.findRun(runId) !== undefined && !this.#db.isRunCopy(runId);
   }
 
-  #requireDirectory(): void {
-    if (!this.#isDirectory) throw new Error('Only the directory keeps the run index and hook tokens');
-  }
+  /** Stores still running the version with a run index push their runs here. Runs have no index now, so it only accepts them. */
+  async indexRun(_run: WorkflowRun, _slot: number, _released: string[]): Promise<void> {}
 
   /** Replays events after `cursor` (a slot), or waits for the next commit. `done` once a finished run is drained. */
   async nextEvents(runId: string, cursor: number, filter?: string[]) {
@@ -492,8 +551,8 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   async drainOutbox(): Promise<number> {
     const drained = await drainOutbox(this.#db, this.#outbox, (key) => this.env.QUEUE_SHARD.getByName(queueShardFor(key)));
-    if (!this.#isDirectory) await this.#push();
-    const due = [this.#outbox.nextDueAt(), this.#directoryOutbox.nextDueAt()].filter((at) => at !== null);
+    await this.#push();
+    const due = [this.#outbox.nextDueAt(), this.#releases.nextDueAt()].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));
     return drained;
   }
@@ -508,7 +567,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return reopened;
   }
 
-  /** Moves the alarm earlier when needed. On failure the cron covers the directory's rows, the next write a run store's. */
+  /** Moves the alarm earlier when needed. On failure the cron covers the legacy store's rows, the next write a shard's. */
   async #armAlarm(at: number, purpose: string): Promise<void> {
     try {
       const alarm = await this.ctx.storage.getAlarm();

@@ -16,8 +16,8 @@ export const runs = sqliteTable('runs', {
   status: text('status').notNull(),
   workflow_name: text('workflow_name').notNull(),
   /**
-   * Set only on the directory's index copy of a run that lives in its own store: the run's last
-   * event slot when the copy was pushed. Null for a run this store holds.
+   * Set only on the old directory's index copy of a sharded run, left in the legacy store: the run's
+   * last event slot when the copy was pushed. Null for a run this store holds. Nothing writes it now.
    */
   index_slot: integer('index_slot'),
 }, (table) => [index('runs_created').on(table.created_at, table.id)]);
@@ -126,8 +126,6 @@ export type StoreSchema = {
   waits: typeof waits.$inferSelect;
   events: typeof events.$inferSelect;
   dispatch_outbox: typeof dispatchOutbox.$inferSelect;
-  directory_outbox: typeof directoryOutbox.$inferSelect;
-  directory_releases: typeof directoryReleases.$inferSelect;
   tokens: typeof tokens.$inferSelect;
   token_releases: typeof tokenReleases.$inferSelect;
 };

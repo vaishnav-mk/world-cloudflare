@@ -3,6 +3,7 @@ import {
   MessageId, QueuePrefix, ValidQueueName, type Queue, type QueueOptions, type QueuePayload,
 } from '@workflow/world';
 import { MessageKind } from '../enums.js';
+import { groupBy } from '../lib/group.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
 import { onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
@@ -29,7 +30,7 @@ export function createQueue(env: QueueEnv): Queue {
     const results = new Map<Ready, EnqueueResult>();
     await Promise.all([
       push(direct).then((pushed) => direct.forEach((entry, index) => results.set(entry, pushed[index]))),
-      ...[...byRun(claimed)].map(async ([runId, group]) => {
+      ...[...groupBy(claimed, (entry) => entry.claim.runId)].map(async ([runId, group]) => {
         const pushed = await onRun(env.WORLD_STORE, runId, (store) => store.dispatch(group), answersUnknown);
         group.forEach((entry, index) => results.set(entry, pushed[index] ?? { error: 'Incomplete enqueue response' }));
       }),
@@ -82,14 +83,8 @@ export function createQueue(env: QueueEnv): Queue {
   };
 }
 
-/** The directory answers outbox calls for a run it lacks, such as one whose `run_created` is still in flight. */
+/** The legacy store answers outbox calls for a run it lacks, such as one whose `run_created` is still in flight. */
 const answersUnknown = { answersUnknown: true };
-
-function byRun(items: QueueDispatch[]): Map<string, QueueDispatch[]> {
-  const groups = new Map<string, QueueDispatch[]>();
-  for (const item of items) groups.set(item.claim.runId, [...(groups.get(item.claim.runId) ?? []), item]);
-  return groups;
-}
 
 /** Validates one message and computes what the shard stores, or why it cannot be queued. */
 async function prepare(

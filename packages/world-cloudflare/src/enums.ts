@@ -102,11 +102,9 @@ export enum ChangeKind {
 
 /** How `hook_created` learns whether its token, unique across runs, is free. */
 export enum TokenClaim {
-  /** This store decides from its own hooks table: the directory, for runs it holds. */
-  Local = 'local',
-  /** The directory granted the token to this hook. */
+  /** The token's shard granted the token to this hook. */
   Granted = 'granted',
-  /** The directory reports that another run holds the token. */
+  /** The token's shard reports that another run holds the token. */
   Held = 'held',
   /** No claim was made, so the write cannot create a hook. */
   None = 'none',

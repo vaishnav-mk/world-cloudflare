@@ -2,9 +2,9 @@ import { EventType } from './enums.js';
 import type { DispatchKind } from './types.js';
 
 /**
- * Durable Object names. Each run has its own store, named by its run ID; the store named
- * `STORE_NAME` is the directory, and still holds runs created before per-run stores. One queue
- * shard serves every run.
+ * Durable Object names. Runs and hook tokens live on store shards (`STORE_SHARDS`); the store named
+ * `STORE_NAME` is the legacy store, which still holds runs created before store shards.
+ * `QUEUE_SHARD_NAME` named the single queue shard before queue shards.
  */
 export const STORE_NAME = 'global';
 export const QUEUE_SHARD_NAME = 'flow';
@@ -54,10 +54,9 @@ export const DISPATCH_KINDS: ReadonlySet<string> = new Set<DispatchKind>([
   EventType.RunCreated, EventType.HookReceived, EventType.StepCreated, EventType.WaitCreated,
 ]);
 
-/** Events whose commit a run store pushes to the directory: run changes, and hook disposals. */
-export const DIRECTORY_KINDS: ReadonlySet<string> = new Set<string>([
-  EventType.RunCreated, EventType.RunStarted, EventType.RunCompleted, EventType.RunFailed, EventType.RunCancelled,
-  EventType.AttrSet, EventType.HookDisposed,
+/** Events whose commit may owe token shards a release: a disposal, or the run finishing. */
+export const RELEASE_KINDS: ReadonlySet<string> = new Set<string>([
+  EventType.HookDisposed, EventType.RunCompleted, EventType.RunFailed, EventType.RunCancelled,
 ]);
 
 /** Dispatch outbox recovery. */
@@ -89,6 +88,8 @@ export const QUEUE_SHARDS = 256;
  * Changing the count moves runs, so only raise it with a migration.
  */
 export const STORE_SHARDS = 128;
+/** Store calls in flight at once when a cross-run read, such as `runs.list`, asks every store. */
+export const FAN_OUT_CONCURRENCY = 32;
 
 /** Workers for Platforms script names in `EXECUTOR_ROUTES`. */
 export const EXECUTOR_SCRIPT_PATTERN = /^[a-zA-Z0-9_-]{1,63}$/;

@@ -1,9 +1,8 @@
 import { EntityConflictError } from '@workflow/errors';
-import { isTerminalWorkflowRunStatus, type Hook, type WorkflowRun } from '@workflow/world';
+import type { Hook, WorkflowRun } from '@workflow/world';
 import { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import { unreachable } from '../../lib/unreachable.js';
 import type { EventOf } from '../../types.js';
-import type { Db } from '../db.js';
 import type { Change, HookEvent, Tx } from './types.js';
 
 /** Hooks created by this World report these fixed owner fields. */
@@ -17,22 +16,20 @@ export function changeHook(tx: Tx, run: WorkflowRun, data: HookEvent): Change {
       requireRunHook(tx, data.correlationId);
       return { kind: ChangeKind.Run, run };
     case EventType.HookDisposed:
-      requireRunHook(tx, data.correlationId);
-      return { kind: ChangeKind.HookDisposed, run, hookId: data.correlationId };
+      return { kind: ChangeKind.HookDisposed, run, hook: requireRunHook(tx, data.correlationId) };
     default:
       return unreachable(data);
   }
 }
 
 /** Resumes and disposals must name a hook this run created. */
-function requireRunHook(tx: Tx, hookId: string): void {
-  if (tx.db.findHook(hookId)?.runId !== tx.runId) throw new Error(`Hook ${hookId} not found`);
+function requireRunHook(tx: Tx, hookId: string): Hook {
+  const hook = tx.db.findHook(hookId);
+  if (hook?.runId !== tx.runId) throw new Error(`Hook ${hookId} not found`);
+  return hook;
 }
 
-/**
- * Creates the hook, or journals `hook_conflict` when another run holds its token. The directory
- * decides from its own hooks table; a run store brings the directory's answer, claimed beforehand.
- */
+/** Creates the hook, or journals `hook_conflict` when another run holds its token, as the token's shard answered beforehand. */
 function createHook(tx: Tx, run: WorkflowRun, data: EventOf<EventType.HookCreated>): Change {
   const { token } = data.eventData;
   if (data.eventData.force) throw new Error('Forced hook claims are not supported');
@@ -42,17 +39,12 @@ function createHook(tx: Tx, run: WorkflowRun, data: EventOf<EventType.HookCreate
     eventData: { token, conflictingRunId: holderRunId },
   } });
   switch (tx.tokens.kind) {
-    case TokenClaim.Local: {
-      const holderRunId = takeToken(tx.db, token, tx.now);
-      if (holderRunId !== undefined) return conflict(holderRunId);
-      return { kind: ChangeKind.HookCreated, run, hook: newHook(run, data, tx.specVersion, tx.now) };
-    }
     case TokenClaim.Granted:
       return { kind: ChangeKind.HookCreated, run, hook: tx.tokens.hook };
     case TokenClaim.Held:
       return conflict(tx.tokens.holderRunId);
     case TokenClaim.None:
-      throw new Error('hook_created needs a token claim from the directory');
+      throw new Error('hook_created needs a token claim from the token shard');
     default:
       return unreachable(tx.tokens);
   }
@@ -71,18 +63,4 @@ export function newHook(run: WorkflowRun, data: EventOf<EventType.HookCreated>, 
       runSpecVersion: run.specVersion, encryptionPublicKey: run.encryptionPublicKey,
     },
   };
-}
-
-/**
- * Takes `token` in this store's hooks table, reclaiming it from a finished run whose retention has
- * lapsed. Returns the run that holds it otherwise. The caller writes the new hook.
- */
-export function takeToken(db: Db, token: string, now: Date): string | undefined {
-  const holder = db.findHookByToken(token);
-  if (holder === undefined) return undefined;
-  const holderRun = db.findRun(holder.runId);
-  const retentionLapsed = !holder.tokenRetentionUntil || holder.tokenRetentionUntil.getTime() <= now.getTime();
-  if (holderRun === undefined || !isTerminalWorkflowRunStatus(holderRun.status) || !retentionLapsed) return holder.runId;
-  db.deleteHook(holder.hookId);
-  return undefined;
 }

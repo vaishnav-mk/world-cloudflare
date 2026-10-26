@@ -185,7 +185,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
     }
     const letter = readDeadLetter(payload);
     if (!letter) return;
-    // The directory answers for a run it lacks, with nothing to reopen.
+    // The legacy store answers for a run it lacks, with nothing to reopen.
     const answersUnknown = { answersUnknown: true };
     switch (letter.kind) {
       case MessageKind.Step:

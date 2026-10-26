@@ -3,6 +3,7 @@ import type { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import type { EventOf } from '../../types.js';
 import type { Db } from '../db.js';
 import type { Outbox } from '../outbox.js';
+import type { TokenOutbox } from '../token-outbox.js';
 
 export type StepEvent = EventOf<
   EventType.StepCreated | EventType.StepStarted | EventType.StepCompleted | EventType.StepFailed | EventType.StepRetrying
@@ -22,11 +23,10 @@ export type HookConflictEvent = {
 };
 
 /**
- * The answer to a hook-token claim. The directory decides locally; a run store asks the directory
- * before its transaction, because a token is unique across runs.
+ * The answer to a hook-token claim. A store asks the token's shard before its transaction, because
+ * a token is unique across runs.
  */
 export type Tokens =
-  | { kind: TokenClaim.Local }
   | { kind: TokenClaim.Granted; hook: Hook }
   | { kind: TokenClaim.Held; holderRunId: string }
   | { kind: TokenClaim.None };
@@ -35,6 +35,7 @@ export type Tokens =
 export type Tx = {
   db: Db;
   outbox: Outbox;
+  releases: TokenOutbox;
   tokens: Tokens;
   runId: string;
   now: Date;
@@ -59,5 +60,5 @@ export type Change =
   }
   | { kind: ChangeKind.HookCreated; run: WorkflowRun; hook: Hook }
   | { kind: ChangeKind.HookConflict; run: WorkflowRun; conflict: HookConflictEvent }
-  | { kind: ChangeKind.HookDisposed; run: WorkflowRun; hookId: string }
+  | { kind: ChangeKind.HookDisposed; run: WorkflowRun; hook: Hook }
   | { kind: ChangeKind.Wait; run: WorkflowRun; wait: Wait; correlationId: string };

@@ -9,6 +9,7 @@ import { ChangeKind, EventType } from '../../enums.js';
 import type { Db } from '../db.js';
 import type { Outbox } from '../outbox.js';
 import { toEvent } from '../rows.js';
+import type { TokenOutbox } from '../token-outbox.js';
 import { changeHook } from './hooks.js';
 import { appendEvent, eventResult, journalOf } from './journal.js';
 import { checkRunAccepts, createRun, updateRun } from './runs.js';
@@ -18,11 +19,11 @@ import { changeWait } from './waits.js';
 
 /**
  * Validates and writes one event, parsed with `CreateEventSchema`, with every state change it
- * causes: the run, step, hook or wait, and any queue message it owes. Call it inside
- * `transactionSync`, so all of it commits together.
+ * causes: the run, step, hook or wait, and any queue message or token release it owes. Call it
+ * inside `transactionSync`, so all of it commits together.
  */
 export function applyEvent(
-  db: Db, outbox: Outbox, tokens: Tokens, requestedRunId: string | null, data: AnyEventRequest,
+  db: Db, outbox: Outbox, releases: TokenOutbox, tokens: Tokens, requestedRunId: string | null, data: AnyEventRequest,
   params: CreateEventParams = {},
 ): EventResult {
   checkParams(data, params);
@@ -33,7 +34,7 @@ export function applyEvent(
 
   const existing = db.findRun(runId);
   const specVersion = data.specVersion ?? existing?.specVersion ?? mintedSpecVersion();
-  const tx: Tx = { db, outbox, tokens, runId, now: new Date(), specVersion };
+  const tx: Tx = { db, outbox, releases, tokens, runId, now: new Date(), specVersion };
   const created = createRun(tx, data, existing);
   const run = created?.run ?? existing;
   if (run === undefined) throw new WorkflowRunNotFoundError(runId);
@@ -102,7 +103,7 @@ function changeFor(tx: Tx, run: WorkflowRun, data: AnyEventRequest): Change {
 }
 
 function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): void {
-  const { db, outbox, runId, now } = tx;
+  const { db, outbox, releases, runId, now } = tx;
   db.putRun(change.run);
   recordDispatch(tx, data, event, change.run);
   switch (change.kind) {
@@ -111,10 +112,13 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): v
       db.putStep(change.step);
       break;
     case ChangeKind.HookCreated:
+      // The token's shard granted the token, so a hook here that still has it belongs to a finished run past its retention.
+      db.deleteHookByToken(change.hook.token);
       db.insertHook(change.hook);
       break;
     case ChangeKind.HookDisposed:
-      db.deleteRunHook(runId, change.hookId);
+      db.deleteRunHook(runId, change.hook.hookId);
+      releases.owe(change.hook, true);
       break;
     case ChangeKind.Wait:
       db.putWait(runId, change.correlationId, change.wait);
@@ -123,7 +127,7 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): v
   if (isTerminalWorkflowRunStatus(change.run.status)) {
     outbox.settleRun(runId);
     db.deleteWaits(runId);
-    db.releaseHooks(runId, now);
+    for (const hook of db.releaseHooks(runId, now)) releases.owe(hook, false);
   }
 }
 

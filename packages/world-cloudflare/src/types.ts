@@ -1,4 +1,4 @@
-import type { AnyEventRequest } from '@workflow/world';
+import type { AnyEventRequest, Hook } from '@workflow/world';
 import type { DeliveryResult, EventType, MessageKind, ResolveData } from './enums.js';
 import type { QueueShard } from './queue/queue-shard.js';
 import type { WorldStore } from './store/world-store.js';
@@ -59,6 +59,15 @@ export type EnqueueRequest = {
 export type EnqueueResult = { id: string; fresh: boolean } | { error: string };
 /** A queue message that settles an outbox row, routed through its run's store. */
 export type QueueDispatch = { request: EnqueueRequest; claim: OutboxClaim; shard: string };
+
+/**
+ * A release a store sends a token's shard: the hook was disposed, which frees the token now, or its
+ * run finished, which frees it once the hook's retention ends.
+ */
+export type TokenRelease = { token: string; hookId: string; disposed: boolean };
+
+/** A token a legacy hook holds, as the legacy store hands it to the token's shard. */
+export type HeldToken = { hook: Hook; finished: boolean };
 
 /** Props the dispatching consumer passes to a retained executor. */
 export type ExecutorProps = { privateDispatch?: boolean; targetDeployment?: string };
