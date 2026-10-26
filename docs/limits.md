@@ -13,10 +13,15 @@ Vercel's column is its documented limits.
 | Replay | 240 s budget | A snapshot restore took 81 ms at 30,000 events; pauses between invocations stay at 4 to 8 s |
 | One payload | 50 MB | 16 MiB step output with QuickJS, 20 MiB with the isolate engine; larger payloads are rejected |
 | One stream chunk | 10 MB | 70 MiB locally; not measured on Workers |
-| Run creations | 1,000 per second | 26 to 39 per second with one store for every run, lower while the same Worker runs many flows; per-run stores not measured on Workers yet |
+| Run creations | 1,000 per second | 26 to 39 per second with one store for every run; 97 per second at concurrency 240 with store shards and a directory object; without the directory not measured yet |
 | 1,000 parallel steps | Not documented | 66 to 74 s |
 
-Run creation is the open gap. One store object used to serialize every run's writes; each run now has its own store, but one directory object still takes every run's index updates (about three per run) and hook-token claims. Locally the sharded World is slower: a burst of 300 creations at concurrency 30 (`scripts/perf/burst.mjs` against `wrangler dev`) made 84 to 91 runs per second, against 133 to 171 with one store, because local workerd runs every object on one thread.
+Run creation is the open gap. With runs on 128 store shards, creation scaled with concurrency on Workers, but `run_completed` waited 0.7 to 2.5 s on a directory object that took about three index pushes per run and every hook-token claim. The directory is gone: lists ask every shard, and each hook token lives on the shard its hash picks. That build is not measured on Workers yet. What is left:
+- **Lists.** `runs.list` and a global `hooks.list` make 129 calls and carry up to 129 pages to the calling Worker, so a large `limit` with `resolveData: 'all'` costs memory. `hooks.get` asks every store too.
+- **Token release lag.** A disposal or a finished run releases its tokens on their shards just after the write, in the background, so another run's claim in between still conflicts.
+- **The legacy store.** It still serves runs created before store shards, each token shard's first answer (once), and a shard that cannot find a lazily started run.
+
+Locally the sharded World is slower: a burst of 300 creations at concurrency 30 (`scripts/perf/burst.mjs` against `wrangler dev`) made 84 to 91 runs per second with per-run stores, against 133 to 171 with one store, because local workerd runs every object on one thread.
 
 ## Payloads
 

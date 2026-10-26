@@ -4,8 +4,8 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 
 | Durable Object | Holds |
 | --- | --- |
-| `WorldStore` | One per run, named by its run ID: the run's events, steps, hooks and waits, plus its dispatch outbox. The one named `global` is the directory ([below](#run-stores-and-the-directory)) |
-| `QueueShard` | Queue messages, delays, retries and idempotency keys; dead letters go to R2 |
+| `WorldStore` | 128 store shards (`store-0` to `store-127`). Each holds the runs that hash to it, with their events, steps, hooks, waits and outboxes, and the registry for the hook tokens that hash to it. The one named `global` holds runs created before store shards ([below](#store-shards)) |
+| `QueueShard` | 64 queue shards: queue messages, delays, retries and idempotency keys; dead letters go to R2 |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
 Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
@@ -48,19 +48,21 @@ Bindings, as in the repo's `wrangler.jsonc`:
 | `DEPLOYMENT_ID` | A new ID per release |
 | `EXECUTORS`, `EXECUTOR_ROUTES` | Optional retained executors, below |
 
-Add a `* * * * *` cron so `drainOutbox` can recover the directory's dispatches whose alarm was lost, and wake the queue shard.
+Add a `* * * * *` cron so `drainOutbox` can recover the legacy store's dispatches whose alarm was lost, and wake the queue shards.
 
 `WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`. Call `setWorld(createWorld())` instead.
 
-## Run stores and the directory
+## Store shards
 
-Each run lives in its own `WorldStore`, named by its run ID, so runs no longer queue behind each other's writes. The one named `global` is the directory: an index copy of every run for `runs.list` and `runs.getMany`, the hook-token registry, and every run created before per-run stores.
-- **Routing.** The World client sends a run-scoped call to the run's store. A store throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the directory and remembers, per isolate, that the run lives there.
-- **Run index.** After a write that changes the run, its store pushes the run row to the directory just after the commit, in the background unless the write frees hook tokens (below). Until then `runs.list` and `runs.getMany` can show an older status. A failed push stays owed and the store's alarm retries it.
-- **Hook tokens.** Before a `hook_created` write, the run's store claims the token from the directory. A disposal or the run finishing waits for its push, so a freed token is free once that write returns. A claim whose write never commits holds its token until the run finishes.
-- **Recovery.** Each run store drains its own outbox from its alarm, armed before any write that owes a queue message or a push. The cron reaches only the directory.
+A run lives in store shard `hash(runId) % 128` from its first event, so no single object sees every run. The store named `global` is the legacy store: it holds the runs created before store shards, with their hooks.
+- **Routing.** The World client sends a run-scoped call to the run's shard. A shard throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the legacy store and remembers, per isolate, that the run lives there.
+- **Lists.** `runs.list` and `hooks.list` without a run ID ask all 128 shards and the legacy store, 32 at a time, merge their pages by `createdAt` then ID, and return the last row's sort key as the cursor. `runs.getMany` makes one call per shard its IDs hash to, then one to the legacy store for the rest. `hooks.get` asks every store.
+- **Hook tokens.** A token's registry row lives on shard `hash(token) % 128`, a copy of the hook that holds it. Before a `hook_created` write, the run's shard claims the token there and journals `hook_created` or `hook_conflict`. `hooks.getByToken` reads that shard.
+- **Releases.** A disposal or the run finishing owes the token's shard a release, committed with the write and sent just after it in the background, so a freed token is free shortly after the write returns. A finished run's retained token stays held until its retention lapses. A failed release stays owed and the shard's alarm retries it with backoff. A claim whose write is rejected is released the same way; one cut off by a reset of the run's shard holds its token until the run retries the write.
+- **Legacy tokens.** Each token shard, the first time it answers, copies in the tokens that legacy hooks hold, so they still conflict. Legacy runs claim new tokens on the shards like any other run.
+- **Recovery.** Each shard drains its own outboxes from its alarm, armed before any write that owes a queue message or a release. The cron reaches only the legacy store.
 
-Retained executors deployed before per-run stores talk only to the directory, so don't route new runs to them.
+Retained executors deployed before store shards talk only to the legacy store, so don't route new runs to them.
 
 ## Large payloads
 

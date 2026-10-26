@@ -13,14 +13,14 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | Contract | Built | Workerd | Remote | Notes |
 | --- | :---: | :---: | :---: | --- |
 | `runs.get` | ✓ | ✓ | ✓ | |
-| `runs.getMany` | ✓ | ✓ | ✗ | Input order, nulls for missing runs. Reads the directory's run index, so it can briefly lag a run's own store |
-| `runs.list` with status filters | ✓ | ✓ | ✗ | One status, several, or an empty set. Reads the directory's run index, updated just after each run change commits |
+| `runs.getMany` | ✓ | ✓ | ✗ | Input order, nulls for missing runs. One call per store shard the IDs hash to, then one to the legacy store |
+| `runs.list` with status filters | ✓ | ✓ | ✗ | One status, several, or an empty set. Asks every store shard and the legacy store, and merges their pages by `createdAt` then ID |
 | `runs.waitForTerminalStatus` | ✓ | ✓ | ✗ | `AbortSignal` is ignored: it cannot cross RPC |
 | `steps.get`, `steps.list` | ✓ | ✓ | ✗ | |
-| `events.create`, atomic with entity state | ✓ | ✓ | ✓ | One SQLite transaction in the run's own store |
+| `events.create`, atomic with entity state | ✓ | ✓ | ✓ | One SQLite transaction in the run's store shard |
 | `events.list` | ✓ | ✓ | ✓ | |
 | `events.get`, `events.listByCorrelationId` | ✓ | ✗ | ✗ | |
-| `hooks.get`, `hooks.getByToken`, `hooks.list` | ✓ | ✓ | ✓ | `list` and `getByToken` remotely. A run's `list` reads its store; the rest read the directory's copies |
+| `hooks.get`, `hooks.getByToken`, `hooks.list` | ✓ | ✓ | ✓ | `list` and `getByToken` remotely. `getByToken` reads the token's shard, a run's `list` its run's shard; `get` and a global `list` ask every store |
 | `resolveData: none` and `skip-step-inputs` | ✓ | ✓ | ✗ | `skip-step-inputs` leaves out `step_created` inputs, so replay never loads them from R2 |
 | Dense per-run event slots | ✓ | ✓ | ✓ | |
 | Stale-writer reports (`eventCount`, `sinceCursor`) | ✓ | ✓ | ✗ | |
@@ -41,7 +41,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | Running steps may finish after cancellation | ✓ | ✓ | ✗ | |
 | Waits: create and complete | ✓ | ✓ | ✓ | 45 s sleep tested remotely |
 | Hooks: create, receive, dispose | ✓ | ✓ | ✓ | |
-| Hook tokens unique across runs, `hook_conflict` | ✓ | ✓ | ✗ | The run's store claims the token from the directory before its write |
+| Hook tokens unique across runs, `hook_conflict` | ✓ | ✓ | ✗ | The run's shard claims the token on the token's shard before its write. A freed token is free just after the freeing write, not with it |
 | Token retention after a run finishes | ✓ | ✓ | ✗ | |
 | `hook_received` rejected after a run finishes | ✓ | ✓ | ✗ | `RunExpiredError` |
 | `resumeId` dedup for `hook_received` | ✓ | ✗ | ✗ | |
@@ -65,7 +65,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 
 ## Dispatch recovery
 
-Each event that owes a queue message writes an outbox row in its own transaction. The run store's alarm publishes any row the SDK's own publish missed; the store arms it before the write, so a crash just after the commit cannot strand the row. The one-minute cron reaches only the directory, which holds runs created before per-run stores.
+Each event that owes a queue message writes an outbox row in its own transaction. The store shard's alarm publishes any row the SDK's own publish missed; the shard arms it before the write, so a crash just after the commit cannot strand the row. The one-minute cron reaches only the legacy store, which holds runs created before store shards.
 
 | Event | Built | Workerd | Remote | Notes |
 | --- | :---: | :---: | :---: | --- |
@@ -114,6 +114,6 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Retention and cleanup of finished runs | ✗ | Runs, outbox and dedup rows, and R2 payloads, are kept forever |
 | Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers with QuickJS, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |
 | Cleanup of orphaned R2 payloads | ✗ | A write that fails after its payload reached R2 leaves the object behind |
-| One store per run | ✓ | The directory still takes each run's index updates and hook claims; runs created before it stay in the directory |
-| Sharding beyond one queue shard | ✗ | |
+| Store shards, no single object per run or token | ✓ | 128 store shards hold runs and hook tokens; runs created before them stay in the legacy store |
+| Sharding beyond one queue shard | ✓ | 64 queue shards |
 | Multi-region placement | ✗ | |

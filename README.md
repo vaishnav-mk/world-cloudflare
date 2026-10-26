@@ -74,7 +74,7 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 
 ## Limits
 
-- Each run has its own store object, but one directory object takes every run's index updates and hook-token claims, and one queue shard (8 delivery lanes) delivers every message. `runs.list` and `runs.getMany` read the directory's index, so they can briefly show an older status.
+- Runs and hook tokens hash onto 128 store shards and messages onto 64 queue shards, so no single object sees every run. `runs.list` and global `hooks.list` ask all 129 stores, so they cost more than a run-scoped read. A freed hook token becomes free just after the write that frees it, not with it.
 - Payloads and stream chunks over 1 MiB go to R2. On Workers with QuickJS a 16 MiB step output works and 20 MiB does not, because the workflow VM runs out of memory, so the World rejects any serialized payload over 18 MiB with a 413 and the step fails instead of retrying forever. HTTP bodies are capped at 100 MB. Measurements are in [limits](docs/limits.md#payloads).
 - R2 payload objects are never deleted, including ones left by writes that failed.
 - A step that exceeds the CPU limit is retried until the queue gives up, and holds up its delivery lane meanwhile. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
