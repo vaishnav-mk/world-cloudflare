@@ -1,5 +1,5 @@
 diff --git a/packages/builders/src/base-builder.ts b/packages/builders/src/base-builder.ts
-index 7db06d5c..28733982 100644
+index 7db06d5c..3acda2be 100644
 --- a/packages/builders/src/base-builder.ts
 +++ b/packages/builders/src/base-builder.ts
 @@ -1,5 +1,6 @@
@@ -9,7 +9,15 @@ index 7db06d5c..28733982 100644
    mkdir,
    readFile,
    realpath,
-@@ -367,6 +368,7 @@ export abstract class BaseBuilder {
+@@ -33,6 +34,7 @@ import {
+   fastDiscoverEntries,
+ } from './fast-discovery.js';
+ import { assertFlowBundleIsSandboxSafe } from './flow-bundle-safety.js';
++import { ISOLATE_SHADOWED_GLOBALS } from './isolate-globals.js';
+ import {
+   hashManifestSource,
+   type ManifestEntryLocation,
+@@ -367,6 +369,7 @@ export abstract class BaseBuilder {
        '**/.nuxt/**',
        '**/.output/**',
        '**/.vercel/**',
@@ -17,12 +25,13 @@ index 7db06d5c..28733982 100644
        '**/.workflow-data/**',
        '**/.workflow-vitest/**',
        '**/.well-known/workflow/**',
-@@ -1769,16 +1771,47 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1769,18 +1772,63 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
        routeModuleBodyStartedAt: 'workflowRouteModuleBodyStartedAt',
      });
  
 +    let workerWasmImports = '';
 +    let workerWasmRegistration = '';
++    let isolateWorkflowRegistration = '';
 +    const workerWasmFiles = [
 +      ['runtime', 'quickjs.wasm'],
 +      ['encoding', 'encoding.so'],
@@ -50,6 +59,19 @@ index 7db06d5c..28733982 100644
 +    { name: 'structured-clone', wasm: __quickjs_structuredClone, initFn: 'qjs_ext_structured_clone_init' },
 +  ],
 +};`;
++      // The isolate engine (WORKFLOW_VM=isolate) cannot eval workflowCode, so
++      // compile the same bundle into a factory whose parameters shadow every
++      // global. Each replay calls it with a fresh sandbox; see vm/isolate.ts.
++      isolateWorkflowRegistration = `
++globalThis[Symbol.for('@workflow/core//isolateWorkflowBundle')] = {
++  code: workflowCode,
++  names: ${JSON.stringify(ISOLATE_SHADOWED_GLOBALS)},
++  evaluate: function (globalThis, ${ISOLATE_SHADOWED_GLOBALS.join(', ')}) {
++{
++${workflowVMCode}
++}
++  },
++};`;
 +    }
 +
      const combinedFunctionCode = `// biome-ignore-all lint: generated file
@@ -65,9 +87,12 @@ index 7db06d5c..28733982 100644
 -
 +${workerWasmRegistration}
  const workflowCode = \`${escapedVMCode}\`;
- 
+-
++${isolateWorkflowRegistration}
  ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntrypointOptionsCode})`)}`;
-@@ -1790,10 +1823,12 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+ 
+     if (!bundleFinalOutput) {
+@@ -1790,10 +1838,12 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
        const bundleStartTime = Date.now();
        const { banner: importMetaBanner, define: importMetaDefine } =
          this.getCjsImportMetaPolyfill(format);
@@ -84,7 +109,7 @@ index 7db06d5c..28733982 100644
        const finalResult = await esbuild.build({
          banner: {
            js: `// biome-ignore-all lint: generated file\n/* eslint-disable */\n${importMetaBanner}${finalEsmRequireBanner}`,
-@@ -1817,6 +1852,9 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1817,6 +1867,9 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
          define: importMetaDefine,
          external: [
            '@aws-sdk/credential-provider-web-identity',
@@ -96,10 +121,10 @@ index 7db06d5c..28733982 100644
        });
 diff --git a/packages/builders/src/cloudflare-workers.test.ts b/packages/builders/src/cloudflare-workers.test.ts
 new file mode 100644
-index 00000000..48c1e575
+index 00000000..d8e0316e
 --- /dev/null
 +++ b/packages/builders/src/cloudflare-workers.test.ts
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,70 @@
 +import {
 +  existsSync,
 +  mkdtempSync,
@@ -149,6 +174,10 @@ index 00000000..48c1e575
 +  expect(
 +    bundle.includes('var require = __createRequire(import.meta.url)')
 +  ).toBe(buildTarget === 'standalone');
++  // The isolate engine's factory: the same bundle, with globals as parameters.
++  expect(bundle.includes('code: workflowCode,')).toBe(
++    buildTarget === 'cloudflare-workers'
++  );
 +  for (const name of [
 +    'runtime',
 +    'encoding',
@@ -166,6 +195,65 @@ index 00000000..48c1e575
 +    ).toBe(buildTarget === 'cloudflare-workers');
 +  }
 +});
+diff --git a/packages/builders/src/isolate-globals.ts b/packages/builders/src/isolate-globals.ts
+new file mode 100644
+index 00000000..f57679cd
+--- /dev/null
++++ b/packages/builders/src/isolate-globals.ts
+@@ -0,0 +1,53 @@
++/**
++ * Globals the isolate engine's workflow factory takes as parameters, so a
++ * replay reads them from its sandbox (or gets `undefined`) instead of the
++ * host. ECMAScript intrinsics, every global workerd exposes with
++ * `nodejs_compat` (listed from its global scope chain), and Node's module
++ * globals. `eval` cannot be a strict-mode parameter; workerd blocks it anyway.
++ * At runtime the engine warns about any host global missing here.
++ */
++export const ISOLATE_SHADOWED_GLOBALS = [
++  // ECMAScript
++  'Object', 'Function', 'Array', 'Number', 'parseFloat', 'parseInt',
++  'Boolean', 'String', 'Symbol', 'Date', 'Promise', 'RegExp', 'Error',
++  'AggregateError', 'EvalError', 'RangeError', 'ReferenceError',
++  'SyntaxError', 'TypeError', 'URIError', 'JSON', 'Math', 'Intl',
++  'ArrayBuffer', 'Atomics', 'Uint8Array', 'Int8Array', 'Uint16Array',
++  'Int16Array', 'Uint32Array', 'Int32Array', 'BigUint64Array',
++  'BigInt64Array', 'Uint8ClampedArray', 'Float32Array', 'Float64Array',
++  'Float16Array', 'DataView', 'Map', 'BigInt', 'Set', 'Iterator', 'WeakMap',
++  'WeakSet', 'Proxy', 'Reflect', 'FinalizationRegistry', 'WeakRef',
++  'decodeURI', 'decodeURIComponent', 'encodeURI', 'encodeURIComponent',
++  'escape', 'unescape', 'isFinite', 'isNaN', 'console', 'SuppressedError',
++  'DisposableStack', 'AsyncDisposableStack', 'SharedArrayBuffer',
++  'WebAssembly',
++  // workerd
++  'AbortController', 'AbortSignal', 'Blob', 'Body', 'Buffer',
++  'ByteLengthQueuingStrategy', 'Cache', 'CacheStorage', 'CloseEvent',
++  'Cloudflare', 'CompressionStream', 'CountQueuingStrategy', 'Crypto',
++  'CryptoKey', 'CustomEvent', 'DOMException', 'DecompressionStream',
++  'ErrorEvent', 'Event', 'EventSource', 'EventTarget', 'ExtendableEvent',
++  'FetchEvent', 'File', 'FixedLengthStream', 'FormData', 'HTMLRewriter',
++  'Headers', 'IdentityTransformStream', 'MessageChannel', 'MessageEvent',
++  'MessagePort', 'Navigator', 'Performance', 'PerformanceEntry',
++  'PerformanceMark', 'PerformanceMeasure', 'PerformanceObserver',
++  'PerformanceObserverEntryList', 'PerformanceResourceTiming',
++  'PromiseRejectionEvent', 'ReadableByteStreamController', 'ReadableStream',
++  'ReadableStreamBYOBReader', 'ReadableStreamBYOBRequest',
++  'ReadableStreamDefaultController', 'ReadableStreamDefaultReader',
++  'Request', 'Response', 'ScheduledEvent', 'ServiceWorkerGlobalScope',
++  'SubtleCrypto', 'TailEvent', 'TextDecoder', 'TextDecoderStream',
++  'TextEncoder', 'TextEncoderStream', 'TraceEvent', 'TransformStream',
++  'TransformStreamDefaultController', 'URL', 'URLPattern', 'URLSearchParams',
++  'WebSocket', 'WebSocketPair', 'WebSocketRequestResponsePair',
++  'WorkerGlobalScope', 'WritableStream', 'WritableStreamDefaultController',
++  'WritableStreamDefaultWriter', 'addEventListener', 'atob', 'btoa',
++  'caches', 'clearImmediate', 'clearInterval', 'clearTimeout', 'constructor',
++  'crypto', 'dispatchEvent', 'fetch', 'global', 'navigator', 'origin',
++  'performance', 'process', 'queueMicrotask', 'removeEventListener',
++  'reportError', 'scheduler', 'self', 'setImmediate', 'setInterval',
++  'setTimeout', 'structuredClone',
++  // Node
++  'BroadcastChannel', 'require', 'module', 'exports', '__filename',
++  '__dirname',
++];
 diff --git a/packages/builders/src/types.ts b/packages/builders/src/types.ts
 index de8c423c..ebeb006c 100644
 --- a/packages/builders/src/types.ts
@@ -232,7 +320,7 @@ index 61c13663..7ba1dc06 100644
          const builder = new StandaloneBuilder(config);
          await builder.build();
 diff --git a/packages/core/src/runtime.ts b/packages/core/src/runtime.ts
-index e88087d9..82db7e9a 100644
+index e88087d9..fda5b9b2 100644
 --- a/packages/core/src/runtime.ts
 +++ b/packages/core/src/runtime.ts
 @@ -37,7 +37,6 @@ import {
@@ -268,6 +356,15 @@ index e88087d9..82db7e9a 100644
  import { runIdCreatedAt } from './runtime/run-id-time.js';
  import {
    DEFAULT_STEP_MAX_RETRIES,
+@@ -140,7 +141,7 @@ import {
+   handleSuspension,
+   type SuspensionSerializationBlocker,
+ } from './runtime/suspension-handler.js';
+-import { useQuickJSVm } from './runtime/vm-mode.js';
++import { getWorkflowVm, useQuickJSVm } from './runtime/vm-mode.js';
+ import { getWaitContinuationDispatch } from './runtime/wait-continuation.js';
+ import { getWorld } from './runtime/world.js';
+ import {
 @@ -466,21 +467,43 @@ async function recordFatalRunError({
    );
  }
@@ -366,7 +463,29 @@ index e88087d9..82db7e9a 100644
  /** The workflow code a delivery replays, and the marker when it is dynamic. */
  interface ResolvedWorkflowCode {
    code: string;
-@@ -3206,12 +3191,8 @@ export function workflowEntrypoint(
+@@ -1127,7 +1112,10 @@ export function workflowEntrypoint(
+                         'workflowName' | 'executionContext'
+                       >
+                     ) => {
+-                      if (!workflow || useQuickJSVm(workflow)) return;
++                      // Only node:vm compiles; the isolate engine
++                      // evaluates the deployment's prebuilt factory.
++                      if (!workflow || getWorkflowVm(workflow) !== 'node')
++                        return;
+                       // A dynamic run does not replay the deployment's
+                       // bundle, and its own code is not available yet (it is
+                       // encrypted, and resolving it needs the run's key). Skip
+@@ -2961,7 +2949,8 @@ export function workflowEntrypoint(
+                     });
+                   }
+                   const dynamicWorkflowScripts =
+-                    dynamicWorkflowMetadata && !useQuickJSVm(workflowRun)
++                    dynamicWorkflowMetadata &&
++                    getWorkflowVm(workflowRun) === 'node'
+                       ? compileDynamicWorkflowBundle(
+                           effectiveWorkflowCode,
+                           workflowRun.workflowName
+@@ -3206,12 +3195,8 @@ export function workflowEntrypoint(
  
                        // Complete elapsed waits
                        const now = Date.now();
@@ -381,7 +500,7 @@ index e88087d9..82db7e9a 100644
                          .filter(
                            (
                              e
-@@ -3219,9 +3200,8 @@ export function workflowEntrypoint(
+@@ -3219,9 +3204,8 @@ export function workflowEntrypoint(
                              Event,
                              { eventType: 'wait_created' }
                            > & { correlationId: string } =>
@@ -392,7 +511,7 @@ index e88087d9..82db7e9a 100644
                              now >= (e.eventData.resumeAt as Date).getTime()
                          )
                          .map((e) => ({
-@@ -3278,11 +3258,9 @@ export function workflowEntrypoint(
+@@ -3278,11 +3262,9 @@ export function workflowEntrypoint(
                        // ignores `sinceCursor`, a truncated delta, a concurrent
                        // absorb that lost the cursor race, or an
                        // EntityConflictError, whose rejection carries no delta.
@@ -406,7 +525,18 @@ index e88087d9..82db7e9a 100644
                        const missingWaitCompletions = waitsToComplete.filter(
                          (waitEvent) =>
                            !completedWaitIdsAfterWrites.has(
-@@ -5651,7 +5629,7 @@ export function workflowEntrypoint(
+@@ -3471,7 +3453,9 @@ export function workflowEntrypoint(
+                         // source is compiled once per invocation without
+                         // entering that shared cache.
+                         assert(
+-                          compiled || dynamicWorkflowScripts,
++                          compiled ||
++                            dynamicWorkflowScripts ||
++                            getWorkflowVm(workflowRun) === 'isolate',
+                           'Node workflow replay requires compiled scripts'
+                         );
+                         workflowResult = await replayWorkflow({
+@@ -5651,7 +5635,7 @@ export function workflowEntrypoint(
          kind: spanKind,
          attributes: {
            ...Attribute.WorkflowRouteType('flow'),
@@ -1288,6 +1418,103 @@ index f3bcf5be..fde6c2c8 100644
                  : {}),
              })),
              // Per-write request attribution, same as the single path's
+diff --git a/packages/core/src/runtime/vm-mode.test.ts b/packages/core/src/runtime/vm-mode.test.ts
+index 1e9ffde1..42c65513 100644
+--- a/packages/core/src/runtime/vm-mode.test.ts
++++ b/packages/core/src/runtime/vm-mode.test.ts
+@@ -7,6 +7,7 @@ import {
+   getSnapshotThresholdForHandler,
+   getSnapshotThresholdForStart,
+   getSnapshotThresholdFromEnv,
++  getWorkflowVm,
+   getWorkflowVmFromEnv,
+   isSnapshotThresholdConfigured,
+   isUnencryptedSnapshottingAllowed,
+@@ -119,6 +120,30 @@ describe('useQuickJSVm', () => {
+   });
+ });
+ 
++describe('getWorkflowVm', () => {
++  const makeRun = (executionContext?: Record<string, unknown>) =>
++    ({ executionContext }) as unknown as WorkflowRun;
++
++  afterEach(() => {
++    delete process.env.WORKFLOW_VM;
++  });
++
++  it('keeps a run on the engine it started on', () => {
++    process.env.WORKFLOW_VM = 'isolate';
++    expect(getWorkflowVm(makeRun({ workflowVm: 'quickjs' }))).toBe('quickjs');
++    expect(useQuickJSVm(makeRun({ workflowVm: 'quickjs' }))).toBe(true);
++    process.env.WORKFLOW_VM = 'quickjs';
++    expect(getWorkflowVm(makeRun({ workflowVm: 'isolate' }))).toBe('isolate');
++    expect(useQuickJSVm(makeRun({ workflowVm: 'isolate' }))).toBe(false);
++  });
++
++  it('falls back to WORKFLOW_VM, then node', () => {
++    expect(getWorkflowVm(makeRun())).toBe('node');
++    process.env.WORKFLOW_VM = 'isolate';
++    expect(getWorkflowVm(makeRun())).toBe('isolate');
++  });
++});
++
+ describe('getSnapshotThresholdFromEnv', () => {
+   it('returns undefined when unset or empty', () => {
+     expect(getSnapshotThresholdFromEnv({})).toBeUndefined();
+diff --git a/packages/core/src/runtime/vm-mode.ts b/packages/core/src/runtime/vm-mode.ts
+index 19b421de..254b647f 100644
+--- a/packages/core/src/runtime/vm-mode.ts
++++ b/packages/core/src/runtime/vm-mode.ts
+@@ -11,6 +11,11 @@
+  * instead of a `node:vm` context, which makes it usable on platforms that
+  * do not implement `node:vm` (e.g. Cloudflare Workers) and is the
+  * foundation for VM-memory snapshotting.
++ *
++ * The isolate engine (`WORKFLOW_VM=isolate`) replays natively in the host's
++ * V8 realm, for platforms without `node:vm` or `eval` (Cloudflare Workers).
++ * Each replay evaluates a build-time workflow factory against a fresh
++ * sandbox object instead of a code string; see `vm/isolate.ts`.
+  */
+ 
+ import { WorkflowRuntimeError } from '@workflow/errors';
+@@ -20,7 +25,7 @@ import type { WorkflowRun } from '@workflow/world';
+  * Known workflow VM engines. Any other `WORKFLOW_VM` value is treated as
+  * a misconfiguration and rejected at startup.
+  */
+-export const WORKFLOW_VMS = ['node', 'quickjs'] as const;
++export const WORKFLOW_VMS = ['node', 'quickjs', 'isolate'] as const;
+ 
+ export type WorkflowVmMode = (typeof WORKFLOW_VMS)[number];
+ 
+@@ -61,6 +66,16 @@ export function getWorkflowVmFromEnv(
+ export function useQuickJSVm(
+   workflowRun: Pick<WorkflowRun, 'executionContext'>
+ ): boolean {
++  return getWorkflowVm(workflowRun) === 'quickjs';
++}
++
++/**
++ * The engine a run executes on: its `executionContext.workflowVm`, else the
++ * handler's `WORKFLOW_VM`, else `node`. Throws on unknown values.
++ */
++export function getWorkflowVm(
++  workflowRun: Pick<WorkflowRun, 'executionContext'>
++): WorkflowVmMode {
+   const vmFromRun = (
+     workflowRun.executionContext as { workflowVm?: string } | undefined
+   )?.workflowVm;
+@@ -71,9 +86,9 @@ export function useQuickJSVm(
+           `Expected one of: ${WORKFLOW_VMS.join(', ')}.`
+       );
+     }
+-    return vmFromRun === 'quickjs';
++    return vmFromRun as WorkflowVmMode;
+   }
+-  return getWorkflowVmFromEnv() === 'quickjs';
++  return getWorkflowVmFromEnv() ?? 'node';
+ }
+ 
+ /**
 diff --git a/packages/core/src/runtime/world.ts b/packages/core/src/runtime/world.ts
 index ca4ae086..2653b57b 100644
 --- a/packages/core/src/runtime/world.ts
@@ -1345,6 +1572,302 @@ index e5e05215..57b21a09 100644
   * Uses OTEL `faas.instance` (execution-environment id, reused across
   * invocations to the same function):
   * https://opentelemetry.io/docs/specs/semconv/attributes-registry/faas/
+diff --git a/packages/core/src/vm/index.ts b/packages/core/src/vm/index.ts
+index d3fe0312..f6cec675 100644
+--- a/packages/core/src/vm/index.ts
++++ b/packages/core/src/vm/index.ts
+@@ -50,12 +50,44 @@ function toDigestInput(
+  * @returns The context.
+  */
+ export function createContext(options: CreateContextOptions) {
++  const context = vmCreateContext();
++  const g: typeof globalThis = runInContext('globalThis', context);
++  return { context, ...installWorkflowGlobals(g, options, false) };
++}
++
++/**
++ * Installs the deterministic workflow globals on `g`. With `sharedRealm`, `g`
++ * holds the host realm's own intrinsics (the isolate engine), so objects the
++ * node:vm path mutates in place (`Math`, `Atomics`, `WebAssembly`) are
++ * shadowed on `g` instead of changed for the whole isolate.
++ */
++export function installWorkflowGlobals(
++  g: typeof globalThis,
++  options: CreateContextOptions,
++  sharedRealm: boolean
++) {
+   let { fixedTimestamp } = options;
+   const { seed } = options;
+   const rng = seedrandom(seed);
+-  const context = vmCreateContext();
+-
+-  const g: typeof globalThis = runInContext('globalThis', context);
++  const intrinsics = g as unknown as Record<string, Record<string, unknown>>;
++  if (sharedRealm) {
++    const hidden = (names: string[]) =>
++      Object.fromEntries(names.map((name) => [name, { value: undefined }]));
++    intrinsics.Math = Object.create(intrinsics.Math);
++    intrinsics.Atomics = Object.create(
++      intrinsics.Atomics,
++      hidden(['waitAsync'])
++    );
++    intrinsics.WebAssembly = Object.create(
++      intrinsics.WebAssembly,
++      hidden([
++        'compile',
++        'instantiate',
++        'compileStreaming',
++        'instantiateStreaming',
++      ])
++    );
++  }
+ 
+   // Deterministic `Math.random()`
+   g.Math.random = rng;
+@@ -110,12 +142,13 @@ export function createContext(options: CreateContextOptions) {
+   // - All `crypto.subtle` methods except the deterministic `digest` override
+   //   below throw explicitly (see the subtle proxy); binding them to the
+   //   host subtle would hand workflows a host-timing promise.
+-  const intrinsics = g as unknown as Record<string, Record<string, unknown>>;
+-  delete intrinsics.Atomics.waitAsync;
+-  delete intrinsics.WebAssembly.compile;
+-  delete intrinsics.WebAssembly.instantiate;
+-  delete intrinsics.WebAssembly.compileStreaming;
+-  delete intrinsics.WebAssembly.instantiateStreaming;
++  if (!sharedRealm) {
++    delete intrinsics.Atomics.waitAsync;
++    delete intrinsics.WebAssembly.compile;
++    delete intrinsics.WebAssembly.instantiate;
++    delete intrinsics.WebAssembly.compileStreaming;
++    delete intrinsics.WebAssembly.instantiateStreaming;
++  }
+   delete intrinsics.WeakRef;
+   delete intrinsics.FinalizationRegistry;
+ 
+@@ -203,7 +236,6 @@ export function createContext(options: CreateContextOptions) {
+   (g as any).module = { exports: g.exports };
+ 
+   return {
+-    context,
+     globalThis: g,
+     updateTimestamp: (timestamp: number) => {
+       fixedTimestamp = timestamp;
+diff --git a/packages/core/src/vm/isolate.test.ts b/packages/core/src/vm/isolate.test.ts
+new file mode 100644
+index 00000000..f0e7aa43
+--- /dev/null
++++ b/packages/core/src/vm/isolate.test.ts
+@@ -0,0 +1,82 @@
++import * as vm from 'node:vm';
++import { afterEach, describe, expect, it } from 'vitest';
++import { createContext } from './index.js';
++import {
++  createIsolateContext,
++  evaluateIsolateWorkflow,
++  ISOLATE_BUNDLE_KEY,
++  type IsolateWorkflowBundle,
++} from './isolate.js';
++
++const options = { seed: 'entropy seed', fixedTimestamp: 1234567890000 };
++const host = globalThis as { [ISOLATE_BUNDLE_KEY]?: IsolateWorkflowBundle };
++
++afterEach(() => {
++  delete host[ISOLATE_BUNDLE_KEY];
++});
++
++describe('createIsolateContext', () => {
++  it('draws the same values as the node:vm context for the same seed', () => {
++    const { globalThis: g } = createIsolateContext(options);
++    const { context } = createContext(options);
++    const expected = [0, 1, 2].map(() => vm.runInContext('Math.random()', context));
++    expect([0, 1, 2].map(() => g.Math.random())).toEqual(expected);
++    expect(g.crypto.randomUUID()).toBe(
++      vm.runInContext('crypto.randomUUID()', context)
++    );
++  });
++
++  it('fixes time and hides host timing without touching host intrinsics', () => {
++    const { globalThis: g, updateTimestamp } = createIsolateContext(options);
++    expect(g.Date.now()).toBe(options.fixedTimestamp);
++    expect(new g.Date().getTime()).toBe(options.fixedTimestamp);
++    updateTimestamp(options.fixedTimestamp + 5);
++    expect(g.Date.now()).toBe(options.fixedTimestamp + 5);
++    expect(new g.Date(0)).toBeInstanceOf(Date);
++    expect(g.WeakRef).toBeUndefined();
++    expect(g.Atomics.waitAsync).toBeUndefined();
++    expect(g.WebAssembly.compile).toBeUndefined();
++
++    expect(Date.now()).not.toBe(options.fixedTimestamp);
++    expect(g.Math.random).not.toBe(Math.random);
++    expect(typeof WeakRef).toBe('function');
++    expect(typeof WebAssembly.compile).toBe('function');
++  });
++});
++
++describe('evaluateIsolateWorkflow', () => {
++  const code = 'the bundle source';
++  // What the cloudflare-workers build emits: the bundle inside a function
++  // whose parameters shadow globals.
++  const register = () => {
++    host[ISOLATE_BUNDLE_KEY] = {
++      code,
++      names: ['Math', 'setTimeout'],
++      evaluate: function (globalThis: any, Math: any, setTimeout: any) {
++        let calls = 0;
++        globalThis.__private_workflows = new Map([
++          ['wf', () => ({ calls: ++calls, random: Math.random(), setTimeout })],
++        ]);
++      } as IsolateWorkflowBundle['evaluate'],
++    };
++  };
++
++  it('gives every replay fresh module state and the sandbox globals', () => {
++    register();
++    const run = () => {
++      const { globalThis: g } = createIsolateContext(options);
++      return (evaluateIsolateWorkflow(code, g, 'wf') as () => unknown)();
++    };
++    const first = run();
++    expect(first).toEqual(run());
++    expect(first).toMatchObject({ calls: 1, setTimeout: undefined });
++  });
++
++  it('rejects source that was not compiled into the deployment', () => {
++    register();
++    const { globalThis: g } = createIsolateContext(options);
++    expect(() => evaluateIsolateWorkflow('other source', g, 'wf')).toThrow(
++      /Dynamic workflow code needs WORKFLOW_VM=quickjs/
++    );
++  });
++});
+diff --git a/packages/core/src/vm/isolate.ts b/packages/core/src/vm/isolate.ts
+new file mode 100644
+index 00000000..99f4eae7
+--- /dev/null
++++ b/packages/core/src/vm/isolate.ts
+@@ -0,0 +1,122 @@
++import { WorkflowRuntimeError } from '@workflow/errors';
++import { runtimeLogger } from '../logger.js';
++import { type CreateContextOptions, installWorkflowGlobals } from './index.js';
++
++/**
++ * The isolate engine (`WORKFLOW_VM=isolate`) for runtimes without `node:vm`
++ * or `eval`, such as Cloudflare Workers. A build (`--target
++ * cloudflare-workers`) compiles the workflow bundle into a factory function
++ * that takes every global as a parameter. Each replay calls it with a fresh
++ * sandbox object, so module state starts clean and globals resolve to the
++ * sandbox's deterministic values, the way a fresh `vm.Context` does.
++ *
++ * Unlike node:vm, the sandbox shares the host realm's intrinsics
++ * (`Object.prototype`, `Array.prototype`...), so workflow code that patches
++ * them affects the host. Like node:vm, it is not a security boundary.
++ */
++export interface IsolateWorkflowBundle {
++  /** The bundle source the factory was compiled from, as passed to `workflowEntrypoint`. */
++  readonly code: string;
++  /** Globals the factory shadows, in parameter order after `globalThis`. */
++  readonly names: readonly string[];
++  readonly evaluate: (globalThis: object, ...globals: unknown[]) => void;
++}
++
++export const ISOLATE_BUNDLE_KEY = Symbol.for(
++  '@workflow/core//isolateWorkflowBundle'
++);
++
++/** ECMAScript globals the sandbox copies from the host, as a fresh vm.Context has them. */
++const INTRINSICS = [
++  'Object', 'Function', 'Array', 'Number', 'parseFloat', 'parseInt',
++  'Infinity', 'NaN', 'undefined', 'Boolean', 'String', 'Symbol', 'Date',
++  'Promise', 'RegExp', 'Error', 'AggregateError', 'EvalError', 'RangeError',
++  'ReferenceError', 'SyntaxError', 'TypeError', 'URIError', 'JSON', 'Math',
++  'Intl', 'ArrayBuffer', 'Atomics', 'Uint8Array', 'Int8Array', 'Uint16Array',
++  'Int16Array', 'Uint32Array', 'Int32Array', 'BigUint64Array',
++  'BigInt64Array', 'Uint8ClampedArray', 'Float32Array', 'Float64Array',
++  'Float16Array', 'DataView', 'Map', 'BigInt', 'Set', 'Iterator', 'WeakMap',
++  'WeakSet', 'Proxy', 'Reflect', 'FinalizationRegistry', 'WeakRef',
++  'decodeURI', 'decodeURIComponent', 'encodeURI', 'encodeURIComponent',
++  'escape', 'unescape', 'isFinite', 'isNaN', 'SuppressedError',
++  'DisposableStack', 'AsyncDisposableStack', 'SharedArrayBuffer',
++  'WebAssembly',
++];
++
++/** A fresh sandbox global for one replay. Same shape as `createContext`'s. */
++export function createIsolateContext(options: CreateContextOptions) {
++  const host = globalThis as unknown as Record<string, unknown>;
++  const g: Record<string, unknown> = {};
++  for (const name of INTRINSICS) if (name in host) g[name] = host[name];
++  g.globalThis = g;
++  const installed = installWorkflowGlobals(
++    g as unknown as typeof globalThis,
++    options,
++    true
++  );
++  return { context: g, ...installed };
++}
++
++/**
++ * Evaluates the deployment's workflow factory against `sandbox` and returns
++ * the workflow named `workflowName`, as the node:vm bundle and lookup scripts
++ * do. Only the bundle compiled into this deployment can run: there is no way
++ * to compile other source (a dynamic workflow) without `eval`.
++ */
++export function evaluateIsolateWorkflow(
++  workflowCode: string,
++  sandbox: typeof globalThis,
++  workflowName: string
++): unknown {
++  const bundle = (globalThis as { [ISOLATE_BUNDLE_KEY]?: IsolateWorkflowBundle })[
++    ISOLATE_BUNDLE_KEY
++  ];
++  if (bundle?.code !== workflowCode) {
++    throw new WorkflowRuntimeError(
++      'The isolate workflow engine runs only the workflow bundle compiled into this deployment (`workflow build --target cloudflare-workers`). Dynamic workflow code needs WORKFLOW_VM=quickjs.'
++    );
++  }
++  warnUnshadowedGlobals(bundle.names);
++  const g = sandbox as unknown as Record<string, unknown>;
++  bundle.evaluate(g, ...bundle.names.map((name) => g[name]));
++  const workflows = g.__private_workflows as Map<string, unknown> | undefined;
++  return workflows?.get(workflowName);
++}
++
++// per-copy-ok: a diagnostic; each module copy warning once is fine.
++let checkedGlobals = false;
++
++/**
++ * Host globals the factory does not shadow stay reachable from workflow code.
++ * The build's list covers workerd and Node; warn once when the host has more.
++ */
++function warnUnshadowedGlobals(names: readonly string[]): void {
++  if (checkedGlobals) return;
++  checkedGlobals = true;
++  const shadowed = new Set([
++    ...names,
++    'globalThis',
++    'eval',
++    'undefined',
++    'NaN',
++    'Infinity',
++  ]);
++  const unshadowed = new Set<string>();
++  for (
++    let scope: object | null = globalThis;
++    scope && scope !== Object.prototype;
++    scope = Object.getPrototypeOf(scope)
++  ) {
++    for (const name of Object.getOwnPropertyNames(scope)) {
++      if (!shadowed.has(name) && /^[A-Za-z_$][\w$]*$/.test(name)) {
++        unshadowed.add(name);
++      }
++    }
++  }
++  if (unshadowed.size > 0) {
++    runtimeLogger.warn(
++      'Host globals visible to workflow code on the isolate engine',
++      { globals: [...unshadowed].join(', ') }
++    );
++  }
++}
 diff --git a/packages/core/src/workflow.test.ts b/packages/core/src/workflow.test.ts
 index 523edeb3..cef7fd56 100644
 --- a/packages/core/src/workflow.test.ts
@@ -1400,7 +1923,7 @@ index 523edeb3..cef7fd56 100644
        const run = await sessionRun('wrun_retained_mid_divergence');
        const workflowCode = `
 diff --git a/packages/core/src/workflow.ts b/packages/core/src/workflow.ts
-index 56fce10a..f0a58a71 100644
+index 56fce10a..507206e9 100644
 --- a/packages/core/src/workflow.ts
 +++ b/packages/core/src/workflow.ts
 @@ -24,6 +24,7 @@ import type { WorkflowOrchestratorContext } from './private.js';
@@ -1411,7 +1934,60 @@ index 56fce10a..f0a58a71 100644
  import { getPortLazy } from './runtime/get-port-lazy.js';
  import { runIdCreatedAt } from './runtime/run-id-time.js';
  import { handleSuspension } from './runtime/suspension-handler.js';
-@@ -1317,23 +1318,37 @@ async function createWorkflowSessionInner(
+@@ -52,7 +53,12 @@ import {
+   trace,
+ } from './telemetry.js';
+ import { getWorkflowRunStreamId } from './util.js';
++import { getWorkflowVm } from './runtime/vm-mode.js';
+ import { createContext } from './vm/index.js';
++import {
++  createIsolateContext,
++  evaluateIsolateWorkflow,
++} from './vm/isolate.js';
+ import { getCachedWorkflowScript } from './vm/script-cache.js';
+ import {
+   createAbortSignalStatics,
+@@ -435,11 +441,12 @@ async function createWorkflowSessionInner(
+   // below. Most of the bootstrap lives in this function (EventsConsumer,
+   // workflow globals, Web API shims), so tracing createContext() alone would
+   // materially under-report VM startup.
++  const isolate = getWorkflowVm(workflowRun) === 'isolate';
+   const {
+     context,
+     globalThis: vmGlobalThis,
+     updateTimestamp,
+-  } = createContext({
++  } = (isolate ? createIsolateContext : createContext)({
+     seed: `${workflowRun.runId}:${workflowRun.workflowName}:${workflowRun.deploymentId}`,
+     fixedTimestamp,
+   });
+@@ -1187,12 +1194,20 @@ async function createWorkflowSessionInner(
+   // Reuse compiled scripts by `(code, filename)`: compilation is deterministic
+   // and the filename preserves workflow source attribution in stack traces.
+   // The bundle registers workflows on `globalThis.__private_workflows`.
+-  const { bundleScript, workflowLookupScript } =
+-    compiledWorkflowScripts ??
+-    (await compileWorkflowBundle(workflowCode, workflowRun.workflowName));
++  const compiled = isolate
++    ? undefined
++    : (compiledWorkflowScripts ??
++      (await compileWorkflowBundle(workflowCode, workflowRun.workflowName)));
+   const workflowFn = await trace('workflow.bundle.evaluate', async () => {
+-    bundleScript.runInContext(context);
+-    return workflowLookupScript.runInContext(context);
++    if (!compiled) {
++      return evaluateIsolateWorkflow(
++        workflowCode,
++        vmGlobalThis,
++        workflowRun.workflowName
++      );
++    }
++    compiled.bundleScript.runInContext(context);
++    return compiled.workflowLookupScript.runInContext(context);
+   });
+ 
+   if (typeof workflowFn !== 'function') {
+@@ -1317,23 +1332,37 @@ async function createWorkflowSessionInner(
      workflowFn(...args)
    );
  
@@ -1458,7 +2034,7 @@ index 56fce10a..f0a58a71 100644
            if (!isStrictExtension) {
              state = { type: 'replay' };
              return { type: 'replay' };
-@@ -1342,7 +1357,11 @@ async function createWorkflowSessionInner(
+@@ -1342,7 +1371,11 @@ async function createWorkflowSessionInner(
            state = { type: 'running', interruption };
            workflowContext.suspensionGeneration++;
            workflowTraceContext.refresh();
