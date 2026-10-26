@@ -28,7 +28,7 @@ import { listEvents, listRecords } from './pages.js';
 import { toEvent } from './rows.js';
 import { hookView, runView, stepView } from './views.js';
 
-// shortcut: one object for all runs; shard per run with a token index once writes bottleneck.
+// shortcut: one object for all runs caps run creation; per-run sharding is on the store-sharding branch.
 /**
  * Every run's event log and materialized state, in one SQLite Durable Object.
  *
