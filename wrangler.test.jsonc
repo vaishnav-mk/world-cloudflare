@@ -5,7 +5,11 @@
   "compatibility_date": "2026-10-17",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
-  "vars": { "DEPLOYMENT_ID": "test-v1", "QUEUE_MAX_ATTEMPTS": "2" },
+  "vars": {
+    "DEPLOYMENT_ID": "test-v1", "QUEUE_MAX_ATTEMPTS": "2",
+    // Two epochs: runs minted now land in the second; IDs without a ULID time stay in the first.
+    "SHARD_EPOCHS": "[{\"from\":0,\"store\":4,\"queue\":4},{\"from\":1700000000000,\"store\":8,\"queue\":8}]"
+  },
   "durable_objects": { "bindings": [
     { "name": "RUN_STREAMS", "class_name": "RunStreams" },
     { "name": "QUEUE_SHARD", "class_name": "QueueShard" },
