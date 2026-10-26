@@ -49,13 +49,13 @@ it('retries a transient step and reports a permanent step failure', async () => 
     expect(response.status).toBe(202);
     return (await response.json() as { runId: string }).runId;
   };
-  const retry = await create('retry');
+  const retry = await create('retryOnce');
   await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${retry}`, { headers })).json() as { status: string }).status,
     { interval: 200, timeout: 15_000 }).toBe('completed');
   expect(await (await SELF.fetch(`https://local/runs/${retry}/result`, { headers })).json()).toEqual({ value: 22 });
   expect(await (await SELF.fetch(`https://local/runs/${retry}/events`, { headers })).text()).toContain('event: step_retrying');
 
-  const fatal = await create('fatal');
+  const fatal = await create('failPermanently');
   await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${fatal}`, { headers })).json() as { status: string }).status,
     { interval: 200, timeout: 15_000 }).toBe('failed');
   const events = await (await SELF.fetch(`https://local/runs/${fatal}/events`, { headers })).text();

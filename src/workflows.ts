@@ -1,31 +1,19 @@
-import { approval, delayed, demo, failPermanently, longDelay, progress, retryOnce } from '../workflows/demo.js';
-import {
-  cpuStep, hookPayload, parallelSteps, replayAfterSteps, runOutput, sequentialSteps, sleepHours, stepInput, stepOutput,
-  streamChunk,
-} from '../workflows/limits.js';
+import * as demo from '../workflows/demo.js';
+import * as limits from '../workflows/limits.js';
 
-/** Workflows `POST /runs` may start, by request name. IDs are the ones `workflow build` generates. */
-export const workflows = {
-  demo: Object.assign(demo, { workflowId: 'workflow//./workflows/demo//demo' }),
-  delayed: Object.assign(delayed, { workflowId: 'workflow//./workflows/demo//delayed' }),
-  longDelay: Object.assign(longDelay, { workflowId: 'workflow//./workflows/demo//longDelay' }),
-  approval: Object.assign(approval, { workflowId: 'workflow//./workflows/demo//approval' }),
-  progress: Object.assign(progress, { workflowId: 'workflow//./workflows/demo//progress' }),
-  retry: Object.assign(retryOnce, { workflowId: 'workflow//./workflows/demo//retryOnce' }),
-  fatal: Object.assign(failPermanently, { workflowId: 'workflow//./workflows/demo//failPermanently' }),
-  stepOutput: Object.assign(stepOutput, { workflowId: 'workflow//./workflows/limits//stepOutput' }),
-  stepInput: Object.assign(stepInput, { workflowId: 'workflow//./workflows/limits//stepInput' }),
-  runOutput: Object.assign(runOutput, { workflowId: 'workflow//./workflows/limits//runOutput' }),
-  streamChunk: Object.assign(streamChunk, { workflowId: 'workflow//./workflows/limits//streamChunk' }),
-  sequentialSteps: Object.assign(sequentialSteps, { workflowId: 'workflow//./workflows/limits//sequentialSteps' }),
-  parallelSteps: Object.assign(parallelSteps, { workflowId: 'workflow//./workflows/limits//parallelSteps' }),
-  replayAfterSteps: Object.assign(replayAfterSteps, { workflowId: 'workflow//./workflows/limits//replayAfterSteps' }),
-  sleepHours: Object.assign(sleepHours, { workflowId: 'workflow//./workflows/limits//sleepHours' }),
-  cpuStep: Object.assign(cpuStep, { workflowId: 'workflow//./workflows/limits//cpuStep' }),
-  hookPayload: Object.assign(hookPayload, { workflowId: 'workflow//./workflows/limits//hookPayload' }),
-};
+/** Gives each exported workflow the ID `workflow build` generates for it, so `start()` can find it. */
+function withIds<M extends Record<string, object>>(file: string, module: M): { [K in keyof M]: M[K] & { workflowId: string } } {
+  for (const [name, workflow] of Object.entries(module)) {
+    Object.assign(workflow, { workflowId: `workflow//./workflows/${file}//${name}` });
+  }
+  // SAFETY: the loop above gave every export its `workflowId`.
+  return module as { [K in keyof M]: M[K] & { workflowId: string } };
+}
 
-export type WorkflowName = keyof typeof workflows;
+/** Workflows `POST /runs` may start, by function name. */
+export const workflows = { ...withIds('demo', demo), ...withIds('limits', limits) };
+
+type WorkflowName = keyof typeof workflows;
 
 export const DEFAULT_WORKFLOW: WorkflowName = 'demo';
 

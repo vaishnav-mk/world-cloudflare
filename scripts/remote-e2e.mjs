@@ -75,11 +75,11 @@ await Promise.all(parallel.map((runId) => waitFor(runId, (run) => run.status ===
 assert.deepEqual(await Promise.all(parallel.map(async (runId) => (await json(`/runs/${runId}/result`)).value)), [4, 6, 10, 14]);
 console.log('four concurrent runs: ok');
 
-const retry = await start('retry', 11);
+const retry = await start('retryOnce', 11);
 await waitFor(retry, (run) => run.status === 'completed');
 assert.deepEqual(await json(`/runs/${retry}/result`), { value: 22 });
 assert.match(await (await request(`/runs/${retry}/events`, { stream: true })).text(), /event: step_retrying/);
-const fatal = await start('fatal', 11);
+const fatal = await start('failPermanently', 11);
 await waitFor(fatal, (run) => run.status === 'failed');
 const fatalEvents = await (await request(`/runs/${fatal}/events`, { stream: true })).text();
 assert.match(fatalEvents, /event: step_failed/);
