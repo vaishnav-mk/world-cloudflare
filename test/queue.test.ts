@@ -1,9 +1,9 @@
 import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
-import { laneFor, QueueShard } from '../packages/world-cloudflare/src/queue/queue-shard.js';
+import { QueueShard } from '../packages/world-cloudflare/src/queue/queue-shard.js';
+import { queueShardFor } from '../packages/world-cloudflare/src/queue/shards.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
 
@@ -13,7 +13,7 @@ const queueName = `${getQueueTopicPrefix('workflow')}demo` as ValidQueueName;
 describe('durability fanout', () => {
   it('delivers once to the consumer entrypoint', async () => {
     const id = (await queue.queue(queueName, { runId: 'run-1' })).messageId;
-    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName('flow'));
+    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor('run-1')));
     await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);
   });
 
@@ -52,11 +52,11 @@ describe('durability fanout', () => {
     expect(peak).toBe(3);
   });
 
-  it('keeps a slow run from holding up a run on another lane', async () => {
+  it('keeps a slow run from holding up a run on another shard', async () => {
     const sink = env.SINK.getByName('sink');
-    const slowRun = `lane-slow-${crypto.randomUUID()}`;
-    const lane = (runId: string) => laneFor(stringify({ runId }));
-    const fastRun = Array.from({ length: 64 }, (_, index) => `lane-fast-${index}`).find((id) => lane(id) !== lane(slowRun));
+    const slowRun = `shard-slow-${crypto.randomUUID()}`;
+    const fastRun = Array.from({ length: 64 }, (_, index) => `shard-fast-${index}`)
+      .find((id) => queueShardFor(id) !== queueShardFor(slowRun));
     const slowQueue = `${getQueueTopicPrefix('workflow')}lane_slow` as ValidQueueName;
     const slow = (await queue.queue(slowQueue, { runId: slowRun })).messageId;
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -69,7 +69,7 @@ describe('durability fanout', () => {
   it('settles its in-flight record once the consumer returns', async () => {
     const id = (await queue.queue(queueName, { runId: 'settled' })).messageId;
     await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);
-    await expect.poll(() => runInDurableObject(env.QUEUE_SHARD.getByName('flow'), (_shard, state) =>
+    await expect.poll(() => runInDurableObject(env.QUEUE_SHARD.getByName(queueShardFor('settled')), (_shard, state) =>
       state.storage.sql.exec('SELECT id FROM inflight WHERE id = ?', id).toArray())).toEqual([]);
   });
 
@@ -125,7 +125,7 @@ describe('durability fanout', () => {
   it('retains delayed delivery and rejects another deployment', async () => {
     await expect(queue.queue(queueName, { runId: 'run-2' }, { deploymentId: 'old-v0' })).rejects.toThrow('unavailable');
     const id = (await queue.queue(queueName, { runId: 'run-2' }, { delaySeconds: 1 })).messageId;
-    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName('flow'));
+    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor('run-2')));
     expect(await env.SINK.getByName('sink').received()).not.toContain(id);
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 4000 }).toContain(id);
   });

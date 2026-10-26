@@ -6,6 +6,7 @@ import {
 } from '@workflow/world';
 import { EntityConflictError, RunExpiredError } from '@workflow/errors';
 import { createWorld } from '@workflow/world-cloudflare';
+import { queueShardFor } from '../packages/world-cloudflare/src/queue/shards.js';
 
 const world = createWorld(env);
 const bytes = (text: string) => new TextEncoder().encode(text);
@@ -208,7 +209,7 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.queue(name, message, options)).messageId).toBe(first.messageId);
     expect((await world.queue(name, { runId: 'different' }, { ...options, delaySeconds: 3 })).messageId)
       .toBe(first.messageId);
-    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName('flow'));
+    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor(`${name}:${options.idempotencyKey}`)));
     expect(await env.SINK.getByName('sink').received()).not.toContain(first.messageId);
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(first.messageId);
     expect((await env.SINK.getByName('sink').received()).filter((id) => id === first.messageId)).toHaveLength(1);
