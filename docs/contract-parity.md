@@ -114,6 +114,6 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Retention and cleanup of finished runs | ✗ | Runs, outbox and dedup rows, and R2 payloads, are kept forever |
 | Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers with QuickJS, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |
 | Cleanup of orphaned R2 payloads | ✗ | A write that fails after its payload reached R2 leaves the object behind |
-| Store shards, no single object per run or token | ✓ | 128 store shards hold runs and hook tokens; runs created before them stay in the legacy store |
+| Store shards, no single object per run or token | ✓ | Store shards hold runs and hook tokens, 128 by default, and `SHARD_EPOCHS` adds more for new runs; runs created before them stay in the legacy store |
 | Sharding beyond one queue shard | ✓ | 64 queue shards |
 | Multi-region placement | ✗ | |

@@ -4,8 +4,8 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 
 | Durable Object | Holds |
 | --- | --- |
-| `WorldStore` | 128 store shards (`store-0` to `store-127`). Each holds the runs that hash to it, with their events, steps, hooks, waits and outboxes, and the registry for the hook tokens that hash to it. The one named `global` holds runs created before store shards ([below](#store-shards)) |
-| `QueueShard` | 64 queue shards: queue messages, delays, retries and idempotency keys; dead letters go to R2 |
+| `WorldStore` | Store shards ([below](#store-shards)). Each holds the runs that hash to it, with their events, steps, hooks, waits and outboxes, and the registry for the hook tokens that hash to it. The one named `global` holds runs created before store shards |
+| `QueueShard` | Queue shards: queue messages, delays, retries and idempotency keys; dead letters go to R2 |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
 Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
@@ -54,10 +54,11 @@ Add a `* * * * *` cron so `drainOutbox` can recover the legacy store's dispatche
 
 ## Store shards
 
-A run lives in store shard `hash(runId) % 128` from its first event, so no single object sees every run. The store named `global` is the legacy store: it holds the runs created before store shards, with their hooks.
+A run lives in one store shard from its first event, so no single object sees every run. The store named `global` is the legacy store: it holds the runs created before store shards, with their hooks.
+- **Epochs.** `SHARD_EPOCHS` is a JSON list of `{ "from": <ms>, "store": <count>, "queue": <count> }`, oldest first, the first at 0. The default is one epoch of 128 store and 256 queue shards. A run's ULID time picks its epoch, and the run lives in store shard `hash(runId) % store` of it; its messages go to queue shard `hash(key) % queue`. To add capacity, append an epoch whose `from` is later than the deploy: new runs spread over its shards and no existing run moves. Every Worker running World code, retained executors included, needs the same value. Size shards to load: a shard that sees too few runs stays cold, and each cold one costs about 1.7 s on Workers.
 - **Routing.** The World client sends a run-scoped call to the run's shard. A shard throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the legacy store and remembers, per isolate, that the run lives there.
-- **Lists.** `runs.list` and `hooks.list` without a run ID ask all 128 shards and the legacy store, 32 at a time, merge their pages by `createdAt` then ID, and return the last row's sort key as the cursor. `runs.getMany` makes one call per shard its IDs hash to, then one to the legacy store for the rest. `hooks.get` asks every store.
-- **Hook tokens.** A token's registry row lives on shard `hash(token) % 128`, a copy of the hook that holds it. Before a `hook_created` write, the run's shard claims the token there and journals `hook_created` or `hook_conflict`. `hooks.getByToken` reads that shard.
+- **Lists.** `runs.list` and `hooks.list` without a run ID ask every shard of every epoch and the legacy store, 32 at a time, merge their pages by `createdAt` then ID, and return the last row's sort key as the cursor. `runs.getMany` makes one call per shard its IDs hash to, then one to the legacy store for the rest. `hooks.get` asks every store.
+- **Hook tokens.** A token's registry row lives on shard `hash(token) % store` of the first epoch, which never changes, a copy of the hook that holds it. Before a `hook_created` write, the run's shard claims the token there and journals `hook_created` or `hook_conflict`. `hooks.getByToken` reads that shard.
 - **Releases.** A disposal or the run finishing owes the token's shard a release, committed with the write and sent just after it in the background, so a freed token is free shortly after the write returns. A finished run's retained token stays held until its retention lapses. A failed release stays owed and the shard's alarm retries it with backoff. A claim whose write is rejected is released the same way; one cut off by a reset of the run's shard holds its token until the run retries the write.
 - **Legacy tokens.** Each token shard, the first time it answers, copies in the tokens that legacy hooks hold, so they still conflict. Legacy runs claim new tokens on the shards like any other run.
 - **Recovery.** Each shard drains its own outboxes from its alarm, armed before any write that owes a queue message or a release. The cron reaches only the legacy store.

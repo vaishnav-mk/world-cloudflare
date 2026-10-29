@@ -13,15 +13,26 @@ Vercel's column is its documented limits.
 | Replay | 240 s budget | A snapshot restore took 81 ms at 30,000 events; pauses between invocations stay at 4 to 8 s |
 | One payload | 50 MB | 16 MiB step output with QuickJS, 20 MiB with the isolate engine; larger payloads are rejected |
 | One stream chunk | 10 MB | 70 MiB locally; not measured on Workers |
-| Run creations | 1,000 per second | 26 to 39 per second with one store for every run; 97 per second at concurrency 240 with store shards and a directory object; without the directory not measured yet |
+| Run creations | 1,000 per second | Up to 362 per second; 321 per second with 4,800 runs all completing, 82 per second end to end |
 | 1,000 parallel steps | Not documented | 66 to 74 s |
 
-Run creation is the open gap. With runs on 128 store shards, creation scaled with concurrency on Workers, but `run_completed` waited 0.7 to 2.5 s on a directory object that took about three index pushes per run and every hook-token claim. The directory is gone: lists ask every shard, and each hook token lives on the shard its hash picks. That build is not measured on Workers yet. What is left:
-- **Lists.** `runs.list` and a global `hooks.list` make 129 calls and carry up to 129 pages to the calling Worker, so a large `limit` with `resolveData: 'all'` costs memory. `hooks.get` asks every store too.
+Run creation is the open gap. Measured on Workers with `POST /runs` from one machine through one colo, every run tracked to completion:
+
+| Build | Concurrency | Created per second | End to end |
+| --- | --- | --- | --- |
+| One store and one queue shard for every run | 6 | 0.9 | 100 runs in 13 minutes |
+| 128 store and 256 queue shards | 480 | 117 | 26 per second at concurrency 120 |
+| An epoch of 512 store and 1,024 queue shards | 480 | 321 | 4,800 runs in 59 s, 82 per second |
+| An epoch of 2,048 store and 4,096 queue shards | 480 | 102 to 153 | 62 to 66 per second |
+
+What limits it:
+- **Cold shards.** A new Durable Object costs about 1.7 s on its first call, so one store per run made every creation pay it. Too many shards for the load does the same, which is why 2,048 shards did worse than 512.
+- **Flow CPU.** With flows switched off, creation reached 358 per second. Flows appear to run on the machines of the queue shards that deliver them, so their CPU competes with those shards.
+- **Distance.** Each Durable Object call from the test colo took about 150 ms, because shards live where they were first called.
+- **The test.** One machine and one colo may cap it before the World does.
+- **Lists.** `runs.list` and a global `hooks.list` ask every store, so their cost grows with the shard count, and a large `limit` with `resolveData: 'all'` costs memory. `hooks.get` asks every store too.
 - **Token release lag.** A disposal or a finished run releases its tokens on their shards just after the write, in the background, so another run's claim in between still conflicts.
 - **The legacy store.** It still serves runs created before store shards, each token shard's first answer (once), and a shard that cannot find a lazily started run.
-
-Locally the sharded World is slower: a burst of 300 creations at concurrency 30 (`scripts/perf/burst.mjs` against `wrangler dev`) made 84 to 91 runs per second with per-run stores, against 133 to 171 with one store, because local workerd runs every object on one thread.
 
 ## Payloads
 
