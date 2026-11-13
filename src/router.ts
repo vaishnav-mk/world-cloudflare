@@ -1,4 +1,4 @@
-import { HookNotFoundError, WorkflowRunNotFoundError } from '@workflow/errors';
+import { HookNotFoundError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import type { WorldEnv } from '@workflow/world-cloudflare';
 import { HttpError } from './http.js';
 import { subscribeEvents } from './routes/events.js';
@@ -57,5 +57,10 @@ function errorResponse(error: unknown): Response {
   if (error instanceof HttpError) return new Response(error.message, { status: error.status });
   if (WorkflowRunNotFoundError.is(error)) return new Response('Run not found', { status: 404 });
   if (HookNotFoundError.is(error)) return new Response('Hook not found', { status: 404 });
-  throw error;
+  // A World error carries its status, such as 503 for a Durable Object that is overloaded or resetting.
+  if (WorkflowWorldError.is(error) && error.status !== undefined) {
+    return new Response(error.message, { status: error.status, headers: error.status === 503 ? { 'retry-after': '1' } : {} });
+  }
+  console.error('Request failed', error);
+  return new Response('Internal error', { status: 500 });
 }
