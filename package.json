@@ -13,10 +13,10 @@
   },
   "dependencies": {
     "@workflow/cli": "link:.vendor/workflow-sdk/packages/cli",
-    "@workflow/errors": "5.0.4",
-    "@workflow/world": "5.0.4",
+    "@workflow/errors": "5.1.1",
+    "@workflow/world": "5.2.0",
     "@workflow/world-cloudflare": "workspace:*",
-    "workflow": "5.2.2"
+    "workflow": "5.5.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.8.1",
