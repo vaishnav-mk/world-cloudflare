@@ -1,5 +1,5 @@
 diff --git a/packages/builders/src/base-builder.ts b/packages/builders/src/base-builder.ts
-index 7db06d5c..3acda2be 100644
+index 1adbf22dc..687b20edf 100644
 --- a/packages/builders/src/base-builder.ts
 +++ b/packages/builders/src/base-builder.ts
 @@ -1,5 +1,6 @@
@@ -25,7 +25,7 @@ index 7db06d5c..3acda2be 100644
        '**/.workflow-data/**',
        '**/.workflow-vitest/**',
        '**/.well-known/workflow/**',
-@@ -1769,18 +1772,63 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1790,18 +1793,66 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
        routeModuleBodyStartedAt: 'workflowRouteModuleBodyStartedAt',
      });
  
@@ -50,15 +50,18 @@ index 7db06d5c..3acda2be 100644
 +        );
 +        workerWasmImports += `import __quickjs_${name} from './__quickjs_${name}.wasm';\n`;
 +      }
-+      workerWasmRegistration = `globalThis[Symbol.for('@workflow/core//quickjsWorkerAssets')] = {
-+  wasm: __quickjs_runtime,
-+  extensions: [
-+    { name: 'encoding', wasm: __quickjs_encoding },
-+    { name: 'headers', wasm: __quickjs_headers },
-+    { name: 'url', wasm: __quickjs_url },
-+    { name: 'structured-clone', wasm: __quickjs_structuredClone, initFn: 'qjs_ext_structured_clone_init' },
-+  ],
-+};`;
++      // workerd forbids WebAssembly.compile() at request time; wrangler
++      // compiles these static imports at deploy time instead.
++      workerWasmImports += `import { setPrecompiledQuickJSModules } from 'workflow/runtime';\n`;
++      workerWasmRegistration = `setPrecompiledQuickJSModules({
++  quickjs: __quickjs_runtime,
++  extensions: {
++    encoding: __quickjs_encoding,
++    headers: __quickjs_headers,
++    url: __quickjs_url,
++    'structured-clone': __quickjs_structuredClone,
++  },
++});`;
 +      // The isolate engine (WORKFLOW_VM=isolate) cannot eval workflowCode, so
 +      // compile the same bundle into a factory whose parameters shadow every
 +      // global. Each replay calls it with a fresh sandbox; see vm/isolate.ts.
@@ -92,7 +95,7 @@ index 7db06d5c..3acda2be 100644
  ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntrypointOptionsCode})`)}`;
  
      if (!bundleFinalOutput) {
-@@ -1790,10 +1838,12 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1811,10 +1862,12 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
        const bundleStartTime = Date.now();
        const { banner: importMetaBanner, define: importMetaDefine } =
          this.getCjsImportMetaPolyfill(format);
@@ -109,7 +112,7 @@ index 7db06d5c..3acda2be 100644
        const finalResult = await esbuild.build({
          banner: {
            js: `// biome-ignore-all lint: generated file\n/* eslint-disable */\n${importMetaBanner}${finalEsmRequireBanner}`,
-@@ -1817,6 +1867,9 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1838,6 +1891,9 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
          define: importMetaDefine,
          external: [
            '@aws-sdk/credential-provider-web-identity',
@@ -121,7 +124,7 @@ index 7db06d5c..3acda2be 100644
        });
 diff --git a/packages/builders/src/cloudflare-workers.test.ts b/packages/builders/src/cloudflare-workers.test.ts
 new file mode 100644
-index 00000000..d8e0316e
+index 000000000..d8e0316e5
 --- /dev/null
 +++ b/packages/builders/src/cloudflare-workers.test.ts
 @@ -0,0 +1,70 @@
@@ -197,7 +200,7 @@ index 00000000..d8e0316e
 +});
 diff --git a/packages/builders/src/isolate-globals.ts b/packages/builders/src/isolate-globals.ts
 new file mode 100644
-index 00000000..f57679cd
+index 000000000..f57679cdc
 --- /dev/null
 +++ b/packages/builders/src/isolate-globals.ts
 @@ -0,0 +1,53 @@
@@ -255,7 +258,7 @@ index 00000000..f57679cd
 +  '__dirname',
 +];
 diff --git a/packages/builders/src/types.ts b/packages/builders/src/types.ts
-index de8c423c..ebeb006c 100644
+index cd6e1cbff..25a02ef1d 100644
 --- a/packages/builders/src/types.ts
 +++ b/packages/builders/src/types.ts
 @@ -2,6 +2,7 @@ import type { WorkflowAfterTransformHook } from './swc-esbuild-plugin.js';
@@ -276,7 +279,7 @@ index de8c423c..ebeb006c 100644
    workflowsBundlePath: string;
    webhookBundlePath: string;
 diff --git a/packages/cli/src/commands/build.ts b/packages/cli/src/commands/build.ts
-index 61c13663..7ba1dc06 100644
+index 61c13663c..7ba1dc06b 100644
 --- a/packages/cli/src/commands/build.ts
 +++ b/packages/cli/src/commands/build.ts
 @@ -13,6 +13,7 @@ export default class Build extends BaseCommand {
@@ -319,69 +322,22 @@ index 61c13663..7ba1dc06 100644
          this.logInfo('Building with StandaloneBuilder');
          const builder = new StandaloneBuilder(config);
          await builder.build();
-diff --git a/packages/core/src/runtime.ts b/packages/core/src/runtime.ts
-index e88087d9..fda5b9b2 100644
---- a/packages/core/src/runtime.ts
-+++ b/packages/core/src/runtime.ts
-@@ -37,7 +37,6 @@ import {
-   type WorkflowRun,
-   type World,
- } from '@workflow/world';
--import ms from 'ms';
- import { decodeTime } from 'ulid';
- import {
-   classifyRunError,
-@@ -49,7 +48,7 @@ import { type StepInvocationQueueItem, WorkflowSuspension } from './global.js';
- import { type Logger, runtimeLogger } from './logger.js';
- import { getStepFunction } from './private.js';
- import { ReplayPayloadCache } from './replay-payload-cache.js';
--import { COMPUTE_INSTANCE_ID } from './runtime/compute-instance.js';
-+import { getComputeInstanceId } from './runtime/compute-instance.js';
- import {
-   DYNAMIC_WORKFLOWS_ENV,
-   getMaxEventsOverride,
-@@ -100,6 +99,7 @@ import {
-   stepDispatchIdempotencyKey,
-   withHealthCheck,
- } from './runtime/helpers.js';
-+import { getMaxInlineDurationMs } from './runtime/inline-window.js';
- import { withRunInputs } from './runtime/invocations.js';
- import {
-   dispatchRunCompletedHooks,
-@@ -122,6 +122,7 @@ import {
-   resumeTimingForMessage,
-   resumeTrackingFromMessage,
- } from './runtime/resume-latency.js';
-+import { memoizeEventLog } from './runtime/event-log-memo.js';
- import { runIdCreatedAt } from './runtime/run-id-time.js';
- import {
-   DEFAULT_STEP_MAX_RETRIES,
-@@ -140,7 +141,7 @@ import {
-   handleSuspension,
-   type SuspensionSerializationBlocker,
- } from './runtime/suspension-handler.js';
--import { useQuickJSVm } from './runtime/vm-mode.js';
-+import { getWorkflowVm, useQuickJSVm } from './runtime/vm-mode.js';
- import { getWaitContinuationDispatch } from './runtime/wait-continuation.js';
- import { getWorld } from './runtime/world.js';
- import {
-@@ -466,21 +467,43 @@ async function recordFatalRunError({
-   );
+diff --git a/packages/core/src/runtime/delivery.ts b/packages/core/src/runtime/delivery.ts
+index b5ef86d45..6edae8693 100644
+--- a/packages/core/src/runtime/delivery.ts
++++ b/packages/core/src/runtime/delivery.ts
+@@ -53,6 +53,7 @@ import {
+   dynamicWorkflowName,
+   readDynamicWorkflowMetadata,
+ } from './dynamic-workflow.js';
++import { memoizeEventLog } from './event-log-memo.js';
+ import { memoizeEncryptionKey, queueMessage } from './helpers.js';
+ import type { RunInputActivity } from './invocations.js';
+ import type { ReplayBudget } from './replay-budget.js';
+@@ -329,21 +330,30 @@ export function clampMaxEvents(
+   return serverValue === undefined ? override : Math.min(serverValue, override);
  }
  
-+/** A log's `wait_created` events, and the waits its `wait_completed` events close. */
-+const waitsOf = memoizeEventLog(
-+  () => ({
-+    created: [] as Extract<Event, { eventType: 'wait_created' }>[],
-+    completed: new Set<string | undefined>(),
-+  }),
-+  (waits, e) => {
-+    if (e.eventType === 'wait_created') waits.created.push(e);
-+    else if (e.eventType === 'wait_completed')
-+      waits.completed.add(e.correlationId);
-+  }
-+);
-+
 +/** The first terminal run event in a log, by run ID. */
 +const terminalRunEventsOf = memoizeEventLog(
 +  () => new Map<string, Event>(),
@@ -397,7 +353,7 @@ index e88087d9..fda5b9b2 100644
 +  }
 +);
 +
- function findRecordedTerminalRunEvent(
+ export function findRecordedTerminalRunEvent(
    events: Event[],
    runId: string
  ): Event | undefined {
@@ -417,179 +373,10 @@ index e88087d9..fda5b9b2 100644
 +  return terminalRunEventsOf(events).get(runId);
  }
  
- function hasRecordedTerminalRunEvent(events: Event[], runId: string): boolean {
-@@ -639,44 +662,6 @@ function nextEventLogLoad(log: LoadedEventLog): ReplayEventLog {
-   };
- }
- 
--/**
-- * Maximum inline-execution duration for a single handler invocation.
-- *
-- * Order of precedence:
-- * 1. `WORKFLOW_V2_TIMEOUT_MS` env var
-- * 2. Tiered budget derived from `world.getRuntimeDeadline()`
-- * 3. Default of 2 minutes
-- */
--async function getMaxInlineDurationMs(
--  world: World,
--  invocationStartTime: number
--): Promise<number> {
--  const rawEnvOverride = process.env.WORKFLOW_V2_TIMEOUT_MS;
--  if (rawEnvOverride !== undefined && rawEnvOverride !== '') {
--    const parsed = Number(rawEnvOverride);
--    if (Number.isFinite(parsed) && parsed > 0) {
--      return parsed;
--    }
--  }
--
--  const runtimeDeadline = await world.getRuntimeDeadline?.();
--  if (runtimeDeadline !== undefined) {
--    const deadlineMs = runtimeDeadline.getTime();
--    if (!Number.isNaN(deadlineMs)) {
--      const maxDurationMs = Math.floor(deadlineMs - invocationStartTime);
--      if (maxDurationMs >= ms('25m')) {
--        return ms('10m');
--      }
--
--      if (maxDurationMs >= ms('10m')) {
--        return ms('5m');
--      }
--    }
--  }
--
--  return ms('2m');
--}
--
- /** The workflow code a delivery replays, and the marker when it is dynamic. */
- interface ResolvedWorkflowCode {
-   code: string;
-@@ -1127,7 +1112,10 @@ export function workflowEntrypoint(
-                         'workflowName' | 'executionContext'
-                       >
-                     ) => {
--                      if (!workflow || useQuickJSVm(workflow)) return;
-+                      // Only node:vm compiles; the isolate engine
-+                      // evaluates the deployment's prebuilt factory.
-+                      if (!workflow || getWorkflowVm(workflow) !== 'node')
-+                        return;
-                       // A dynamic run does not replay the deployment's
-                       // bundle, and its own code is not available yet (it is
-                       // encrypted, and resolving it needs the run's key). Skip
-@@ -2961,7 +2949,8 @@ export function workflowEntrypoint(
-                     });
-                   }
-                   const dynamicWorkflowScripts =
--                    dynamicWorkflowMetadata && !useQuickJSVm(workflowRun)
-+                    dynamicWorkflowMetadata &&
-+                    getWorkflowVm(workflowRun) === 'node'
-                       ? compileDynamicWorkflowBundle(
-                           effectiveWorkflowCode,
-                           workflowRun.workflowName
-@@ -3206,12 +3195,8 @@ export function workflowEntrypoint(
- 
-                       // Complete elapsed waits
-                       const now = Date.now();
--                      const completedWaitIds = new Set(
--                        eventLog.events
--                          .filter((e) => e.eventType === 'wait_completed')
--                          .map((e) => e.correlationId)
--                      );
--                      const waitsToComplete = eventLog.events
-+                      const waits = waitsOf(eventLog.events);
-+                      const waitsToComplete = waits.created
-                         .filter(
-                           (
-                             e
-@@ -3219,9 +3204,8 @@ export function workflowEntrypoint(
-                             Event,
-                             { eventType: 'wait_created' }
-                           > & { correlationId: string } =>
--                            e.eventType === 'wait_created' &&
-                             e.correlationId !== undefined &&
--                            !completedWaitIds.has(e.correlationId) &&
-+                            !waits.completed.has(e.correlationId) &&
-                             now >= (e.eventData.resumeAt as Date).getTime()
-                         )
-                         .map((e) => ({
-@@ -3278,11 +3262,9 @@ export function workflowEntrypoint(
-                       // ignores `sinceCursor`, a truncated delta, a concurrent
-                       // absorb that lost the cursor race, or an
-                       // EntityConflictError, whose rejection carries no delta.
--                      const completedWaitIdsAfterWrites = new Set(
-+                      const completedWaitIdsAfterWrites = waitsOf(
-                         eventLog.events
--                          .filter((e) => e.eventType === 'wait_completed')
--                          .map((e) => e.correlationId)
--                      );
-+                      ).completed;
-                       const missingWaitCompletions = waitsToComplete.filter(
-                         (waitEvent) =>
-                           !completedWaitIdsAfterWrites.has(
-@@ -3471,7 +3453,9 @@ export function workflowEntrypoint(
-                         // source is compiled once per invocation without
-                         // entering that shared cache.
-                         assert(
--                          compiled || dynamicWorkflowScripts,
-+                          compiled ||
-+                            dynamicWorkflowScripts ||
-+                            getWorkflowVm(workflowRun) === 'isolate',
-                           'Node workflow replay requires compiled scripts'
-                         );
-                         workflowResult = await replayWorkflow({
-@@ -5651,7 +5635,7 @@ export function workflowEntrypoint(
-         kind: spanKind,
-         attributes: {
-           ...Attribute.WorkflowRouteType('flow'),
--          ...Attribute.FaasInstance(COMPUTE_INSTANCE_ID),
-+          ...Attribute.FaasInstance(getComputeInstanceId()),
-           ...Attribute.WorkflowRouteHandlerCached(handlerCached),
-           ...Attribute.WorkflowRouteInvocationCount(invocationCount),
-           ...Attribute.WorkflowRouteEntrypointAgeMs(
-diff --git a/packages/core/src/runtime/compute-instance.test.ts b/packages/core/src/runtime/compute-instance.test.ts
-new file mode 100644
-index 00000000..f43e4b96
---- /dev/null
-+++ b/packages/core/src/runtime/compute-instance.test.ts
-@@ -0,0 +1,10 @@
-+import { describe, expect, it } from 'vitest';
-+import { getComputeInstanceId } from './compute-instance.js';
-+
-+describe('compute instance ID', () => {
-+  it('creates one ID lazily and reuses it across requests', () => {
-+    const id = getComputeInstanceId();
-+    expect(id).toMatch(/^cinst_[0-9A-HJKMNP-TV-Z]{26}$/);
-+    expect(getComputeInstanceId()).toBe(id);
-+  });
-+});
-diff --git a/packages/core/src/runtime/compute-instance.ts b/packages/core/src/runtime/compute-instance.ts
-index 0c40f16e..84a91162 100644
---- a/packages/core/src/runtime/compute-instance.ts
-+++ b/packages/core/src/runtime/compute-instance.ts
-@@ -1,14 +1,9 @@
- import { ulid } from 'ulid';
- 
--/**
-- * Identifier for the compute instance (microVM) this module was loaded into.
-- *
-- * Vercel exposes no native per-instance ID under Fluid compute (`AWS_LAMBDA_*`
-- * is blocked), so we synthesize one at module load: a prefixed ULID
-- * (`cinst_<ulid>`, per the `wrun_`/`step_` convention) whose timestamp is the
-- * instance's birth time. Stable for the instance's life and shared by every
-- * invocation it handles, including the concurrent ones Fluid packs onto it;
-- * cold starts mint fresh IDs. Emitted as the OpenTelemetry `faas.instance`
-- * attribute.
-- */
--export const COMPUTE_INSTANCE_ID = `cinst_${ulid()}`;
-+/** Stable per-instance telemetry ID. Workers prohibit random generation at module load. */
-+let computeInstanceId: string | undefined;
-+
-+export function getComputeInstanceId(): string {
-+  computeInstanceId ??= `cinst_${ulid()}`;
-+  return computeInstanceId;
-+}
+ export function hasRecordedTerminalRunEvent(
 diff --git a/packages/core/src/runtime/event-log-memo.test.ts b/packages/core/src/runtime/event-log-memo.test.ts
 new file mode 100644
-index 00000000..2b366126
+index 000000000..2b366126c
 --- /dev/null
 +++ b/packages/core/src/runtime/event-log-memo.test.ts
 @@ -0,0 +1,93 @@
@@ -688,7 +475,7 @@ index 00000000..2b366126
 +});
 diff --git a/packages/core/src/runtime/event-log-memo.ts b/packages/core/src/runtime/event-log-memo.ts
 new file mode 100644
-index 00000000..0a166295
+index 000000000..0a1662958
 --- /dev/null
 +++ b/packages/core/src/runtime/event-log-memo.ts
 @@ -0,0 +1,66 @@
@@ -759,18 +546,18 @@ index 00000000..0a166295
 +  };
 +}
 diff --git a/packages/core/src/runtime/helpers.ts b/packages/core/src/runtime/helpers.ts
-index 9d81c2f0..7f014451 100644
+index 824725933..a89fbd1f7 100644
 --- a/packages/core/src/runtime/helpers.ts
 +++ b/packages/core/src/runtime/helpers.ts
-@@ -37,6 +37,7 @@ import * as Attribute from '../telemetry/semantic-conventions.js';
- import { getSpanKind, trace } from '../telemetry.js';
+@@ -41,6 +41,7 @@ import { getSpanKind, trace } from '../telemetry.js';
  import { version as workflowCoreVersion } from '../version.js';
+ import { CHILD_RUN_COMPLETION_VERSION } from './child-run-completion.js';
  import { isDynamicWorkflowsEnabled } from './constants.js';
 +import { markEventLogRewritten, memoizeEventLog } from './event-log-memo.js';
  import { getWorldLazy } from './get-world-lazy.js';
+ import { withRunSpecVersion } from './run-spec-routing.js';
  
- /** Default timeout for health checks in milliseconds */
-@@ -514,11 +515,17 @@ function recordRequestedEventCursor(
+@@ -550,11 +551,17 @@ function recordRequestedEventCursor(
    requestedCursors.add(cursor);
  }
  
@@ -789,7 +576,7 @@ index 9d81c2f0..7f014451 100644
   *
   * Events are appended in the order the World returned them, and are not
   * re-sorted. Every append source is already in canonical order relative to the
-@@ -536,7 +543,7 @@ export function appendUniqueEvents(
+@@ -572,7 +579,7 @@ export function appendUniqueEvents(
      return;
    }
  
@@ -798,7 +585,7 @@ index 9d81c2f0..7f014451 100644
    for (const event of events) {
      if (ids.has(event.eventId)) {
        continue;
-@@ -578,6 +585,7 @@ export function insertEventByEventId(target: Event[], event: Event): void {
+@@ -614,6 +621,7 @@ export function insertEventByEventId(target: Event[], event: Event): void {
      i--;
    }
    target.splice(i, 0, event);
@@ -806,7 +593,7 @@ index 9d81c2f0..7f014451 100644
  }
  
  function assertEventPaginationProgress(
-@@ -853,6 +861,7 @@ export function mergeReportedEvents(
+@@ -903,6 +911,7 @@ export function mergeReportedEvents(
      target.sort((a, b) =>
        a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0
      );
@@ -814,7 +601,7 @@ index 9d81c2f0..7f014451 100644
    }
    return added;
  }
-@@ -948,6 +957,17 @@ export interface EventSlotGap {
+@@ -998,6 +1007,17 @@ export interface EventSlotGap {
    maxSlot: number;
  }
  
@@ -832,7 +619,7 @@ index 9d81c2f0..7f014451 100644
  /**
   * The hole in a loaded log, or `undefined` when there is none to find.
   *
-@@ -977,15 +997,9 @@ export interface EventSlotGap {
+@@ -1027,15 +1047,9 @@ export interface EventSlotGap {
  export function findEventSlotGap(
    events: readonly Event[]
  ): EventSlotGap | undefined {
@@ -851,59 +638,117 @@ index 9d81c2f0..7f014451 100644
    if (maxSlot === 0) {
      return undefined;
    }
-diff --git a/packages/core/src/runtime/inline-window.ts b/packages/core/src/runtime/inline-window.ts
-new file mode 100644
-index 00000000..00e502c8
---- /dev/null
-+++ b/packages/core/src/runtime/inline-window.ts
-@@ -0,0 +1,40 @@
-+import type { World } from '@workflow/world';
-+import ms from 'ms';
-+
-+/**
-+ * Maximum inline-execution duration for a single handler invocation.
-+ *
-+ * Order of precedence:
-+ * 1. `WORKFLOW_V2_TIMEOUT_MS` env var
-+ * 2. Tiered budget derived from `world.getRuntimeDeadline()`
-+ * 3. Default of 2 minutes
-+ */
-+export async function getMaxInlineDurationMs(
-+  world: World,
-+  invocationStartTime: number
-+): Promise<number> {
-+  const rawEnvOverride = process.env.WORKFLOW_V2_TIMEOUT_MS;
-+  if (rawEnvOverride !== undefined && rawEnvOverride !== '') {
-+    const parsed = Number(rawEnvOverride);
-+    if (Number.isFinite(parsed) && parsed > 0) {
-+      return parsed;
-+    }
+diff --git a/packages/core/src/runtime/spec8/delivery.ts b/packages/core/src/runtime/spec8/delivery.ts
+index a1fb9127c..60a83a2e0 100644
+--- a/packages/core/src/runtime/spec8/delivery.ts
++++ b/packages/core/src/runtime/spec8/delivery.ts
+@@ -140,8 +140,9 @@ import {
+   admitsTurboStart,
+   recordAcceptedStartHookCandidate,
+ } from '../start-hook-delivery.js';
++import { memoizeEventLog } from '../event-log-memo.js';
+ import { computeStepLatencyTracking } from '../step-latency.js';
+-import { useQuickJSVm } from '../vm-mode.js';
++import { getWorkflowVm, useQuickJSVm } from '../vm-mode.js';
+ import { getWaitContinuationDispatch } from '../wait-continuation.js';
+ import {
+   getPreconditionMaxInProcessRestarts,
+@@ -168,6 +169,19 @@ import {
+ import { runStepSingleFlight } from './step-single-flight.js';
+ import { handleSuspension, pendingQueueDrain } from './suspension-handler.js';
+ 
++/** A log's `wait_created` events, and the waits its `wait_completed` events close. */
++const waitsOf = memoizeEventLog(
++  () => ({
++    created: [] as Extract<Event, { eventType: 'wait_created' }>[],
++    completed: new Set<string | undefined>(),
++  }),
++  (waits, e) => {
++    if (e.eventType === 'wait_created') waits.created.push(e);
++    else if (e.eventType === 'wait_completed')
++      waits.completed.add(e.correlationId);
 +  }
++);
 +
-+  const runtimeDeadline = await world.getRuntimeDeadline?.();
-+  if (runtimeDeadline !== undefined) {
-+    const deadlineMs = runtimeDeadline.getTime();
-+    if (!Number.isNaN(deadlineMs)) {
-+      const maxDurationMs = Math.floor(deadlineMs - invocationStartTime);
-+      if (maxDurationMs >= ms('25m')) {
-+        return ms('10m');
-+      }
-+
-+      if (maxDurationMs >= ms('10m')) {
-+        return ms('5m');
-+      }
-+    }
-+  }
-+
-+  return ms('2m');
-+}
-diff --git a/packages/core/src/runtime/open-hook-wait-state.ts b/packages/core/src/runtime/open-hook-wait-state.ts
-index 72b68994..30a342d4 100644
---- a/packages/core/src/runtime/open-hook-wait-state.ts
-+++ b/packages/core/src/runtime/open-hook-wait-state.ts
+ type ReplayEventLog =
+   | { type: 'loadAll' }
+   | ({ type: 'ready' } & LoadedEventLog)
+@@ -394,7 +408,9 @@ async function runDelivery(
+   let compiledWorkflowName: string | undefined;
+   const startWorkflowCompile = await bindActiveTraceContext(
+     (workflow?: Pick<WorkflowRun, 'workflowName' | 'executionContext'>) => {
+-      if (!workflow || useQuickJSVm(workflow)) return;
++      // Only node:vm compiles; the isolate engine evaluates the
++      // deployment's prebuilt factory.
++      if (!workflow || getWorkflowVm(workflow) !== 'node') return;
+       // A dynamic run does not replay the deployment's
+       // bundle, and its own code is not available yet (it is
+       // encrypted, and resolving it needs the run's key). Skip
+@@ -2273,7 +2289,7 @@ async function runDelivery(
+     });
+   }
+   const dynamicWorkflowScripts =
+-    dynamicWorkflowMetadata && !useQuickJSVm(workflowRun)
++    dynamicWorkflowMetadata && getWorkflowVm(workflowRun) === 'node'
+       ? compileDynamicWorkflowBundle(
+           effectiveWorkflowCode,
+           workflowRun.workflowName
+@@ -2748,21 +2764,16 @@ async function runDelivery(
+ 
+       // Complete elapsed waits
+       const now = Date.now();
+-      const completedWaitIds = new Set(
+-        eventLog.events
+-          .filter((e) => e.eventType === 'wait_completed')
+-          .map((e) => e.correlationId)
+-      );
+-      const waitsToComplete = eventLog.events
++      const waits = waitsOf(eventLog.events);
++      const waitsToComplete = waits.created
+         .filter(
+           (
+             e
+           ): e is Extract<Event, { eventType: 'wait_created' }> & {
+             correlationId: string;
+           } =>
+-            e.eventType === 'wait_created' &&
+             e.correlationId !== undefined &&
+-            !completedWaitIds.has(e.correlationId) &&
++            !waits.completed.has(e.correlationId) &&
+             now >= (e.eventData.resumeAt as Date).getTime()
+         )
+         .map((e) => ({
+@@ -2816,11 +2827,7 @@ async function runDelivery(
+       // ignores `sinceCursor`, a truncated delta, a concurrent
+       // absorb that lost the cursor race, or an
+       // EntityConflictError, whose rejection carries no delta.
+-      const completedWaitIdsAfterWrites = new Set(
+-        eventLog.events
+-          .filter((e) => e.eventType === 'wait_completed')
+-          .map((e) => e.correlationId)
+-      );
++      const completedWaitIdsAfterWrites = waitsOf(eventLog.events).completed;
+       const missingWaitCompletions = waitsToComplete.filter(
+         (waitEvent) => !completedWaitIdsAfterWrites.has(waitEvent.correlationId)
+       );
+@@ -2994,7 +3001,9 @@ async function runDelivery(
+         // source is compiled once per invocation without
+         // entering that shared cache.
+         assert(
+-          compiled || dynamicWorkflowScripts,
++          compiled ||
++            dynamicWorkflowScripts ||
++            getWorkflowVm(workflowRun) === 'isolate',
+           'Node workflow replay requires compiled scripts'
+         );
+         workflowResult = await replayWorkflow({
+diff --git a/packages/core/src/runtime/spec8/open-hook-wait-state.ts b/packages/core/src/runtime/spec8/open-hook-wait-state.ts
+index 72b689947..8be4c25b6 100644
+--- a/packages/core/src/runtime/spec8/open-hook-wait-state.ts
++++ b/packages/core/src/runtime/spec8/open-hook-wait-state.ts
 @@ -1,4 +1,5 @@
  import type { Event } from '@workflow/world';
-+import { memoizeEventLog } from './event-log-memo.js';
++import { memoizeEventLog } from '../event-log-memo.js';
  
  /**
   * Which out-of-band writers a replay's event log currently admits, computed
@@ -961,19 +806,19 @@ index 72b68994..30a342d4 100644
    let earliestOpenWaitResumeAtMs: number | undefined;
    for (const at of waits.values()) {
      if (
-diff --git a/packages/core/src/runtime/quickjs-entrypoint.ts b/packages/core/src/runtime/quickjs-entrypoint.ts
-index 0b7ac75e..7342c53a 100644
---- a/packages/core/src/runtime/quickjs-entrypoint.ts
-+++ b/packages/core/src/runtime/quickjs-entrypoint.ts
-@@ -70,6 +70,7 @@ import {
-   publishForceClaimVictimWake,
-   republishOwedForceClaimVictimWakes,
- } from './hook-wake.js';
-+import { getMaxInlineDurationMs } from './inline-window.js';
+diff --git a/packages/core/src/runtime/spec8/quickjs-entrypoint.ts b/packages/core/src/runtime/spec8/quickjs-entrypoint.ts
+index 1e798f867..1d953de01 100644
+--- a/packages/core/src/runtime/spec8/quickjs-entrypoint.ts
++++ b/packages/core/src/runtime/spec8/quickjs-entrypoint.ts
+@@ -46,6 +46,7 @@ import { remapErrorStack, stripInlineSourceMap } from '../../source-map.js';
+ import * as Attribute from '../../telemetry/semantic-conventions.js';
+ import { serializeTraceCarrier, trace } from '../../telemetry.js';
+ import { afterRunCompleted, afterRunFailed } from '../after-terminal-write.js';
++import { getMaxInlineDurationMs } from '../delivery.js';
+ import { maybeWarnApproachingEventLimit } from '../event-limit-warning.js';
+ import { getPortLazy } from '../get-port-lazy.js';
  import {
-   dispatchRunCompletedHooks,
-   dispatchRunFailedHooks,
-@@ -1029,6 +1030,10 @@ export async function runWorkflowWithQuickJS(params: {
+@@ -306,6 +307,10 @@ export async function runWorkflowWithQuickJS(params: {
    const world = await getWorld();
    const runId = workflowRun.runId;
    const invocationStart = tick();
@@ -984,7 +829,7 @@ index 0b7ac75e..7342c53a 100644
  
    // Strip the inline source map comment before evaluating the bundle in
    // the QuickJS VM. The map is purely host-side metadata for
-@@ -1759,7 +1764,12 @@ export async function runWorkflowWithQuickJS(params: {
+@@ -1036,7 +1041,12 @@ export async function runWorkflowWithQuickJS(params: {
  
    try {
      let iteration = 0;
@@ -998,7 +843,7 @@ index 0b7ac75e..7342c53a 100644
        iteration++;
        // Re-check the event ceiling every turn: the loop appends events on
        // each continueWithEvents, so a single invocation can otherwise grow
-@@ -2628,9 +2638,9 @@ export async function runWorkflowWithQuickJS(params: {
+@@ -1916,9 +1926,9 @@ export async function runWorkflowWithQuickJS(params: {
        );
      };
  
@@ -1011,27 +856,27 @@ index 0b7ac75e..7342c53a 100644
        wfdiag('exit_suspended', { action: 'budget_exhausted_requeue' });
        await requeueImmediately();
        return;
-diff --git a/packages/core/src/runtime/quickjs-inline-window.test.ts b/packages/core/src/runtime/quickjs-inline-window.test.ts
+diff --git a/packages/core/src/runtime/spec8/quickjs-inline-window.test.ts b/packages/core/src/runtime/spec8/quickjs-inline-window.test.ts
 new file mode 100644
-index 00000000..edb10a15
+index 000000000..3c19276b8
 --- /dev/null
-+++ b/packages/core/src/runtime/quickjs-inline-window.test.ts
++++ b/packages/core/src/runtime/spec8/quickjs-inline-window.test.ts
 @@ -0,0 +1,97 @@
 +import {
 +  type CreateEventRequest,
-+  SPEC_VERSION_CURRENT,
 +  type WorkflowRun,
 +  type World,
 +} from '@workflow/world';
 +import { afterEach, expect, it, vi } from 'vitest';
++import { startQuickJSWorkflow } from '../quickjs-runtime.js';
++import { setWorld } from '../world.js';
++import { SPEC8_EVENT_SPEC_VERSION } from './constants.js';
 +import { runWorkflowWithQuickJS } from './quickjs-entrypoint.js';
-+import { startQuickJSWorkflow } from './quickjs-runtime.js';
 +import { executeStep } from './step-executor.js';
-+import { setWorld } from './world.js';
 +
 +vi.mock('@vercel/functions', () => ({ waitUntil: vi.fn() }));
-+vi.mock('./get-port-lazy.js', () => ({ getPortLazy: async () => 3000 }));
-+vi.mock('./quickjs-runtime.js', () => ({ startQuickJSWorkflow: vi.fn() }));
++vi.mock('../get-port-lazy.js', () => ({ getPortLazy: async () => 3000 }));
++vi.mock('../quickjs-runtime.js', () => ({ startQuickJSWorkflow: vi.fn() }));
 +vi.mock('./step-executor.js', () => ({ executeStep: vi.fn() }));
 +
 +afterEach(() => {
@@ -1048,7 +893,7 @@ index 00000000..edb10a15
 +  status: 'running',
 +  input: [],
 +  deploymentId: 'dpl_quickjs_inline_window',
-+  specVersion: SPEC_VERSION_CURRENT,
++  specVersion: SPEC8_EVENT_SPEC_VERSION,
 +  startedAt: now,
 +  createdAt: now,
 +  updatedAt: now,
@@ -1065,7 +910,7 @@ index 00000000..edb10a15
 +  const created: CreateEventRequest[] = [];
 +  const queued: { payload: any; opts: any }[] = [];
 +  setWorld({
-+    specVersion: SPEC_VERSION_CURRENT,
++    specVersion: SPEC8_EVENT_SPEC_VERSION,
 +    capabilities: {},
 +    events: {
 +      list: async () => ({ data: [], cursor: null, hasMore: false }),
@@ -1114,218 +959,49 @@ index 00000000..edb10a15
 +  expect(replays).toHaveLength(1);
 +  expect(replays[0].payload).toMatchObject({ runId: workflowRun.runId });
 +});
-diff --git a/packages/core/src/runtime/quickjs-runtime.test.ts b/packages/core/src/runtime/quickjs-runtime.test.ts
-index b584f6e2..119c1711 100644
---- a/packages/core/src/runtime/quickjs-runtime.test.ts
-+++ b/packages/core/src/runtime/quickjs-runtime.test.ts
-@@ -1842,6 +1842,61 @@ describe('VM snapshot/restore', () => {
-     }
-   });
- 
-+  it('drops settled step ops, so the pending scans do not grow with the run', async () => {
-+    // Every suspension and every event scans __pending. Keeping finished
-+    // steps there made each step cost O(steps so far).
-+    const { startQuickJSWorkflow } = await import('./quickjs-runtime.js');
-+    const run = makeRun();
-+    const steps = 40;
-+    const session = await startQuickJSWorkflow({
-+      workflowCode: `
-+        var step = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step//test//add");
-+        async function workflow() {
-+          var most = 0;
-+          for (var i = 0; i < ${steps}; i++) {
-+            await step(i);
-+            most = Math.max(most, globalThis.__pending.length);
-+          }
-+          return most;
-+        }
-+        globalThis.__private_workflows.set("workflow//test//workflow", workflow);
-+      `,
-+      workflowId: 'workflow//test//workflow',
-+      workflowRun: run,
-+      events: [runCreatedEvent(run)],
-+    });
-+    try {
-+      let result = session.result;
-+      for (let i = 0; i < steps; i++) {
-+        assert(result.suspended);
-+        const cid = result.suspended.pendingOperations[0].correlationId;
-+        const createdAt = new Date('2025-01-01T00:00:01Z');
-+        result = await session.continueWithEvents([
-+          {
-+            eventId: `evnt_${i}_created`,
-+            runId: run.runId,
-+            eventType: 'step_created' as const,
-+            correlationId: cid,
-+            eventData: { stepName: 'step//test//add' },
-+            createdAt,
-+          },
-+          {
-+            eventId: `evnt_${i}_completed`,
-+            runId: run.runId,
-+            eventType: 'step_completed' as const,
-+            correlationId: cid,
-+            eventData: { result: i },
-+            createdAt,
-+          },
-+        ] as never);
-+      }
-+      assert(result.completed);
-+      expect(unwrapResult(result.completed.result)).toBeLessThanOrEqual(2);
-+    } finally {
-+      session.dispose();
-+    }
-+  });
-+
-   it('exposes the current process.env after a restore, not the captured one', async () => {
-     const { startQuickJSWorkflow } = await import('./quickjs-runtime.js');
-     const run = makeRun();
-diff --git a/packages/core/src/runtime/quickjs-runtime.ts b/packages/core/src/runtime/quickjs-runtime.ts
-index 65d48359..600a88c0 100644
---- a/packages/core/src/runtime/quickjs-runtime.ts
-+++ b/packages/core/src/runtime/quickjs-runtime.ts
-@@ -1140,23 +1140,37 @@ const quickjsAssets = globalSingleton(
-   })
- );
- 
-+const WorkerAssetsKey = Symbol.for('@workflow/core//quickjsWorkerAssets');
-+
- function getCompiledAssets() {
-   if (!quickjsAssets.promise) {
--    quickjsAssets.promise = (async () => {
--      const [wasm, ...extensionModules] = await Promise.all([
--        WebAssemblyGlobal.compile(quickjsWasm),
--        ...quickjsExtensions.map((ext) =>
--          WebAssemblyGlobal.compile(ext.wasm as Uint8Array)
--        ),
--      ]);
--      return {
--        wasm,
--        extensions: quickjsExtensions.map((ext, i) => ({
--          ...ext,
--          wasm: extensionModules[i] as ExtensionDescriptor['wasm'],
--        })),
--      };
--    })();
-+    // Wrangler's static WASM imports arrive precompiled; workerd forbids
-+    // WebAssembly.compile() at request time. Node keeps its existing cache.
-+    const workerAssets = (
-+      globalThis as {
-+        [WorkerAssetsKey]?: {
-+          wasm: object;
-+          extensions: CompiledExtension[];
-+        };
-+      }
-+    )[WorkerAssetsKey];
-+    quickjsAssets.promise = workerAssets
-+      ? Promise.resolve(workerAssets)
-+      : (async () => {
-+          const [wasm, ...extensionModules] = await Promise.all([
-+            WebAssemblyGlobal.compile(quickjsWasm),
-+            ...quickjsExtensions.map((ext) =>
-+              WebAssemblyGlobal.compile(ext.wasm as Uint8Array)
-+            ),
-+          ]);
-+          return {
-+            wasm,
-+            extensions: quickjsExtensions.map((ext, i) => ({
-+              ...ext,
-+              wasm: extensionModules[i] as ExtensionDescriptor['wasm'],
-+            })),
-+          };
-+        })();
-     // On failure, clear the cache so a later invocation can retry rather
-     // than being stuck with a rejected promise forever.
-     quickjsAssets.promise.catch(() => {
-@@ -3055,12 +3069,22 @@ function dumpPendingOps(
-     // never collected again by either the suspension or the drain
-     // filter, so their cached bytes are dead weight; surface their cids
-     // so the host can evict them (see the byte-cache eviction below).
-+    // Settled ops other than hooks are also dropped from __pending: every
-+    // suspension and event scans it, so keeping them made each step cost
-+    // O(steps so far). A created hook stays, because abort() and the
-+    // terminal drain still look it up.
-     var settled = [];
--    globalThis.__pending.forEach(function(p){
-+    var pending = globalThis.__pending;
-+    var kept = 0;
-+    for (var i = 0; i < pending.length; i++) {
-+      var p = pending[i];
-       if (p.hasCreatedEvent && !globalThis.__resolvers[p.correlationId] && !p.abortRequested) {
-         settled.push(p.correlationId);
-+        if (p.type !== "hook") continue;
+diff --git a/packages/core/src/runtime/spec9/delivery.ts b/packages/core/src/runtime/spec9/delivery.ts
+index 78c5d666c..7ecbb215c 100644
+--- a/packages/core/src/runtime/spec9/delivery.ts
++++ b/packages/core/src/runtime/spec9/delivery.ts
+@@ -112,6 +112,7 @@ import {
+   type ReenqueueArgs,
+ } from '../deployment-guard.js';
+ import { readDynamicWorkflowMetadata } from '../dynamic-workflow.js';
++import { markEventLogRewritten } from '../event-log-memo.js';
+ import { maybeWarnApproachingEventLimit } from '../event-limit-warning.js';
+ import {
+   type EventCreator,
+@@ -2512,6 +2513,7 @@ async function runDelivery(
+             log.events.splice(i, 1);
+           }
+         }
++        markEventLogRewritten(log.events);
        }
--    });
-+      pending[kept++] = p;
-+    }
-+    pending.length = kept;
-     return { settled: settled, ops: ops.map(function(p){
-       var q = {};
-       for (var k in p) {
-diff --git a/packages/core/src/runtime/step-executor.test.ts b/packages/core/src/runtime/step-executor.test.ts
-index 5344ff10..3c24e082 100644
---- a/packages/core/src/runtime/step-executor.test.ts
-+++ b/packages/core/src/runtime/step-executor.test.ts
-@@ -14,7 +14,7 @@ import { dehydrateStepArguments, hydrateStepError } from '../serialization.js';
- import { contextStorage } from '../step/context-storage.js';
- import { getWritable } from '../step/writable-stream.js';
- import { STREAM_NAME_SYMBOL, STREAM_SERVER_RUN_ID_SYMBOL } from '../symbols.js';
--import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
-+import { getComputeInstanceId } from './compute-instance.js';
- import { executeStep } from './step-executor.js';
- import {
-   UNSERIALIZABLE_STEP_INPUT_MARKER,
-@@ -827,7 +827,7 @@ describe('executeStep — compute instance stamping', () => {
-     expect(started).toHaveLength(1);
-     expect(started[0]?.[2]).toMatchObject({
-       requestId: 'req_step_executor',
--      computeInstanceId: COMPUTE_INSTANCE_ID,
-+      computeInstanceId: getComputeInstanceId(),
-     });
-     // An executor write names no log position: it has no log to merge a
-     // skipped-slot report into, so it must not ask the World to read one.
-@@ -864,7 +864,7 @@ describe('executeStep — compute instance stamping', () => {
-     );
-     expect(started?.[2]).toMatchObject({
-       requestId: 'req_unregistered',
--      computeInstanceId: COMPUTE_INSTANCE_ID,
-+      computeInstanceId: getComputeInstanceId(),
-     });
-   });
+       speculativeEvents.clear();
+       const writes = [...repairWrites.splice(0), ...pendingAbsorbs.splice(0)];
+diff --git a/packages/core/src/runtime/spec9/log-index.ts b/packages/core/src/runtime/spec9/log-index.ts
+index 1cc3b24a7..02cacb5d6 100644
+--- a/packages/core/src/runtime/spec9/log-index.ts
++++ b/packages/core/src/runtime/spec9/log-index.ts
+@@ -4,6 +4,7 @@ import {
+   FIRST_EVENT_SLOT,
+   requireEventSlot,
+ } from '@workflow/world';
++import { markEventLogRewritten } from '../event-log-memo.js';
+ import { type EventSlotGap, findEventSlotGap } from '../helpers.js';
  
-@@ -917,7 +917,7 @@ describe('executeStep — compute instance stamping', () => {
-       ([, data]) => data.eventType === 'step_started'
-     );
-     expect(started?.[2]).toMatchObject({
--      computeInstanceId: COMPUTE_INSTANCE_ID,
-+      computeInstanceId: getComputeInstanceId(),
-     });
-     expect(started?.[2]?.requestId).toBeUndefined();
-   });
-diff --git a/packages/core/src/runtime/step-executor.ts b/packages/core/src/runtime/step-executor.ts
-index 746489d4..5584b06b 100644
---- a/packages/core/src/runtime/step-executor.ts
-+++ b/packages/core/src/runtime/step-executor.ts
-@@ -51,7 +51,7 @@ import {
-   normalizeUnknownError,
-   promoteAbortErrorToFatal,
- } from '../types.js';
--import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
-+import { getComputeInstanceId } from './compute-instance.js';
- import {
-   isOptimisticInlineStartEnabled,
-   isOptimisticInlineStartExplicitlyDisabled,
-@@ -403,7 +403,7 @@ export async function executeStep(
-   // requestId as analytics `vercelId`, while computeInstanceId identifies the
-   // worker that executed the step.
-   const stepStartedEventParams: CreateEventParams = {
--    computeInstanceId: COMPUTE_INSTANCE_ID,
-+    computeInstanceId: getComputeInstanceId(),
-     ...(params.requestId ? { requestId: params.requestId } : {}),
-   };
- 
+ /**
+@@ -166,6 +167,8 @@ export class EventLogIndex {
+       target.sort(byEventId);
+       this.sorted = true;
+     }
++    // Inserted or sorted: positions the memos read may hold other events.
++    if (!inOrder) markEventLogRewritten(target);
+     this.advanceWatermark();
+     this.trackedLength = target.length;
+     this.trackedTail = target[target.length - 1];
 diff --git a/packages/core/src/runtime/step-latency.ts b/packages/core/src/runtime/step-latency.ts
-index 26ccda0a..61a9db2c 100644
+index 0c933d81d..ba3aa478b 100644
 --- a/packages/core/src/runtime/step-latency.ts
 +++ b/packages/core/src/runtime/step-latency.ts
 @@ -1,4 +1,5 @@
@@ -1374,52 +1050,8 @@ index 26ccda0a..61a9db2c 100644
      eventCount = events.length;
    }
  
-diff --git a/packages/core/src/runtime/suspension-handler.test.ts b/packages/core/src/runtime/suspension-handler.test.ts
-index c82489cf..24ab7306 100644
---- a/packages/core/src/runtime/suspension-handler.test.ts
-+++ b/packages/core/src/runtime/suspension-handler.test.ts
-@@ -22,7 +22,7 @@ import {
-   hydrateStepError,
- } from '../serialization.js';
- import { runWorkflow } from '../workflow.js';
--import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
-+import { getComputeInstanceId } from './compute-instance.js';
- import { maxEventSlot, stepDispatchIdempotencyKey } from './helpers.js';
- import { FORCE_CLAIM_WAKE_REPUBLISH_WINDOW_MS } from './hook-wake.js';
- import { ReplayRecoveryReporter } from './replay-recovery-reporter.js';
-@@ -2557,7 +2557,7 @@ describe('handleSuspension batched fan-out', () => {
-       expect(s1Created.eventData.input).toBeDefined();
-       expect(s1Started.eventData.input).toBeUndefined();
-       expect(s1Started.eventData.ownerMessageId).toBe('msg_owner_1');
--      expect(events[1].computeInstanceId).toBe(COMPUTE_INSTANCE_ID);
-+      expect(events[1].computeInstanceId).toBe(getComputeInstanceId());
-       expect(events[0].computeInstanceId).toBeUndefined();
-       // Claims: both inline steps owned, running attempt 1, input attached
-       // (batch responses return refs lazily — the body hydrates local bytes).
-diff --git a/packages/core/src/runtime/suspension-handler.ts b/packages/core/src/runtime/suspension-handler.ts
-index f3bcf5be..fde6c2c8 100644
---- a/packages/core/src/runtime/suspension-handler.ts
-+++ b/packages/core/src/runtime/suspension-handler.ts
-@@ -43,7 +43,7 @@ import {
- } from '../serialization.js';
- import * as Attribute from '../telemetry/semantic-conventions.js';
- import { getAbortStreamIdFromToken } from '../util.js';
--import { COMPUTE_INSTANCE_ID } from './compute-instance.js';
-+import { getComputeInstanceId } from './compute-instance.js';
- import {
-   getMaxInlineSteps,
-   isBatchTransitionsEnabled,
-@@ -1605,7 +1605,7 @@ export async function handleSuspension({
-               // the compute-instance attribution the single claim sends via
-               // CreateEventParams.
-               ...(entry.kind === 'inline-started'
--                ? { computeInstanceId: COMPUTE_INSTANCE_ID }
-+                ? { computeInstanceId: getComputeInstanceId() }
-                 : {}),
-             })),
-             // Per-write request attribution, same as the single path's
 diff --git a/packages/core/src/runtime/vm-mode.test.ts b/packages/core/src/runtime/vm-mode.test.ts
-index 1e9ffde1..42c65513 100644
+index 1e9ffde11..42c655131 100644
 --- a/packages/core/src/runtime/vm-mode.test.ts
 +++ b/packages/core/src/runtime/vm-mode.test.ts
 @@ -7,6 +7,7 @@ import {
@@ -1462,7 +1094,7 @@ index 1e9ffde1..42c65513 100644
    it('returns undefined when unset or empty', () => {
      expect(getSnapshotThresholdFromEnv({})).toBeUndefined();
 diff --git a/packages/core/src/runtime/vm-mode.ts b/packages/core/src/runtime/vm-mode.ts
-index 19b421de..254b647f 100644
+index 19b421de7..254b647fd 100644
 --- a/packages/core/src/runtime/vm-mode.ts
 +++ b/packages/core/src/runtime/vm-mode.ts
 @@ -11,6 +11,11 @@
@@ -1516,7 +1148,7 @@ index 19b421de..254b647f 100644
  
  /**
 diff --git a/packages/core/src/runtime/world.ts b/packages/core/src/runtime/world.ts
-index ca4ae086..2653b57b 100644
+index 3288634e6..1fb6f5308 100644
 --- a/packages/core/src/runtime/world.ts
 +++ b/packages/core/src/runtime/world.ts
 @@ -5,18 +5,10 @@ import {
@@ -1559,21 +1191,8 @@ index ca4ae086..2653b57b 100644
      return createLocalWorld({
        dataDir: process.env.WORKFLOW_LOCAL_DATA_DIR,
      });
-diff --git a/packages/core/src/telemetry/semantic-conventions.ts b/packages/core/src/telemetry/semantic-conventions.ts
-index e5e05215..57b21a09 100644
---- a/packages/core/src/telemetry/semantic-conventions.ts
-+++ b/packages/core/src/telemetry/semantic-conventions.ts
-@@ -331,7 +331,7 @@ export const WorkflowRouteModuleBodyInitMs = SemanticConvention<number>(
- );
- 
- /**
-- * Compute instance handling this route: the synthesized `COMPUTE_INSTANCE_ID`.
-+ * Compute instance handling this route: the synthesized compute instance ID.
-  * Uses OTEL `faas.instance` (execution-environment id, reused across
-  * invocations to the same function):
-  * https://opentelemetry.io/docs/specs/semconv/attributes-registry/faas/
 diff --git a/packages/core/src/vm/index.ts b/packages/core/src/vm/index.ts
-index d3fe0312..f6cec675 100644
+index d3fe0312a..f6cec6751 100644
 --- a/packages/core/src/vm/index.ts
 +++ b/packages/core/src/vm/index.ts
 @@ -50,12 +50,44 @@ function toDigestInput(
@@ -1654,7 +1273,7 @@ index d3fe0312..f6cec675 100644
        fixedTimestamp = timestamp;
 diff --git a/packages/core/src/vm/isolate.test.ts b/packages/core/src/vm/isolate.test.ts
 new file mode 100644
-index 00000000..f0e7aa43
+index 000000000..f0e7aa43a
 --- /dev/null
 +++ b/packages/core/src/vm/isolate.test.ts
 @@ -0,0 +1,82 @@
@@ -1742,7 +1361,7 @@ index 00000000..f0e7aa43
 +});
 diff --git a/packages/core/src/vm/isolate.ts b/packages/core/src/vm/isolate.ts
 new file mode 100644
-index 00000000..99f4eae7
+index 000000000..99f4eae70
 --- /dev/null
 +++ b/packages/core/src/vm/isolate.ts
 @@ -0,0 +1,122 @@
@@ -1869,7 +1488,7 @@ index 00000000..99f4eae7
 +  }
 +}
 diff --git a/packages/core/src/workflow.test.ts b/packages/core/src/workflow.test.ts
-index 523edeb3..cef7fd56 100644
+index 1c0158639..b850ab58e 100644
 --- a/packages/core/src/workflow.test.ts
 +++ b/packages/core/src/workflow.test.ts
 @@ -8,6 +8,7 @@ import { DEFERRED_CHECK_DELAY_MS } from './events-consumer.js';
@@ -1877,10 +1496,10 @@ index 523edeb3..cef7fd56 100644
  import { ReplayPayloadCache } from './replay-payload-cache.js';
  import { compileDynamicWorkflow } from './runtime/dynamic-workflow.js';
 +import { markEventLogRewritten } from './runtime/event-log-memo.js';
- import { setWorld } from './runtime/world.js';
+ import { pendingQueueDrain } from './runtime/spec9/suspension-handler.js';
+ import { getWorld, setWorld } from './runtime/world.js';
  import {
-   dehydrateStepReturnValue,
-@@ -414,6 +415,41 @@ async function workflow() {
+@@ -415,6 +416,41 @@ async function workflow() {
        });
      });
  
@@ -1923,18 +1542,18 @@ index 523edeb3..cef7fd56 100644
        const run = await sessionRun('wrun_retained_mid_divergence');
        const workflowCode = `
 diff --git a/packages/core/src/workflow.ts b/packages/core/src/workflow.ts
-index 56fce10a..507206e9 100644
+index 283c7f111..7d6b19af4 100644
 --- a/packages/core/src/workflow.ts
 +++ b/packages/core/src/workflow.ts
-@@ -24,6 +24,7 @@ import type { WorkflowOrchestratorContext } from './private.js';
+@@ -28,6 +28,7 @@ import type { WorkflowOrchestratorContext } from './private.js';
  import { isDeliveryIdle } from './private.js';
  import { describeDivergenceContext } from './replay-divergence.js';
  import { ReplayPayloadCache } from './replay-payload-cache.js';
 +import { eventLogRevision } from './runtime/event-log-memo.js';
  import { getPortLazy } from './runtime/get-port-lazy.js';
  import { runIdCreatedAt } from './runtime/run-id-time.js';
- import { handleSuspension } from './runtime/suspension-handler.js';
-@@ -52,7 +53,12 @@ import {
+ import type { RunStartHook } from './runtime/start-hook-binding.js';
+@@ -61,7 +62,12 @@ import {
    trace,
  } from './telemetry.js';
  import { getWorkflowRunStreamId } from './util.js';
@@ -1947,7 +1566,7 @@ index 56fce10a..507206e9 100644
  import { getCachedWorkflowScript } from './vm/script-cache.js';
  import {
    createAbortSignalStatics,
-@@ -435,11 +441,12 @@ async function createWorkflowSessionInner(
+@@ -468,11 +474,12 @@ async function createWorkflowSessionInner(
    // below. Most of the bootstrap lives in this function (EventsConsumer,
    // workflow globals, Web API shims), so tracing createContext() alone would
    // materially under-report VM startup.
@@ -1961,7 +1580,7 @@ index 56fce10a..507206e9 100644
      seed: `${workflowRun.runId}:${workflowRun.workflowName}:${workflowRun.deploymentId}`,
      fixedTimestamp,
    });
-@@ -1187,12 +1194,20 @@ async function createWorkflowSessionInner(
+@@ -1239,12 +1246,20 @@ async function createWorkflowSessionInner(
    // Reuse compiled scripts by `(code, filename)`: compilation is deterministic
    // and the filename preserves workflow source attribution in stack traces.
    // The bundle registers workflows on `globalThis.__private_workflows`.
@@ -1987,9 +1606,9 @@ index 56fce10a..507206e9 100644
    });
  
    if (typeof workflowFn !== 'function') {
-@@ -1317,23 +1332,37 @@ async function createWorkflowSessionInner(
-     workflowFn(...args)
-   );
+@@ -1421,6 +1436,13 @@ async function createWorkflowSessionInner(
+     return fresh.length > 0 ? fresh : undefined;
+   };
  
 +  // The array the consumer's events were last copied from, and its revision
 +  // then (see event-log-memo.ts).
@@ -2001,9 +1620,10 @@ index 56fce10a..507206e9 100644
    const session: WorkflowSession = {
      workflowRun,
      argumentCount: args.length,
-     async resume(nextEvents) {
-       switch (state.type) {
-         case 'suspended': {
+@@ -1443,17 +1465,24 @@ async function createWorkflowSessionInner(
+             eventsConsumer.append(fresh);
+             return waitForExecution(workflowBody, interruption);
+           }
 -          // The full O(known events) prefix compare is required: the runtime
 -          // usually grows one array in place, but its wait-completion and
 -          // stale-reload paths REPLACE the array with a fresh full fetch, so
@@ -2034,7 +1654,7 @@ index 56fce10a..507206e9 100644
            if (!isStrictExtension) {
              state = { type: 'replay' };
              return { type: 'replay' };
-@@ -1342,7 +1371,11 @@ async function createWorkflowSessionInner(
+@@ -1462,7 +1491,11 @@ async function createWorkflowSessionInner(
            state = { type: 'running', interruption };
            workflowContext.suspensionGeneration++;
            workflowTraceContext.refresh();
@@ -2047,3 +1667,15 @@ index 56fce10a..507206e9 100644
            return waitForExecution(workflowBody, interruption);
          }
          case 'replay':
+diff --git a/packages/workflow/src/runtime.ts b/packages/workflow/src/runtime.ts
+index 5167490b1..ecc96c317 100644
+--- a/packages/workflow/src/runtime.ts
++++ b/packages/workflow/src/runtime.ts
+@@ -9,6 +9,7 @@ export {
+   type HealthCheckOptions,
+   type HealthCheckResult,
+   healthCheck,
++  setPrecompiledQuickJSModules,
+   setWorld,
+   workflowEntrypoint,
+ } from '@workflow/core/runtime';

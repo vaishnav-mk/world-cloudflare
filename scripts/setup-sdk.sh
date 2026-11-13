@@ -3,7 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 sdk="$root/.vendor/workflow-sdk"
-revision=eb9acbc8ba0041e2cbcd06049c29e56568b7ece3
+revision=d18aff22acec8a3f57237e58624d7a4d25ca7eed
 patch="$root/patches/workflow-sdk-cloudflare-workers.patch"
 
 if [[ ! -d "$sdk/.git" ]]; then
@@ -16,6 +16,7 @@ if ! git -C "$sdk" apply --reverse --check "$patch" 2>/dev/null; then
   git -C "$sdk" apply "$patch"
 fi
 
-(cd "$sdk" && pnpm install --dangerously-allow-all-builds && pnpm exec turbo run build --filter='@workflow/cli...' --filter='workflow...')
+# The SDK sets engineStrict for Node 24; it builds on newer Node too.
+(cd "$sdk" && export pnpm_config_engine_strict=false && pnpm install --dangerously-allow-all-builds && pnpm exec turbo run build --filter='@workflow/cli...' --filter='workflow...')
 # The workspace overrides link `workflow` and `@workflow/cli` to the patched checkout.
 (cd "$root" && pnpm install --dangerously-allow-all-builds && pnpm run build:workflow)
