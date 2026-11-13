@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
+import { queueShardFor, storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { parse } from 'devalue';
 import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY } from '@workflow/world';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
@@ -268,6 +268,37 @@ describe('v5 event storage in SQLite DO', () => {
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(id);
     expect((await env.SINK.getByName('sink').received()).filter((entry) => entry === id)).toHaveLength(1);
     expect(await stub.pendingStepDispatchSlot(runId, 'same-step', 'double')).toBe(0);
+  });
+
+  it('publishes a message on the queue shard the SDK publishes it on: wakes by run, steps by key', async () => {
+    const runId = crypto.randomUUID();
+    await newRun(runId);
+    await store.events.create(runId, { eventType: 'run_started' });
+    await store.events.create(runId, { eventType: 'hook_created', correlationId: 'route-hook', eventData: { token: crypto.randomUUID() } });
+    const received = await store.events.create(runId, {
+      eventType: 'hook_received', correlationId: 'route-hook', eventData: { payload: bytes('1') },
+    });
+    await store.events.create(runId, {
+      eventType: 'step_created', correlationId: 'route-step', eventData: { stepName: 'double', input: bytes('2') },
+    });
+    const queueName = `${getQueueTopicPrefix('workflow')}example`;
+    const keysOn = (shard: string) => runInDurableObject(env.QUEUE_SHARD.getByName(shard), (_shard, state) =>
+      state.storage.sql.exec('SELECT key FROM queue_dedup').toArray().map((row) => String(row.key)));
+    // The outbox republishes the hook wake and the step.
+    await env.WORLD_STORE.getByName(storeShardFor(runId)).drainOutbox();
+    // The SDK publishes the same step, and a hook wake of its own.
+    const queue = createQueue(env);
+    const step = { runId, stepId: 'route-step', stepName: 'double' };
+    const stepKey = `${queueName}:route-step:a0eb0f08`;
+    const stepId = `qmsg_${Buffer.from(await crypto.subtle.digest('SHA-256', bytes(stepKey))).toString('hex')}`;
+    expect((await queue.queue(queueName, step, { deploymentId: 'test-v1', idempotencyKey: 'route-step:a0eb0f08' })).messageId).toBe(stepId);
+    await queue.queue(queueName, { runId, hookResumeTiming: { resumeRequestedAtMs: 1, queuePublishRequestedAtMs: 1 } }, {
+      deploymentId: 'test-v1', idempotencyKey: `hook-${runId}`,
+    });
+    expect(await keysOn(queueShardFor(runId, { runId }))).toEqual(expect.arrayContaining([
+      `hook-wake:${runId}:${Number(received.event!.eventId.slice(5))}`, `${queueName}:hook-${runId}`,
+    ]));
+    expect(await keysOn(queueShardFor(runId, step, stepKey))).toContain(stepKey);
   });
 
   it('keeps step debt when a hook wake publishes and never creates synthetic step debt', async () => {

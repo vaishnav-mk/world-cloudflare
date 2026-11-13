@@ -556,7 +556,8 @@ export class WorldStore extends DurableObject<WorldEnv> {
   }
 
   async drainOutbox(): Promise<number> {
-    const drained = await drainOutbox(this.#db, this.#outbox, (key, runId) => this.env.QUEUE_SHARD.getByName(queueShardFor(key, runId)));
+    const drained = await drainOutbox(this.#db, this.#outbox,
+      (runId, payload, key) => this.env.QUEUE_SHARD.getByName(queueShardFor(runId, payload, key)));
     await this.#push();
     const due = [this.#outbox.nextDueAt(), this.#releases.nextDueAt()].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));

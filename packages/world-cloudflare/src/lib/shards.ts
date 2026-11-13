@@ -3,6 +3,7 @@ import { decodeTime } from 'ulid';
 import { CRON_WAKES_PER_TICK, DEFAULT_SHARD_EPOCHS, QUEUE_SHARD_NAME } from '../constants.js';
 import type { ShardEpoch, WorldEnv } from '../types.js';
 import { fnv1a32Hex } from './hash.js';
+import { isStepMessage } from './messages.js';
 
 /**
  * Shard epochs. A run's ULID carries its creation time, which picks the epoch, and the epoch's
@@ -73,12 +74,15 @@ export function tokenShardFor(token: string): string {
 }
 
 /**
- * The queue shard for a message: a stable hash of its idempotency key, or of its run ID when it has
- * none, within its run's epoch. Deduplication lives in each shard, so every repeat of a key reaches
- * the same one. A message with no run, such as a health check, uses the first epoch.
+ * The queue shard for a message, within its run's epoch. A step message hashes by its idempotency
+ * key (`key`, as the shard deduplicates it), so a run's steps spread over the shards. Every other
+ * message hashes by its run, so one shard holds all of a run's replays and runs them one at a time.
+ * A key belongs to one run and one kind of message, so every repeat of it reaches the shard that
+ * deduplicates it. A message with no run, such as a health check, uses the first epoch.
  */
-export function queueShardFor(routingKey: string, runId: string): string {
+export function queueShardFor(runId: string, payload: unknown, key?: string): string {
   const { epoch, tag } = epochOf(runId);
+  const routingKey = key !== undefined && isStepMessage(payload) ? key : runId;
   return `${QUEUE_SHARD_NAME}-${tag}${bucket(routingKey, epoch.queue)}`;
 }
 

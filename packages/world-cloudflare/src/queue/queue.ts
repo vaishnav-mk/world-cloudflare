@@ -105,7 +105,7 @@ async function prepare(
       deduplicationKey: key, payloadDigest: digest,
     },
     claim: outboxClaim(message),
-    shard: queueShardFor(key ?? runId, runId),
+    shard: queueShardFor(runId, message, key),
   };
 }
 

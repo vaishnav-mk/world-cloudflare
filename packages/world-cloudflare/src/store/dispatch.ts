@@ -9,6 +9,7 @@ import type { Outbox } from './outbox.js';
 import type { OutboxRow } from './rows.js';
 
 type Message = { key: string; body: unknown };
+type ShardFor = (runId: string, payload: unknown, key: string) => DurableObjectStub<QueueShard>;
 
 type Plan =
   | { action: DispatchAction.Settle }
@@ -43,9 +44,7 @@ export function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlati
 }
 
 /** Publishes due outbox rows. Returns how many rows were due. */
-export async function drainOutbox(
-  db: Db, outbox: Outbox, shardFor: (key: string, runId: string) => DurableObjectStub<QueueShard>,
-): Promise<number> {
+export async function drainOutbox(db: Db, outbox: Outbox, shardFor: ShardFor): Promise<number> {
   const due = outbox.due(Date.now(), OUTBOX_DRAIN_BATCH);
   for (const row of due) {
     const plan = planFor(db, outbox, row);
@@ -101,8 +100,7 @@ function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
 }
 
 async function publish(
-  outbox: Outbox, shardFor: (key: string, runId: string) => DurableObjectStub<QueueShard>, row: OutboxRow, message: Message,
-  stillOwed: () => boolean,
+  outbox: Outbox, shardFor: ShardFor, row: OutboxRow, message: Message, stillOwed: () => boolean,
 ): Promise<void> {
   // A dead-lettered key is spent forever, so each redrive needs a new one.
   const key = row.redrive ? `${message.key}:redrive-${row.redrive}` : message.key;
@@ -110,8 +108,8 @@ async function publish(
   const [id, digest] = await Promise.all([messageIdFor(key), sha256Hex(body)]);
   if (!stillOwed()) return;
   try {
-    // The shard that holds this key's deduplication, the same one the SDK's own publish reaches.
-    await shardFor(key, row.run_id).enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
+    // The shard the SDK's own publish of this message reaches, which holds its key's deduplication.
+    await shardFor(row.run_id, message.body, key).enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
     outbox.publishRow(row);
   } catch (error) {
     console.error('Workflow dispatch recovery failed', { runId: row.run_id, slot: row.slot, error });

@@ -21,10 +21,31 @@ describe('shard epochs', () => {
     const current = runIdAt(Date.now());
     expect(storeShardFor(old)).toMatch(/^store-[0-3]$/);
     expect(storeShardFor(current)).toMatch(new RegExp(`^store-e${SECOND}-[0-7]$`));
-    expect(queueShardFor('key', old)).toMatch(/^flow-[0-3]$/);
-    expect(queueShardFor('key', current)).toMatch(new RegExp(`^flow-e${SECOND}-[0-7]$`));
+    expect(queueShardFor(old, { runId: old })).toMatch(/^flow-[0-3]$/);
+    expect(queueShardFor(current, { runId: current })).toMatch(new RegExp(`^flow-e${SECOND}-[0-7]$`));
     expect(storeShardFor('wrun_not-a-ulid')).toMatch(/^store-[0-3]$/);
     expect(storeShardFor(current)).toBe(storeShardFor(current));
+  });
+
+  it("routes a run's replays by the run and its steps by key", () => {
+    const runId = runIdAt(Date.now());
+    const run = queueShardFor(runId, { runId });
+    const replays = [
+      { runId, runInput: { input: new Uint8Array(1), deploymentId: 'd', workflowName: 'w', specVersion: 3 } },
+      { runId, hookResumeTiming: { resumeRequestedAtMs: 1, queuePublishRequestedAtMs: 1 } },
+      { runId, waitContinuation: { correlationId: 'wait_1', attempt: 0 } },
+      { runId, waitContinuation: { correlationId: 'wait_1', attempt: 0, resumeAtMs: 9, hopAtMs: 5 } },
+    ];
+    for (const [index, payload] of replays.entries()) expect(queueShardFor(runId, payload, `q:key-${index}`)).toBe(run);
+    const steps = Array.from({ length: 32 }, (_, index) => {
+      const payload = { runId, stepId: `step_${index}`, stepName: 'double' };
+      const key = `q:step_${index}:a0eb0f08`;
+      // Every repeat of a step's key reaches the same shard, whatever else its payload carries.
+      expect(queueShardFor(runId, { ...payload, requestedAt: new Date() }, key)).toBe(queueShardFor(runId, payload, key));
+      return queueShardFor(runId, payload, key);
+    });
+    expect(new Set(steps).size).toBeGreaterThan(1);
+    for (const shard of steps) expect(shard).toMatch(new RegExp(`^flow-e${SECOND}-[0-7]$`));
   });
 
   it('keeps hook tokens on the first epoch', () => {

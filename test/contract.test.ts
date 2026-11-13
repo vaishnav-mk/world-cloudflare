@@ -342,9 +342,10 @@ describe('World v5 contract (workerd bindings)', () => {
     const first = await world.queue(name, message, options);
     expect(first.messageId).toMatch(/^qmsg_[a-f0-9]{64}$/);
     expect((await world.queue(name, message, options)).messageId).toBe(first.messageId);
-    expect((await world.queue(name, { runId: 'different' }, { ...options, delaySeconds: 3 })).messageId)
+    // A repeat may carry a different payload; a key always belongs to one run.
+    expect((await world.queue(name, { ...message, requestedAt: new Date() }, { ...options, delaySeconds: 3 })).messageId)
       .toBe(first.messageId);
-    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor(`${name}:${options.idempotencyKey}`, message.runId)));
+    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor(message.runId, message)));
     expect(await env.SINK.getByName('sink').received()).not.toContain(first.messageId);
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(first.messageId);
     expect((await env.SINK.getByName('sink').received()).filter((id) => id === first.messageId)).toHaveLength(1);
