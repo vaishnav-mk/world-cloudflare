@@ -6,7 +6,7 @@ import { world } from '../src/world.js';
 const headers = {};
 const MiB = 1024 * 1024;
 
-async function startRun(name: string, value: number): Promise<string> {
+async function startRun(name: string, value: number | number[]): Promise<string> {
   const response = await SELF.fetch('https://local/runs', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, value }),
   });
@@ -245,6 +245,15 @@ it('streams a 12 MiB chunk', async () => {
   expect((await stream.arrayBuffer()).byteLength).toBe(12 * MiB);
   expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 12 * MiB });
 }, 60_000);
+
+it('passes a 256 MiB byte stream in 64 MiB chunks from one step to the next', async () => {
+  const runId = await startRun('streamBytes', [256, 64]);
+  const result = await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json() as { value: unknown };
+  // The reading step checked every byte against the pattern the writing step made.
+  expect(result.value).toMatchObject({ bytes: 256 * MiB, firstMismatch: -1 });
+  // Each chunk is an R2 object, and the steps' payloads carry only the stream's name.
+  expect((await payloadObjects(runId)).map(({ size }) => size)).toEqual([64 * MiB, 64 * MiB, 64 * MiB, 64 * MiB]);
+}, 120_000);
 
 it('resumes a hook with a 12 MB payload', async () => {
   const runId = await startRun('hookPayload', 0);

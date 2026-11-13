@@ -5,15 +5,21 @@ import type { RouteContext } from '../router.js';
 import { world } from '../world.js';
 import { DEFAULT_WORKFLOW, isWorkflowName, workflows } from '../workflows.js';
 
-/** `POST /runs` with `{ "name"?: string, "value": number }`. */
+const MAX_ARGS = 4;
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+
+/** `POST /runs` with `{ "name"?: string, "value": number | number[] }`; an array is the workflow's arguments. */
 export async function startRun({ request }: RouteContext): Promise<Response> {
   const body = await readJson(request);
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Invalid JSON');
   const { value, name } = body as { value?: unknown; name?: unknown };
-  if (typeof value !== 'number' || !Number.isFinite(value)) throw new HttpError(400, 'Invalid value');
+  const args = Array.isArray(value) ? value : [value];
+  if (args.length === 0 || args.length > MAX_ARGS || !args.every(isFiniteNumber)) throw new HttpError(400, 'Invalid value');
   const workflow = name ?? DEFAULT_WORKFLOW;
   if (!isWorkflowName(workflow)) throw new HttpError(400, 'Unknown workflow');
-  const run = await start(workflows[workflow], [value]);
+  // By ID, because the workflows' argument lists differ.
+  const { workflowId } = workflows[workflow];
+  const run = await start({ workflowId }, args);
   return Response.json({ runId: run.runId }, { status: 202 });
 }
 
