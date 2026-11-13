@@ -22,7 +22,7 @@
     "drizzle-orm": "0.45.4",
     "durability": "5.2.1",
     "ulid": "3.0.2",
-    "workers-qb": "1.15.0"
+    "workers-qb": "1.16.0"
   },
   "devDependencies": {
     "drizzle-kit": "0.31.11"
