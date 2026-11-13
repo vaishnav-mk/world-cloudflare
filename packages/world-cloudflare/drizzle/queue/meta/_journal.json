@@ -15,6 +15,13 @@
       "when": 1792765569171,
       "tag": "0001_inflight",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794612631614,
+      "tag": "0002_delivery_counts",
+      "breakpoints": true
     }
   ]
 }

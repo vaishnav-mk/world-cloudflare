@@ -13,12 +13,12 @@ const tables = (sql: SqlStorage) => sql.exec<{ name: string }>(
 it('creates each object’s tables on first use', async () => {
   await runInDurableObject(env.WORLD_STORE.getByName(crypto.randomUUID()), (_store, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining([
-      'directory_outbox', 'directory_releases', 'dispatch_outbox', 'events', 'hooks', 'runs', 'steps', 'token_releases',
-      'tokens', 'waits',
+      'directory_outbox', 'directory_releases', 'dispatch_outbox', 'events', 'forced_disposals', 'hooks', 'runs', 'steps',
+      'token_releases', 'token_takeovers', 'tokens', 'waits',
     ]));
   });
   await runInDurableObject(env.QUEUE_SHARD.getByName(crypto.randomUUID()), (_shard, state) => {
-    expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['inflight', 'queue_dedup']));
+    expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['delivery_counts', 'inflight', 'queue_dedup']));
   });
   await runInDurableObject(env.RUN_STREAMS.getByName(crypto.randomUUID()), (_streams, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['chunks', 'snapshot', 'snapshot_parts', 'streams']));
@@ -68,10 +68,11 @@ it('applies the baselines over tables created before Drizzle, keeping their rows
       newer: [
         'DROP TABLE directory_outbox', 'DROP TABLE directory_releases', 'ALTER TABLE runs DROP COLUMN index_slot',
         'DROP TABLE tokens', 'DROP TABLE token_releases',
+        'DROP TABLE forced_disposals', 'DROP TABLE token_takeovers', 'ALTER TABLE runs DROP COLUMN seq_in_band',
       ] },
     { namespace: env.QUEUE_SHARD, migrations: queueMigrations,
       seed: `INSERT INTO queue_dedup (key, id, queue_name, payload_digest, delay_ms) VALUES ('kept', 'm', 'q', 'd', 0)`,
-      read: 'SELECT key AS id FROM queue_dedup', newer: ['DROP TABLE inflight'] },
+      read: 'SELECT key AS id FROM queue_dedup', newer: ['DROP TABLE inflight', 'DROP TABLE delivery_counts'] },
     { namespace: env.RUN_STREAMS, migrations: streamsMigrations,
       seed: `INSERT INTO streams (name) VALUES ('kept')`,
       read: 'SELECT name AS id FROM streams', newer: ['DROP TABLE snapshot', 'DROP TABLE snapshot_parts'] },

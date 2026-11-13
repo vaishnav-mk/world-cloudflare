@@ -20,6 +20,11 @@ export const runs = sqliteTable('runs', {
    * last event slot when the copy was pushed. Null for a run this store holds. Nothing writes it now.
    */
   index_slot: integer('index_slot'),
+  /**
+   * Spec 9 runs: positions allocated to in-band writes, the in-band fence's count. Null for runs
+   * below spec 9, which have no fence.
+   */
+  seq_in_band: integer('seq_in_band'),
 }, (table) => [index('runs_created').on(table.created_at, table.id)]);
 
 export const steps = sqliteTable('steps', {
@@ -102,6 +107,35 @@ export const tokenReleases = sqliteTable('token_releases', {
   next_at: integer('next_at').notNull(),
 });
 
+/**
+ * Hooks another run took over with a forced claim, and what took them. A row also stands for a
+ * hook not created yet, so its creation is refused once it commits. Never deleted.
+ */
+export const forcedDisposals = sqliteTable('forced_disposals', {
+  hook_id: text('hook_id').primaryKey(),
+  run_id: text('run_id').notNull(),
+  token: text('token').notNull(),
+  claimed_by_run_id: text('claimed_by_run_id').notNull(),
+  claimed_by_hook_id: text('claimed_by_hook_id').notNull(),
+  /** The encoded `HookClaimedFrom` the takeover answered with, so a retry gets the same answer. */
+  claimed_from: text('claimed_from').notNull(),
+});
+
+/**
+ * On a token shard: forced claims whose holder has not yet confirmed the disposal. The token moves
+ * to the claimer only after its holder's store disposed of the hook, so a delivery that resolved
+ * the holder first is refused rather than lost. The alarm retries a row a failed call left.
+ */
+export const tokenTakeovers = sqliteTable('token_takeovers', {
+  token: text('token').primaryKey(),
+  /** The encoded hook that holds the token. */
+  holder: text('holder').notNull(),
+  /** The encoded hook taking it over. */
+  claimer: text('claimer').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  next_at: integer('next_at').notNull(),
+});
+
 // The directory's run index used these two. Nothing writes them now; they stay because schema changes are additive.
 
 /** A run store's pending push of its run row to the directory, at the slot that changed it. */
@@ -128,4 +162,6 @@ export type StoreSchema = {
   dispatch_outbox: typeof dispatchOutbox.$inferSelect;
   tokens: typeof tokens.$inferSelect;
   token_releases: typeof tokenReleases.$inferSelect;
+  forced_disposals: typeof forcedDisposals.$inferSelect;
+  token_takeovers: typeof tokenTakeovers.$inferSelect;
 };
