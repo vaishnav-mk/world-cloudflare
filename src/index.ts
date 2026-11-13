@@ -1,14 +1,6 @@
-import { createQueueConsumer, drainOutbox, type WorldEnv } from '@workflow/world-cloudflare';
+import { createQueueConsumer } from '@workflow/world-cloudflare';
+// Loaded before `./dispatcher.js` registers the World: loading the bundle after it lost VM snapshots in tests.
 import { POST as flow } from '../.well-known/workflow/v1/flow.mjs';
-import { handleRequest } from './router.js';
-import './world.js';
 
-export { QueueShard, RunStreams, WorldStore } from '@workflow/world-cloudflare';
+export { default, QueueShard, RunStreams, WorldStore } from './dispatcher.js';
 export const QueueConsumer = createQueueConsumer(flow);
-
-export default {
-  async scheduled(_controller: ScheduledController, env: WorldEnv): Promise<void> {
-    await drainOutbox(env);
-  },
-  fetch: handleRequest,
-};

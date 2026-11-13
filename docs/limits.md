@@ -88,7 +88,7 @@ zstd compression in workerd throws on incompressible input from 64 KiB, so the t
 | --- | --- |
 | Worker CPU per invocation | 30 s default, 300 s maximum on Workers Paid |
 | Worker memory | 128 MB per isolate |
-| Worker startup | 1 s; this Worker starts in 400 to 760 ms |
+| Worker startup | 1 s; the main Worker with the workflow bundle measured 518 to 720 ms and was rejected once, and `src/dispatcher.ts` without it 279 to 298 ms |
 | Subrequests per invocation | 10,000 default; the templates raise it to 1,000,000 because the SDK makes about one Durable Object call per event |
 | RPC message | 32 MiB serialized |
 | Durable Object alarm | 15 minutes wall time; a flow delivery may run 14 minutes |

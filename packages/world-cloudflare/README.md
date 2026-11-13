@@ -98,7 +98,7 @@ setWorld(createWorld());
 export default createExecutor(flow);
 ```
 
-Each executor binds the three Durable Objects with `script_name` set to the main Worker. See [`wrangler.executor.jsonc`](../../wrangler.executor.jsonc). The main Worker binds the namespace as `EXECUTORS`, and `EXECUTOR_ROUTES` maps each deployment ID to its executor script.
+Each executor binds the three Durable Objects with `script_name` set to the main Worker. See [`wrangler.executor.jsonc`](../../wrangler.executor.jsonc). The main Worker binds the namespace as `EXECUTORS`, and `EXECUTOR_ROUTES` maps each deployment ID to its executor script. It never runs a flow itself, so it can leave the workflow bundle out, as the example's `src/dispatcher.ts` does.
 
 ## Exports
 

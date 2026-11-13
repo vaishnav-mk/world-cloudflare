@@ -47,7 +47,7 @@ The example has no authentication. Anyone who can reach it can start runs, and w
 
 1. Create the R2 dead-letter and payload buckets, then deploy the Worker with your copy of `wrangler.jsonc`. To encrypt payloads at rest, set a secret before the first run: `openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)).
 2. Optional: to keep in-flight runs on the code that started them, give each release its own executor.
-   1. Deploy a copy of `wrangler.executor.jsonc` into a Workers for Platforms dispatch namespace, bound as `EXECUTORS`.
+   1. Deploy a copy of `wrangler.executor.jsonc` into a Workers for Platforms dispatch namespace, bound as `EXECUTORS`, and point the main Worker's `main` at `src/dispatcher.ts`, which leaves the workflow bundle out so the Worker starts faster.
    2. Give it the main Worker's `WORKFLOW_ENCRYPTION_SECRET`, if set, and add its deployment ID to `EXECUTOR_ROUTES`, keeping the old entries.
    3. Move `DEPLOYMENT_ID` to the new release. Keep old executors until their runs drain.
 3. Run the remote tests:
