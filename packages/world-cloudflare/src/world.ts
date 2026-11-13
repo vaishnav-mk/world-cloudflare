@@ -19,6 +19,8 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       hookResumeDedup: true,
       // Spec 9 runs count their in-band positions in `runs.seq_in_band`; see `checkFence`.
       inBandFence: true,
+      // A spec 9 run's orchestrator messages share its queue shard, which delivers one at a time.
+      maxConcurrency: true,
     },
     ...createStorage(env),
     ...createQueue(env),

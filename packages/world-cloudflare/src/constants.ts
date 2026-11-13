@@ -86,7 +86,13 @@ export const MAX_PUBLISH_BACKOFF_MS = 60_000;
 
 /** Queue delivery. */
 export const DEFAULT_QUEUE_MAX_ATTEMPTS = 64;
-export const MAX_QUEUE_RETRY_DELAY_MS = 30_000;
+export const MAX_QUEUE_RETRY_DELAY_MS = 300_000;
+/** The wake an unbounded `{ timeoutSeconds }` of a spec 8 run gets: 23 hours, as world-vercel's. */
+export const MAX_WAKE_SECONDS = 82_800;
+/** The redelivery an unbounded `{ timeoutSeconds }` of a spec 9 message gets, as world-vercel's. */
+export const MAX_SPEC9_REDELIVERY_SECONDS = 900;
+/** A message's delivery count outlives its last delivery by this long, past any late duplicate. */
+export const DELIVERY_COUNT_RETENTION_MS = 24 * 60 * 60_000;
 /**
  * One flow delivery. The SDK runs inline steps in one invocation until its replay budget runs out,
  * which can take minutes. Durability's 5 minute default cut those invocations off before they

@@ -1,6 +1,7 @@
 import { parse, stringify } from 'devalue';
 import {
-  MessageId, QueuePrefix, ValidQueueName, type Queue, type QueueOptions, type QueuePayload,
+  isSingleOrchestratorMessage, MessageId, QueuePrefix, ValidQueueName,
+  type Queue, type QueueOptions, type QueuePayload,
 } from '@workflow/world';
 import { MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
@@ -10,6 +11,7 @@ import type { EnqueueRequest, EnqueueResult, OutboxClaim, QueueDispatch, WorldEn
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 import { queueShardFor } from '../lib/shards.js';
+import { MAX_SPEC9_REDELIVERY_SECONDS, MAX_WAKE_SECONDS } from '../constants.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
@@ -69,12 +71,21 @@ export function createQueue(env: QueueEnv): Queue {
       }
       try {
         const payload = parse(await request.text()) as QueuePayload;
+        // Absent from a consumer that predates them: then every delivery may be a redelivery.
+        const deliveryCount = Number(request.headers.get('x-vqs-delivery-count') ?? Number.NaN);
+        const startedAt = Number(request.headers.get('x-workflow-invocation-started-at') ?? Number.NaN);
         const result = await handler(payload, {
           queueName: ValidQueueName.parse(queueName), messageId: MessageId.parse(messageId), attempt,
-          deliveryCount: attempt, createdAt: new Date(Number(request.headers.get('x-vqs-created-at'))),
+          deliveryCount: Number.isSafeInteger(deliveryCount) && deliveryCount >= 1 ? deliveryCount : undefined,
+          createdAt: new Date(Number(request.headers.get('x-vqs-created-at'))),
+          invocationStartedAt: Number.isSafeInteger(startedAt) ? startedAt : Date.now(),
         });
         if (typeof result === 'object' && result !== null && 'timeoutSeconds' in result) {
-          return Response.json({ timeoutSeconds: result.timeoutSeconds });
+          // JSON has no Infinity. An unbounded or negative wait is redelivered after the longest delay
+          // instead, never read as 0, which on a spec 9 run is a handoff that is not an attempt.
+          const seconds = Number(result.timeoutSeconds);
+          const longest = isSingleOrchestratorMessage(payload) ? MAX_SPEC9_REDELIVERY_SECONDS : MAX_WAKE_SECONDS;
+          return Response.json({ timeoutSeconds: Number.isFinite(seconds) && seconds >= 0 ? seconds : longest });
         }
         return Response.json({ ok: true });
       } catch (error) {

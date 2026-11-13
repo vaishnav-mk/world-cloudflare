@@ -10,6 +10,7 @@ export type OutgoingMessage = {
   encoded: string;
   delayMs: number;
   targetDeployment?: string;
+  messageId?: string;
 };
 
 type Claim =

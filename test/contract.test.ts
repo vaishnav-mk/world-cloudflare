@@ -353,7 +353,7 @@ describe('World v5 contract (workerd bindings)', () => {
 
   it('advertises exactly the capabilities it implements', () => {
     expect(world.capabilities).toEqual({
-      hookRetention: { active: true }, hookResumeDedup: true, inBandFence: true,
+      hookRetention: { active: true }, hookResumeDedup: true, inBandFence: true, maxConcurrency: true,
     });
   });
 

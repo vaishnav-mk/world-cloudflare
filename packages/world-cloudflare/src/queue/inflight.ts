@@ -26,7 +26,7 @@ export class InflightTable {
     this.#qb.delete({ tableName: 'inflight', where: { conditions: 'id = ?', params: [id] } }).execute();
   }
 
-  /** Every recorded delivery, as messages to send again now. */
+  /** Every recorded delivery, by its stable message ID, as messages to send again now. */
   all(): OutgoingMessage[] {
     return allRows(this.#qb.fetchAll<'inflight'>({ tableName: 'inflight' })).map((row) => ({
       id: row.id,

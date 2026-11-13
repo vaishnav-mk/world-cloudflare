@@ -18,13 +18,14 @@ export function createQueueConsumer(flow: FlowHandler) {
      * one's outcome, so a slow or failing flow holds up and retries only itself.
      */
     consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {
-      return Promise.all(deliveries.map((delivery) => this.#consumeOne(delivery)));
+      const startedAt = Date.now();
+      return Promise.all(deliveries.map((delivery) => this.#consumeOne(delivery, startedAt)));
     }
 
-    async #consumeOne(delivery: Delivery): Promise<DeliveryOutcome> {
+    async #consumeOne(delivery: Delivery, startedAt: number): Promise<DeliveryOutcome> {
       try {
         const target = delivery.body.targetDeployment ?? this.env.DEPLOYMENT_ID;
-        const response = await this.#runFlow(target, flowRequest(delivery));
+        const response = await this.#runFlow(target, flowRequest(delivery, startedAt));
         if (!response.ok) {
           return { kind: DeliveryResult.Failed, error: `Flow handler returned ${response.status}: ${await response.text()}` };
         }
@@ -50,7 +51,7 @@ export function createQueueConsumer(flow: FlowHandler) {
   };
 }
 
-function flowRequest(delivery: Delivery): Request {
+function flowRequest(delivery: Delivery, startedAt: number): Request {
   return new Request(FLOW_URL, {
     method: 'POST',
     headers: {
@@ -58,7 +59,10 @@ function flowRequest(delivery: Delivery): Request {
       'x-vqs-queue-name': delivery.body.queueName,
       'x-vqs-message-id': delivery.id,
       'x-vqs-message-attempt': String(delivery.attempt),
+      // A shard from before delivery counts sends none; the handler then reports no count.
+      ...(delivery.deliveryCount === undefined ? {} : { 'x-vqs-delivery-count': String(delivery.deliveryCount) }),
       'x-vqs-created-at': String(delivery.enqueuedAt),
+      'x-workflow-invocation-started-at': String(startedAt),
     },
     body: delivery.body.encoded,
   });

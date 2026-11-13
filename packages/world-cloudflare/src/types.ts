@@ -35,6 +35,8 @@ export type Envelope = {
   delayMs?: number;
   /** Absolute deadline written by messages queued before `delayMs` existed. */
   due?: number;
+  /** Set on a copy of a delivery a reset cut off: the message it continues, whose ID it keeps. */
+  messageId?: string;
 };
 
 /** The outcome of one delivery, returned by `QueueConsumer.consume` in delivery order. */
@@ -43,8 +45,11 @@ export type DeliveryOutcome =
   | { kind: DeliveryResult.Wake; seconds: number }
   | { kind: DeliveryResult.Failed; error: string };
 
-/** One message handed to `QueueConsumer.consume`. */
-export type Delivery = { id: string; attempt: number; enqueuedAt: number; body: Envelope };
+/**
+ * One message handed to `QueueConsumer.consume`. `id` is stable across redeliveries;
+ * `deliveryCount` is 1 only on the message's first delivery, and `attempt` leaves out handoffs.
+ */
+export type Delivery = { id: string; attempt: number; deliveryCount?: number; enqueuedAt: number; body: Envelope };
 
 /** The outbox row a queue message settles once the queue accepts it. */
 export type OutboxClaim =
@@ -57,6 +62,8 @@ export type OutboxClaim =
 export type EnqueueRequest = {
   id: string; queueName: string; encoded: string; delayMs: number;
   targetDeployment?: string; deduplicationKey?: string; payloadDigest?: string;
+  /** The message a copy continues; see `Envelope.messageId`. */
+  messageId?: string;
 };
 
 /** `QueueShard.enqueueMany`'s outcome for one message. */

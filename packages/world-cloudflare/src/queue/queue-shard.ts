@@ -2,24 +2,23 @@ import { DurableObject } from 'cloudflare:workers';
 import { DurabilityFanout, DurabilityScheduler, type DurabilityFanoutMessage, type FanoutTarget, type StoredMessage } from 'durability';
 import { DurabilityRouting, type EnqueueResult as RoutedResult } from 'durability/routing';
 import { parse } from 'devalue';
+import { isSingleOrchestratorMessage } from '@workflow/world';
 import migrations from '../../drizzle/queue/migrations.js';
 import {
-  DEFAULT_QUEUE_MAX_ATTEMPTS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS, REPLAY_MARKS_MAX,
+  DEFAULT_QUEUE_MAX_ATTEMPTS, DELIVERY_COUNT_RETENTION_MS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, MAX_QUEUE_RETRY_DELAY_MS,
+  REPLAY_MARKS_MAX,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, DeliveryResult, MessageKind } from '../enums.js';
-import { groupBy } from '../lib/group.js';
-import { replayOf, type Replay } from '../lib/messages.js';
+import { replayOf } from '../lib/messages.js';
 import { unreachable } from '../lib/unreachable.js';
 import { onRun } from '../store/route.js';
-import type { Delivery, DeliveryOutcome, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
+import type { Delivery, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
+import { DeliveryCounts } from './delivery-counts.js';
 import { InflightTable } from './inflight.js';
 
 type FanoutMessage = DurabilityFanoutMessage<Envelope>;
-
-/** A due message that replays its run. */
-type DueReplay = Replay & { message: FanoutMessage; deadline: number };
 
 /** What `enqueueMany` does with one message: settled already, or sent to the fanout. */
 type Plan = { done: EnqueueResult } | { message: OutgoingMessage; key?: string; fresh: boolean };
@@ -41,8 +40,7 @@ const LEGACY_LANES = Array.from({ length: 8 }, (_, lane) => `${FLOW_TARGET}-${la
 export class QueueShard extends DurableObject<WorldEnv> {
   readonly #dedup = new DedupTable(this.ctx.storage.sql);
   readonly #inflight = new InflightTable(this.ctx.storage.sql);
-  /** Each run's latest turn of replay deliveries in this instance; the next turn waits for it. */
-  readonly #turns = new Map<string, Promise<void>>();
+  readonly #counts = new DeliveryCounts(this.ctx.storage.sql);
   /** When each run's latest successful replay started, for the newest `REPLAY_MARKS_MAX` runs. */
   readonly #replayed = new Map<string, number>();
   readonly #scheduler = new DurabilityScheduler({ context: this.ctx });
@@ -52,8 +50,10 @@ export class QueueShard extends DurableObject<WorldEnv> {
     scheduler: this.#scheduler,
     routing: this.#routing,
     retries: {
-      maxAttempts: Number(this.env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS),
-      delay: (attempt) => Math.min(MAX_QUEUE_RETRY_DELAY_MS, attempt * 1000),
+      // Holds, delay waits and handoffs take fanout attempts too, so `#deliver` enforces the cap
+      // on deliveries itself and the fanout's own cap is out of reach.
+      maxAttempts: Number.MAX_SAFE_INTEGER,
+      delay: retryDelayMs,
     },
     // `flow`, plus the lanes the single `flow` shard delivered to before queue shards, so messages
     // it still holds for them are delivered. New messages go to `flow` only.
@@ -118,8 +118,8 @@ export class QueueShard extends DurableObject<WorldEnv> {
   }
 
   /** Claims a message's deduplication key, deciding whether to send it and as what. */
-  #plan({ id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest }: EnqueueRequest): Plan {
-    const message: OutgoingMessage = { id, queueName, encoded, delayMs, targetDeployment };
+  #plan({ id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest, messageId }: EnqueueRequest): Plan {
+    const message: OutgoingMessage = { id, queueName, encoded, delayMs, targetDeployment, messageId };
     if (!deduplicationKey) return { message, fresh: true };
     if (!payloadDigest) return { done: { error: 'Missing queue payload digest' } };
     try {
@@ -144,97 +144,92 @@ export class QueueShard extends DurableObject<WorldEnv> {
   }
 
   /**
-   * Holds messages until their delay passes, then hands the due ones to the consumer. Step messages
-   * and other messages without a replay go together; each run's replays go in its own turn.
+   * Holds messages until their delay passes, then hands the due ones to the consumer. The fanout
+   * delivers one batch per shard at a time and a run's replays all reach its shard, so holding a
+   * run's second replay in a batch keeps its replays to one at a time, whatever its spec version.
+   * Two replays of a run at once would let the SDK's in-process step single-flight make one request
+   * wait on a promise another request settles, which Workers reject. A pure replay never delivered
+   * is settled without a delivery once a replay of its run that started after it was due has
+   * succeeded: that replay read a log holding whatever the message was sent for. Holds and delays
+   * are not deliveries: only `#counts` feeds `attempt`.
    */
   async #deliver(messages: FanoutMessage[]): Promise<void> {
-    const due: { message: FanoutMessage; deadline: number }[] = [];
+    const due: { message: FanoutMessage; delivery: Delivery; appends: boolean; replays: string | undefined }[] = [];
+    const running = new Set<string>();
+    const maxAttempts = Number(this.env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS);
+    const now = Date.now();
+    this.#counts.prune(now - DELIVERY_COUNT_RETENTION_MS);
     for (const message of messages) {
       const deadline = message.body.due ?? (message.enqueuedAt + (message.body.delayMs ?? Number.NaN));
       if (!Number.isFinite(deadline)) throw new Error('Invalid persisted queue deadline');
-      const remaining = deadline - Date.now();
-      if (remaining > 0) await message.retry(remaining);
-      else due.push({ message, deadline });
+      const remaining = deadline - now;
+      if (remaining > 0) {
+        await message.retry(remaining);
+        continue;
+      }
+      const payload = readPayload(message.body.encoded);
+      const replay = replayOf(payload);
+      const runId = replay?.runId;
+      if (runId !== undefined && running.has(runId)) {
+        // Behind its run's delivery in this batch; the next batch starts once this one ends.
+        await message.retry(0);
+        continue;
+      }
+      const id = message.body.messageId ?? message.id;
+      const before = this.#counts.get(id);
+      const replayedAt = runId === undefined ? undefined : this.#replayed.get(runId);
+      // Left unsettled, so the fanout acks it.
+      if (replay?.pure && before.deliveries === 0 && replayedAt !== undefined && deadline <= replayedAt) continue;
+      if (before.deliveries - before.handoffs >= maxAttempts) {
+        await message.deadLetter();
+        continue;
+      }
+      if (runId !== undefined) running.add(runId);
+      const { deliveries, handoffs } = this.#counts.begin(id, now);
+      due.push({
+        message, appends: isSingleOrchestratorMessage(payload),
+        // A start may skip reading the log, so its replay covers no other message.
+        replays: replay?.start === false ? runId : undefined,
+        delivery: { id, attempt: deliveries - handoffs, deliveryCount: deliveries, enqueuedAt: message.enqueuedAt, body: message.body },
+      });
     }
     if (!due.length) return;
-    // Every due message, including those waiting for their run's turn, so a reset redelivers them all.
-    this.#inflight.add(due.map(({ message }) => toDelivery(message)));
-    try {
-      const others: FanoutMessage[] = [];
-      const replays: DueReplay[] = [];
-      for (const entry of due) {
-        const replay = replayOf(readPayload(entry.message.body.encoded));
-        if (replay === undefined) others.push(entry.message);
-        else replays.push({ ...replay, ...entry });
-      }
-      const turns = [...groupBy(replays, ({ runId }) => runId)]
-        .map(([runId, group]) => this.#inTurn(runId, () => this.#replay(runId, group)));
-      // Every delivery settles before this returns, because the fanout acks what is left unsettled then.
-      for (const result of await Promise.allSettled([this.#consume(others), ...turns])) {
-        if (result.status === 'rejected') throw result.reason;
-      }
-    } finally {
-      for (const { message } of due) this.#inflight.remove(message.id);
-    }
-  }
-
-  /** Runs `work` after the run's earlier turns in this instance settle, so its replays never overlap. */
-  #inTurn(runId: string, work: () => Promise<void>): Promise<void> {
-    const turn = (this.#turns.get(runId) ?? Promise.resolve()).then(work, work);
-    this.#turns.set(runId, turn);
-    const forget = () => {
-      if (this.#turns.get(runId) === turn) this.#turns.delete(runId);
-    };
-    void turn.then(forget, forget);
-    return turn;
-  }
-
-  /**
-   * Delivers one run's replays one at a time. A pure replay message on its first attempt is settled
-   * without a delivery once a replay that started after it was due has succeeded: that replay read a
-   * log holding whatever the message was sent for. Messages that must be delivered go first, since
-   * their replays can cover the pure ones.
-   */
-  async #replay(runId: string, group: DueReplay[]): Promise<void> {
-    for (const { message, deadline, pure, start } of [...group.filter((m) => !m.pure), ...group.filter((m) => m.pure)]) {
-      const replayedAt = this.#replayed.get(runId);
-      // Left unsettled, so the fanout acks it.
-      if (pure && message.attempt === 1 && replayedAt !== undefined && deadline <= replayedAt) continue;
-      const startedAt = Date.now();
-      const [outcome] = await this.#consume([message]);
-      if (outcome.kind === DeliveryResult.Done && !start) {
-        this.#replayed.delete(runId);
-        this.#replayed.set(runId, startedAt);
-        if (this.#replayed.size > REPLAY_MARKS_MAX) {
-          const [oldest] = this.#replayed.keys();
-          this.#replayed.delete(oldest);
-        }
-      }
-    }
-  }
-
-  /** Hands messages to the consumer together and settles each by its own outcome, returned in order. */
-  async #consume(messages: FanoutMessage[]): Promise<DeliveryOutcome[]> {
-    if (!messages.length) return [];
-    const outcomes = await this.env.CONSUMER.consume(messages.map(toDelivery));
-    if (outcomes.length !== messages.length) throw new Error('Incomplete queue delivery response');
+    const deliveries = due.map(({ delivery }) => delivery);
+    this.#inflight.add(deliveries);
+    const startedAt = Date.now();
+    const outcomes = await this.env.CONSUMER.consume(deliveries).finally(() => {
+      for (const { id } of deliveries) this.#inflight.remove(id);
+    });
+    if (outcomes.length !== due.length) throw new Error('Incomplete queue delivery response');
     for (const [index, outcome] of outcomes.entries()) {
-      const message = messages[index];
+      const { message, delivery, appends, replays } = due[index];
       switch (outcome.kind) {
         case DeliveryResult.Done:
+          if (replays !== undefined) this.#markReplayed(replays, startedAt);
           break;
         case DeliveryResult.Wake:
+          // A spec 9 run's `{ timeoutSeconds: 0 }` is a handoff: delivered again at once, not another attempt.
+          if (appends && outcome.seconds === 0) this.#counts.handoff(delivery.id);
           await message.retry(outcome.seconds * 1000);
           break;
         case DeliveryResult.Failed:
-          console.error('Flow delivery failed', { messageId: message.id, attempt: message.attempt, error: outcome.error });
-          await message.retry(Math.min(MAX_QUEUE_RETRY_DELAY_MS, message.attempt * 1000));
+          console.error('Flow delivery failed', { messageId: delivery.id, attempt: delivery.attempt, error: outcome.error });
+          await message.retry(retryDelayMs(delivery.attempt));
           break;
         default:
           unreachable(outcome);
       }
     }
-    return outcomes;
+  }
+
+  /** Records that a replay of `runId` that started at `startedAt` succeeded. */
+  #markReplayed(runId: string, startedAt: number): void {
+    this.#replayed.delete(runId);
+    this.#replayed.set(runId, startedAt);
+    if (this.#replayed.size > REPLAY_MARKS_MAX) {
+      const [oldest] = this.#replayed.keys();
+      this.#replayed.delete(oldest);
+    }
   }
 
   /**
@@ -243,8 +238,9 @@ export class QueueShard extends DurableObject<WorldEnv> {
    */
   async #redeliverOrphans(): Promise<void> {
     for (const { id, ...message } of this.#inflight.all()) {
-      // A new ID: the cut-off delivery stays claimed until it times out, and the SDK tolerates the copy.
-      const [result] = await this.enqueueMany([{ ...message, id: crypto.randomUUID() }]);
+      // A new fanout ID: the cut-off delivery stays claimed until it times out, and the SDK tolerates
+      // the copy. The copy keeps the message's ID, so its delivery counts as a redelivery.
+      const [result] = await this.enqueueMany([{ ...message, id: crypto.randomUUID(), messageId: id }]);
       if (result === undefined || 'error' in result) throw new Error(result?.error ?? 'Orphan was not enqueued');
       this.#inflight.remove(id);
     }
@@ -283,6 +279,23 @@ export class QueueShard extends DurableObject<WorldEnv> {
   }
 }
 
+/**
+ * Backoff after a failed delivery, by attempt: quadratic up to five minutes, so the default 64
+ * attempts keep a failing message alive for hours, past the SDK's one-hour step redelivery span.
+ */
+function retryDelayMs(attempt: number): number {
+  return Math.min(MAX_QUEUE_RETRY_DELAY_MS, attempt ** 2 * 1000);
+}
+
+/** The SDK payload a message carries, or undefined when it cannot be read. */
+function readPayload(encoded: string): unknown {
+  try {
+    return parse(encoded);
+  } catch {
+    return undefined;
+  }
+}
+
 function readDeadLetter(payload: unknown): DeadLetter | undefined {
   if (!isRecord(payload) || typeof payload.runId !== 'string') return undefined;
   const { runId } = payload;
@@ -302,17 +315,4 @@ function readDeadLetter(payload: unknown): DeadLetter | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object';
-}
-
-function toDelivery({ id, attempt, enqueuedAt, body }: FanoutMessage): Delivery {
-  return { id, attempt, enqueuedAt, body };
-}
-
-/** A stored message's payload, or `undefined` if it does not decode; the consumer then fails it. */
-function readPayload(encoded: string): unknown {
-  try {
-    return parse(encoded);
-  } catch {
-    return undefined;
-  }
 }

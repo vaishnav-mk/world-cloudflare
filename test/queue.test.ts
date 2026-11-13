@@ -1,4 +1,5 @@
 import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
@@ -161,6 +162,61 @@ describe('durability fanout', () => {
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 8_000 })
       .toEqual(expect.arrayContaining([`${failed.messageId}#1`, `${other.messageId}#1`, `${failed.messageId}#2`]));
   }, 15_000);
+  it("delivers a run's workflow messages one at a time, whatever its spec version", async () => {
+    const timed = `${getQueueTopicPrefix('workflow')}order_timed` as ValidQueueName;
+    const spec9 = `wrun_${crypto.randomUUID()}`;
+    const spec8 = `wrun_${crypto.randomUUID()}`;
+    // Each second message carries more than a replay, so none is settled without its own delivery. A
+    // keyed timer shares its run's shard, so it waits its turn too.
+    await queue.queueBatch!(timed, [
+      { message: { runId: spec9, runSpecVersion: 9 } },
+      { message: { runId: spec9, runSpecVersion: 9, completeWaits: ['wait_1'] }, opts: { idempotencyKey: `wait:${crypto.randomUUID()}` } },
+      { message: { runId: spec8, runSpecVersion: 8 } },
+      { message: { runId: spec8, runSpecVersion: 8, serverErrorRetryCount: 1 } },
+    ]);
+    const runOf = async (runId: string) => (await env.SINK.getByName('sink').logged())
+      .filter((entry) => entry.runId === runId).sort((a, b) => a.start - b.start);
+    await expect.poll(async () => (await runOf(spec9)).length + (await runOf(spec8)).length, { timeout: 5_000 }).toBe(4);
+    // Two replays of one run at once would let the SDK's in-process step single-flight hand one
+    // request's promise to another, which Workers reject.
+    for (const runId of [spec9, spec8]) {
+      const [first, second] = await runOf(runId);
+      expect(second.start).toBeGreaterThanOrEqual(first.end);
+      // Waiting behind the run's other delivery is not a delivery.
+      expect([first, second].map(({ deliveryCount, attempt }) => [deliveryCount, attempt])).toEqual([[1, 1], [1, 1]]);
+    }
+  });
+
+  it("counts every redelivery, and leaves a spec 9 handoff out of the attempt", async () => {
+    const handoff = `${getQueueTopicPrefix('workflow')}h_handoff` as ValidQueueName;
+    const spec9 = `wrun_${crypto.randomUUID()}`;
+    const spec8 = `wrun_${crypto.randomUUID()}`;
+    await queue.queue(handoff, { runId: spec9, runSpecVersion: 9 });
+    // A delay is waited out, not delivered, so the first delivery after it is still the first.
+    await queue.queue(handoff, { runId: spec8, runSpecVersion: 8 }, { delaySeconds: 0.5 });
+    const counts = async (runId: string) => (await env.SINK.getByName('sink').logged())
+      .filter((entry) => entry.runId === runId).map(({ deliveryCount, attempt }) => [deliveryCount, attempt]);
+    await expect.poll(() => counts(spec9), { timeout: 5_000 }).toEqual([[1, 1], [2, 1]]);
+    // An earlier run's `{ timeoutSeconds: 0 }` continues it and counts as an attempt.
+    await expect.poll(() => counts(spec8), { timeout: 5_000 }).toEqual([[1, 1], [2, 2]]);
+  });
+
+  it('passes delivery counts and the invocation start to the handler, and bounds an unbounded wake', async () => {
+    const metas: unknown[] = [];
+    const handle = queue.createQueueHandler(getQueueTopicPrefix('workflow'), async (_message, meta) => {
+      metas.push(meta);
+      return { timeoutSeconds: Number.POSITIVE_INFINITY };
+    });
+    const deliver = async (payload: object, extra: Record<string, string>) => (await handle(new Request('https://internal/flow', {
+      method: 'POST', body: stringify(payload),
+      headers: { 'x-vqs-queue-name': queueName, 'x-vqs-message-id': 'msg_1', 'x-vqs-message-attempt': '1', ...extra },
+    }))).json();
+    expect(await deliver({ runId: 'r', runSpecVersion: 9 }, { 'x-vqs-delivery-count': '3', 'x-workflow-invocation-started-at': '42' }))
+      .toEqual({ timeoutSeconds: 900 });
+    expect(await deliver({ runId: 'r' }, {})).toEqual({ timeoutSeconds: 82_800 });
+    expect(metas[0]).toMatchObject({ attempt: 1, deliveryCount: 3, invocationStartedAt: 42 });
+    expect(metas[1]).toMatchObject({ attempt: 1, deliveryCount: undefined });
+  });
 
   it('retains delayed delivery and rejects another deployment', async () => {
     await expect(queue.queue(queueName, { runId: 'run-2' }, { deploymentId: 'old-v0' })).rejects.toThrow('unavailable');
