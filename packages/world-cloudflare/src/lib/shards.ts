@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { decodeTime } from 'ulid';
-import { DEFAULT_SHARD_EPOCHS, QUEUE_SHARD_NAME } from '../constants.js';
+import { CRON_WAKES_PER_TICK, DEFAULT_SHARD_EPOCHS, QUEUE_SHARD_NAME } from '../constants.js';
 import type { ShardEpoch, WorldEnv } from '../types.js';
 import { fnv1a32Hex } from './hash.js';
 
@@ -93,4 +93,13 @@ export function queueShardNames(): string[] {
     QUEUE_SHARD_NAME,
     ...epochs().flatMap((epoch) => Array.from({ length: epoch.queue }, (_, index) => `${QUEUE_SHARD_NAME}-${tagOf(epoch)}${index}`)),
   ];
+}
+
+/**
+ * The queue shards the cron wakes on tick `tick` (minutes since the epoch): one slice of at most
+ * `CRON_WAKES_PER_TICK`, so every shard is woken once per `ceil(shards / CRON_WAKES_PER_TICK)` ticks.
+ */
+export function queueShardsToWake(tick: number, names = queueShardNames()): string[] {
+  const slices = Math.ceil(names.length / CRON_WAKES_PER_TICK);
+  return names.filter((_, index) => index % slices === tick % slices);
 }

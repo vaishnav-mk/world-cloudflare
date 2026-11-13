@@ -86,6 +86,8 @@ export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
  * create a new Durable Object on its first write.
  */
 export const DEFAULT_SHARD_EPOCHS: readonly ShardEpoch[] = [{ from: 0, store: 128, queue: 256 }];
+/** Queue shards the cron wakes per tick. With more shards, each tick wakes the next slice instead. */
+export const CRON_WAKES_PER_TICK = 512;
 /** Store calls in flight at once when a cross-run read, such as `runs.list`, asks every store. */
 export const FAN_OUT_CONCURRENCY = 32;
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SHARD_EPOCHS } from '../packages/world-cloudflare/src/constants.js';
 import {
-  parseEpochs, queueShardFor, queueShardNames, storeShardFor, storeShardNames, tokenShardFor,
+  parseEpochs, queueShardFor, queueShardNames, queueShardsToWake, storeShardFor, storeShardNames, tokenShardFor,
 } from '../packages/world-cloudflare/src/lib/shards.js';
 
 // wrangler.test.jsonc sets two epochs: { from: 0, store: 4, queue: 4 } and { from: 1700000000000, store: 8, queue: 8 }.
@@ -34,6 +34,18 @@ describe('shard epochs', () => {
   it('lists every shard of every epoch', () => {
     expect(storeShardNames()).toHaveLength(12);
     expect(queueShardNames()).toEqual(['flow', 'flow-0', 'flow-1', 'flow-2', 'flow-3', ...Array.from({ length: 8 }, (_, n) => `flow-e${SECOND}-${n}`)]);
+  });
+
+  it('wakes every queue shard once per cycle of cron ticks', () => {
+    // 13 shards fit in one tick, so each tick wakes all of them.
+    expect(queueShardsToWake(0)).toEqual(queueShardNames());
+    expect(queueShardsToWake(7)).toEqual(queueShardNames());
+    // 5,377 shards take 11 ticks of at most 512 each, and each shard is woken in exactly one.
+    const many = Array.from({ length: 5377 }, (_, index) => `flow-${index}`);
+    const ticks = Array.from({ length: 11 }, (_, tick) => queueShardsToWake(tick, many));
+    expect(Math.max(...ticks.map((woken) => woken.length))).toBeLessThanOrEqual(512);
+    expect(ticks.flat().sort()).toEqual([...many].sort());
+    expect(queueShardsToWake(11, many)).toEqual(ticks[0]);
   });
 
   it('parses and validates SHARD_EPOCHS', () => {
