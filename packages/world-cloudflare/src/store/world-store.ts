@@ -10,12 +10,13 @@ import {
 } from '@workflow/world';
 import migrations from '../../drizzle/store/migrations.js';
 import {
-  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS,
+  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_PAGE_READS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS,
   MIN_ALARM_DELAY_MS, REDRIVE_DELAY_MS, RELEASE_KINDS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
 import { toJson } from '../lib/json.js';
+import { Semaphore } from '../lib/semaphore.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
@@ -31,7 +32,7 @@ import { checkBatch } from './events/batch.js';
 import { newHook } from './events/hooks.js';
 import type { Tokens } from './events/types.js';
 import { Outbox } from './outbox.js';
-import { listEvents, listRecords } from './pages.js';
+import { listRecords, readEventPage } from './pages.js';
 import { toEvent } from './rows.js';
 import { TokenOutbox } from './token-outbox.js';
 import { TokenRegistry } from './tokens.js';
@@ -63,6 +64,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   readonly #releases: TokenOutbox;
   readonly #tokens: TokenRegistry;
   readonly #waiters = new Waiters();
+  readonly #pageReads = new Semaphore(EVENT_PAGE_READS);
   readonly #isLegacy: boolean;
   /** The token release push in flight, if any. */
   #pushing: Promise<void> | undefined;
@@ -162,12 +164,12 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   async listEvents(params: ListEventsParams): Promise<PaginatedResponse<Event>> {
     this.#own(params.runId);
-    return listEvents(this.#db, params);
+    return this.#pageReads.run(() => readEventPage(this.#db, params));
   }
 
   async listEventsByCorrelationId(params: ListEventsByCorrelationIdParams): Promise<PaginatedResponse<Event>> {
     this.#own(params.runId);
-    return listEvents(this.#db, params);
+    return this.#pageReads.run(() => readEventPage(this.#db, params));
   }
 
   async createEvent(runId: string | null, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
@@ -417,7 +419,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async nextEvents(runId: string, cursor: number, filter?: string[]) {
     if (!Number.isSafeInteger(cursor) || cursor < 0) throw new RangeError('Invalid subscription cursor');
     const read = () => {
-      const rows = this.#db.events(runId, cursor, EVENT_POLL_BATCH);
+      const rows = [...this.#db.events(runId, cursor, EVENT_POLL_BATCH)];
       const nextCursor = rows.at(-1)?.slot ?? cursor;
       return {
         events: rows.filter((row) => !filter || filter.includes(row.kind)).map((row) => ({

@@ -124,6 +124,28 @@ describe('World v5 contract (workerd bindings)', () => {
     expect(bare.data[2]).not.toHaveProperty('eventData.result');
   });
 
+  it('ends an event page once its rows pass the byte cap, so a large log comes back in several pages', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    // Under the R2 threshold, so each input stays in the store: ten of them pass the 4 MiB page cap.
+    const input = new Uint8Array(600 * 1024);
+    for (let index = 0; index < 10; index++) {
+      await world.events.create(runId, { eventType: 'step_created', correlationId: `step-${index}`, eventData: { stepName: 'work', input } });
+    }
+    const sizes: number[] = [];
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await world.events.list({ runId, pagination: { cursor } });
+      sizes.push(page.data.length);
+      ids.push(...page.data.map((event) => event.eventId));
+      cursor = page.hasMore ? page.cursor! : undefined;
+    } while (cursor);
+    // The first page stops at the step row that crosses 4 MiB.
+    expect(sizes).toEqual([9, 3]);
+    expect(ids).toEqual(Array.from({ length: 12 }, (_, index) => slotToEventId(index + 1)));
+  });
+
   it('collapses retries of one hook resume onto its first event and refuses a resumeId reused for another payload', async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });

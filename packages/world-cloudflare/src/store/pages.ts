@@ -1,7 +1,9 @@
 import type {
   Event, ListEventsByCorrelationIdParams, ListEventsParams, PaginatedResponse, PaginationOptions,
 } from '@workflow/world';
-import { DEFAULT_PAGE_LIMIT, FULL_EVENT_LOG_LIMIT, MAX_PAGE_LIMIT } from '../constants.js';
+import {
+  DEFAULT_PAGE_LIMIT, EVENT_PAGE_MAX_BYTES, EVENT_READ_BYTES, FULL_EVENT_LOG_LIMIT, MAX_PAGE_LIMIT,
+} from '../constants.js';
 import { SortOrder } from '../enums.js';
 import { decode, encode } from '../lib/codec.js';
 import type { Db, RecordTable } from './db.js';
@@ -81,25 +83,78 @@ export function mergePages<T>(
   return { data: page.map(({ item }) => item), cursor: hasMore && last ? encode(last.key) : null, hasMore };
 }
 
-/** Events in slot order. The cursor is `eid:` plus the last event ID. */
-export function listEvents(
-  db: Db, params: ListEventsParams | ListEventsByCorrelationIdParams,
-): PaginatedResponse<Event> {
+type EventQuery = {
+  runId: string;
+  correlationId?: string;
+  descending: boolean;
+  resolveData?: string;
+  /** The slot the page starts after (descending: before). */
+  after: number;
+  limit: number;
+  cursor?: string;
+};
+
+function eventQuery(params: ListEventsParams | ListEventsByCorrelationIdParams): EventQuery {
   const { runId, resolveData } = params;
-  const { limit: requestedLimit, sortOrder, cursor: raw } = params.pagination ?? {};
+  const { limit: requestedLimit, sortOrder, cursor } = params.pagination ?? {};
   const correlationId = 'correlationId' in params ? params.correlationId : undefined;
   const descending = sortOrder === SortOrder.Desc;
-  const after = parseEventCursor(raw, descending);
   // The SDK replays a run by listing its events without a limit.
   const limit = requestedLimit === undefined && correlationId === undefined ? FULL_EVENT_LOG_LIMIT : pageLimit(requestedLimit);
-  const rows = db.events(runId, after, limit + 1, { correlationId, descending });
-  const data = rows.slice(0, limit).map((row) => toEvent(row, resolveData));
+  return { runId, correlationId, descending, resolveData, after: parseEventCursor(cursor, descending), limit, cursor };
+}
+
+/**
+ * Appends the events after slot `from` to `page` until it holds `query.limit` events or the rows read
+ * pass `maxBytes`. Always reads at least one event when there is one.
+ */
+function readEvents(db: Db, query: EventQuery, page: Event[], from: number, maxBytes: number) {
+  let bytes = 0;
+  let last = from;
+  for (const row of db.events(query.runId, from, query.limit - page.length + 1, query)) {
+    if (page.length === query.limit || bytes >= maxBytes) return { bytes, last, more: true };
+    page.push(toEvent(row, query.resolveData));
+    bytes += (row.data?.length ?? 0) + (row.payload?.byteLength ?? 0);
+    last = row.slot;
+  }
+  return { bytes, last, more: false };
+}
+
+function eventPage(data: Event[], hasMore: boolean, cursor: string | undefined): PaginatedResponse<Event> {
   const last = data.at(-1);
-  return {
-    data,
-    cursor: last ? `eid:${last.eventId}` : raw ?? null,
-    hasMore: rows.length > limit,
-  };
+  return { data, cursor: last ? `eid:${last.eventId}` : cursor ?? null, hasMore };
+}
+
+/**
+ * Events in slot order, in one read, for a caller that cannot wait, such as a write's transaction.
+ * The cursor is `eid:` plus the last event ID. A page ends at its count limit, or once its rows pass
+ * `EVENT_PAGE_MAX_BYTES`, with `hasMore` and the cursor to read on from.
+ */
+export function listEvents(db: Db, params: ListEventsParams | ListEventsByCorrelationIdParams): PaginatedResponse<Event> {
+  const query = eventQuery(params);
+  const page: Event[] = [];
+  const { more } = readEvents(db, query, page, query.after, EVENT_PAGE_MAX_BYTES);
+  return eventPage(page, more, query.cursor);
+}
+
+/**
+ * `listEvents`, read `EVENT_READ_BYTES` at a time with a pause between reads, so the object serves
+ * other requests while it reads a long page.
+ */
+export async function readEventPage(db: Db, params: ListEventsParams | ListEventsByCorrelationIdParams): Promise<PaginatedResponse<Event>> {
+  const query = eventQuery(params);
+  const page: Event[] = [];
+  let bytes = 0;
+  let from = query.after;
+  let more = true;
+  while (more && page.length < query.limit && bytes < EVENT_PAGE_MAX_BYTES) {
+    if (page.length) await scheduler.wait(0);
+    const read = readEvents(db, query, page, from, Math.min(EVENT_READ_BYTES, EVENT_PAGE_MAX_BYTES - bytes));
+    bytes += read.bytes;
+    from = read.last;
+    more = read.more;
+  }
+  return eventPage(page, more, query.cursor);
 }
 
 function parseRecordCursor(cursor: string | undefined): [number, string] | null {

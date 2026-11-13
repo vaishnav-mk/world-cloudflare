@@ -180,8 +180,13 @@ export class Db {
     }));
   }
 
-  /** Events after (or, descending, before) `slot`, optionally for one correlation ID. */
-  events(runId: string, slot: number, limit: number, options: { correlationId?: string; descending?: boolean } = {}): EventRow[] {
+  /**
+   * Events after (or, descending, before) `slot`, optionally for one correlation ID, read from SQLite
+   * as they are iterated, so a reader that stops early never loads the rest.
+   */
+  events(
+    runId: string, slot: number, limit: number, options: { correlationId?: string; descending?: boolean } = {},
+  ): Iterable<EventRow> {
     const { correlationId, descending = false } = options;
     const conditions = ['run_id = ?', descending ? 'slot < ?' : 'slot > ?'];
     const params: (string | number)[] = [runId, slot];
@@ -189,7 +194,8 @@ export class Db {
       conditions.push('correlation_id = ?');
       params.push(correlationId);
     }
-    return allRows(this.#qb.fetchAll<'events'>({
+    // DOQB's lazy execute returns the SQLite cursor itself, not the `{ results }` its `lazy: true` types declare.
+    return this.#qb.lazyExecute(this.#qb.fetchAll<'events'>({
       tableName: 'events', where: { conditions, params },
       orderBy: { slot: descending ? OrderTypes.DESC : OrderTypes.ASC }, limit,
     }));

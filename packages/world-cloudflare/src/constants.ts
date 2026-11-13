@@ -19,6 +19,14 @@ export const DEFAULT_PAGE_LIMIT = 100;
 export const MAX_PAGE_LIMIT = 1000;
 /** `events.list` without a limit returns the whole log, up to this many events. */
 export const FULL_EVENT_LOG_LIMIT = 100_000;
+/**
+ * A page of events also ends once its stored rows pass this many bytes, and the caller reads on with
+ * its cursor. A store reads a page `EVENT_READ_BYTES` at a time, and at most `EVENT_PAGE_READS` pages
+ * at once; further readers wait.
+ */
+export const EVENT_PAGE_MAX_BYTES = 4 * 1_048_576;
+export const EVENT_READ_BYTES = 512 * 1024;
+export const EVENT_PAGE_READS = 2;
 /** Events returned with `sinceCursor` on `events.create`. */
 export const SINCE_CURSOR_LIMIT = 1000;
 
