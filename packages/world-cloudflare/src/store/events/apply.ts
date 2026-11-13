@@ -115,6 +115,10 @@ function checkParams(data: AnyEventRequest, params: CreateEventParams): void {
   if (resumesHook && params.resumeId && !params.resumePayloadDigest) {
     throw new Error('resumePayloadDigest is required with resumeId');
   }
+  // A cached hook's resume: refused before anything is written unless it can be deduplicated.
+  if (params.requireHookResumeDedup && !(resumesHook && params.resumeId)) {
+    throw new WorkflowWorldError('A deduplicated hook resume needs a hook_received with a resumeId', { status: 400 });
+  }
 }
 
 /** A `hook_received` retried with the same resume ID returns the event it already wrote. */

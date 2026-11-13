@@ -172,6 +172,27 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.events.create(runId, resume('a'), params)).event).toEqual(first.event);
   });
 
+  it('takes a cached hook resume only with its dedup key, and refuses a missing hook before writing', async () => {
+    const runId = await newRun();
+    await world.events.create(runId, { eventType: 'run_started' });
+    const hookId = `hook_${crypto.randomUUID()}`;
+    await world.events.create(runId, { eventType: 'hook_created', correlationId: hookId, eventData: { token: crypto.randomUUID() } });
+    const resume = (correlationId: string) => ({
+      eventType: 'hook_received' as const, correlationId, eventData: { payload: bytes('p') },
+    });
+    const before = (await world.events.list({ runId })).data.length;
+    const keyless = await world.events.create(runId, resume(hookId), { requireHookResumeDedup: true }).catch((error: unknown) => error);
+    expect(keyless).toMatchObject({ status: 400 });
+    const missing = await world.events.create(runId, resume('hook_gone'), {
+      requireHookResumeDedup: true, resumeId: 'r1', resumePayloadDigest: 'd',
+    }).catch((error: unknown) => error);
+    expect(HookNotFoundError.is(missing)).toBe(true);
+    expect((await world.events.list({ runId })).data).toHaveLength(before);
+    const params = { requireHookResumeDedup: true, resumeId: 'r1', resumePayloadDigest: 'd' };
+    const first = await world.events.create(runId, resume(hookId), params);
+    expect((await world.events.create(runId, resume(hookId), params)).event).toEqual(first.event);
+  });
+
   it('appends a batch in order, each event with the outcome its own create would have had', async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });
@@ -353,7 +374,8 @@ describe('World v5 contract (workerd bindings)', () => {
 
   it('advertises exactly the capabilities it implements', () => {
     expect(world.capabilities).toEqual({
-      hookRetention: { active: true }, hookResumeDedup: true, inBandFence: true, maxConcurrency: true, hookForceClaim: true,
+      hookRetention: { active: true }, hookResumeDedup: true, resolvedHookResume: true, inBandFence: true, maxConcurrency: true,
+      hookForceClaim: true,
     });
   });
 

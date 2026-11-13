@@ -17,6 +17,9 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       hookRetention: { active: true },
       // A unique `(run_id, resume_id)` index, and the store returns the committed event to a retry.
       hookResumeDedup: true,
+      // Every resume is deduplicated, so a cached hook's resume needs only its `resumeId`; a missing
+      // or taken hook is refused before anything is written.
+      resolvedHookResume: true,
       // Spec 9 runs count their in-band positions in `runs.seq_in_band`; see `checkFence`.
       inBandFence: true,
       // A spec 9 run's orchestrator messages share its queue shard, which delivers one at a time.
