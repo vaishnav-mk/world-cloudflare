@@ -11,8 +11,9 @@ Vercel's column is its documented limits.
 | Steps per run | 10,000 | 30,000 sequential steps completed in 23 minutes |
 | Events per run | 25,000 | 90,003 completed; the World sets no cap |
 | Replay | 240 s budget | A snapshot restore took 81 ms at 30,000 events; pauses between invocations stay at 4 to 8 s |
-| One payload | 50 MB | 16 MiB step output with QuickJS, 20 MiB with the isolate engine; larger payloads are rejected |
-| One stream chunk | 10 MB | 70 MiB locally; not measured on Workers |
+| One payload | 50 MB | 16 MiB step output with QuickJS, 20 MiB with the isolate engine; larger payloads are rejected, and larger data goes in a [byte stream](#streams) |
+| One stream chunk | 10 MB | 1 GiB locally in a byte stream, the probe's cap; 70 MiB through `getWritable()`; not measured on Workers |
+| One stream | Not documented | 4 GiB locally in 64 MiB chunks, every byte checked; not measured on Workers |
 | Run creations | 1,000 per second | Up to 362 per second; 321 per second with 4,800 runs all completing, 82 per second end to end |
 | 1,000 parallel steps | Not documented | 66 to 74 s |
 
@@ -36,13 +37,13 @@ What limits it:
 
 ## Payloads
 
-Payloads and stream chunks over 1 MiB (`PAYLOAD_INLINE_MAX_BYTES`) go to the `PAYLOADS` R2 bucket under `runs/<runId>/<uuid>`. The World client writes them before the Durable Object call and resolves them after it, so large values cross neither Durable Object RPC (32 MiB) nor SQLite (2 MB documented).
+Payloads and stream chunks over 1 MiB (`PAYLOAD_INLINE_MAX_BYTES`) go to the `PAYLOADS` R2 bucket under `runs/<runId>/<uuid>`. The World client writes them before the Durable Object call and resolves them after it, so large values cross neither a Durable Object RPC message (32 MiB) nor SQLite (2 MB documented). Stream reads are the exception: the run's `RunStreams` object pipes chunks from R2 into the stream it returns ([streams](#streams)).
 
 | What | Workers, QuickJS | Local workerd |
 | --- | --- | --- |
 | Step output | 16 MiB works; 20 MiB runs out of memory | 105 MiB |
 | Step input, run output | Not measured | 100 MiB |
-| One stream chunk | Not measured | 70 MiB; the SDK's reader rejects frames of 100,000,000 bytes or more |
+| One stream chunk | Not measured | 1 GiB in a byte stream ([streams](#streams)); 70 MiB through `getWritable()`, whose reader rejects frames of 100,000,000 bytes or more |
 | Hook payload (a JSON string) | Not measured | 40 MB |
 | `POST /runs`, `POST /hooks/:token` body | 100,000,000 bytes, the Free and Pro plan limit | Same |
 
@@ -54,6 +55,41 @@ Other costs:
 - A replay reads every payload in the run's log except step inputs, so large values add up in one isolate.
 - The event subscription (`GET /runs/:id/events`) shows offloaded payloads as `{ "$ref": "<key>" }`; `GET /runs/:id` and `/result` return the bytes.
 - R2 objects are never deleted, including ones written for writes that then failed.
+
+Step payloads cannot be streamed without SDK changes. The SDK serializes a step's output into one `Uint8Array`, the World's API takes and returns bytes, and the SDK reads each value whole into the workflow. So the 18 MiB limit stays, and larger data travels as a byte stream.
+
+## Streams
+
+A step that returns a `ReadableStream` of `type: 'bytes'` gives the workflow a handle, and the next step that takes it reads the bytes from the run's stream. The SDK writes such a stream as it is, chunk by chunk, with no serializing, compression or encryption, and the World stores each chunk over 1 MiB in R2. The [README](../packages/world-cloudflare/README.md#large-data) has an example.
+
+Measured locally under `wrangler dev` with `streamBytes(totalMiB, chunkMiB)`: its writing step fills a pattern, and its reading step checks every byte and times itself.
+
+| Stream | Run | Reading step |
+| --- | --- | --- |
+| 256 MiB in 64 MiB chunks | 3.4 s | 1.2 s, 215 MiB/s |
+| 1 GiB in 1 MiB chunks | 9.5 s | 5.3 s, 192 MiB/s |
+| 1 GiB in 8 MiB chunks | 14 s | 5.5 s, 185 MiB/s |
+| 1 GiB in 64 MiB chunks | 13.7 s | 5.2 s, 196 MiB/s |
+| 1 GiB in 256 MiB chunks | 13.4 s | 5.1 s, 201 MiB/s |
+| 1 GiB in one chunk | 13.3 s | 5.3 s, 195 MiB/s |
+| 4 GiB in 64 MiB chunks | 54 s | 19.6 s, 209 MiB/s |
+
+The writing step ran at about 130 MiB/s: 7.8 s for 1 GiB and 33 s for 4 GiB, most of it spent filling the pattern a byte at a time and writing to local R2.
+
+- **Writes.** The SDK hands `streams.write` one chunk at a time. A chunk over 1 MiB goes to R2 in one `put` before the `RunStreams` call, which records a ref; a smaller one is stored in the object.
+- **Reads.** `streams.get` asks the run's `RunStreams` for the chunks written so far as one stream, waiting up to 15 s for the first, and joins those streams until the stream closes. The object reads a stored chunk only once the reader has taken the one before, and pipes a chunk in R2 from its object body, so neither the object nor the reading Worker holds a chunk. When the reader cancels, the reads stop at the next chunk.
+- **Pages.** `getChunks`, and the paged `read` that executors on older World code call, stop at 4 MiB (`STREAM_PAGE_MAX_BYTES`) and return at least one chunk. A page of 40 inline 1 MiB chunks used to fail with the 32 MiB RPC limit.
+
+What still holds data:
+- **The writing step holds each chunk it writes**, because the SDK passes the World whole chunks. On Workers that bounds a chunk well under 128 MB; not measured. Filling the buffer `pull` is handed, as `streamBytes` does, avoids a second copy.
+- **A JavaScript byte stream needs `autoAllocateChunkSize`.** Without it workerd reads it 4 KiB at a time, and each read becomes a chunk. A `fetch` or R2 body returned from a step is read the same way, so it is stored as 4 KiB chunks in the `RunStreams` object. Through the World's API, 256 MiB of 4 KiB chunks wrote in 1.1 s and read back in 2.1 s.
+- **A reading step gets 4 KiB pieces**, because the SDK's reader is a byte stream without `autoAllocateChunkSize`. That, and checking every byte, keeps the reading step near 200 MiB/s at any chunk size.
+- **`getChunks` returns whole chunks**, because its result is bytes. A chunk over 4 MiB comes back alone.
+- **Object streams**, including `getWritable()`, serialize and frame each chunk, which copies it several times. Use byte streams for large data.
+- **Background writes.** A step's returned stream is written after the step completes, as `waitUntil` work, while the next step reads it. Workers documents up to 30 s of such work after an invocation ends, so a stream that takes longer to write may be cut off; the remote probes measure it.
+- **Not encrypted.** The SDK stores byte streams as written, even with `WORKFLOW_ENCRYPTION_SECRET`.
+
+On Workers, run the probes with `WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-limits.mjs streamBytes:64x64 streamBytes:1024x64`; with no arguments the default matrix includes them.
 
 ## Long runs
 

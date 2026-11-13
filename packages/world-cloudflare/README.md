@@ -70,9 +70,52 @@ Retained executors deployed before store shards talk only to the legacy store, s
 
 Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 MiB message limit, so the World client keeps large values in R2. It runs in the calling Worker:
 - **Writes.** Before a write reaches its Durable Object, each binary `eventData` field and stream chunk over 1 MiB goes to `PAYLOADS` at `runs/<runId>/<uuid>`, and the object stores a ref. The R2 write finishes first, so a committed ref always has its object. A serialized payload over 18 MiB is rejected with a 413, because reading it back would run the workflow out of memory.
-- **Reads.** Every read swaps refs back for their bytes, as the SDK expects; `resolveData: 'none'` reads nothing from R2.
+- **Reads.** Every read swaps refs back for their bytes, as the SDK expects; `resolveData: 'none'` reads nothing from R2. Stream reads instead pipe each chunk from R2 as the reader takes it, so no chunk is held whole, and `getChunks` pages stop at 4 MiB.
 
 Every Worker that runs World client code needs the `PAYLOADS` binding, including retained executors. [Limits](../../docs/limits.md#payloads) has the measured sizes and the open costs.
+
+## Large data
+
+A payload over 18 MiB is rejected, and the SDK reads each payload whole. For more, have a step return a `ReadableStream` of `type: 'bytes'` and pass it to the next step. The workflow holds only a handle, each chunk over 1 MiB goes to R2 on its own, and the reading step gets the bytes as they come out of R2. Locally 4 GiB moved this way in 64 MiB chunks:
+
+```ts
+const CHUNK = 16 * 1024 * 1024;
+
+export async function bigData(chunks: number) {
+  'use workflow';
+  return countBytes(await makeBytes(chunks));
+}
+
+async function makeBytes(chunks: number) {
+  'use step';
+  let made = 0;
+  return new ReadableStream({
+    type: 'bytes',
+    // Each read hands `pull` one buffer of CHUNK bytes to fill. Without it, workerd reads the
+    // stream 4 KiB at a time and stores each read as its own chunk.
+    autoAllocateChunkSize: CHUNK,
+    pull(controller) {
+      const request = controller.byobRequest!;
+      if (made === chunks) {
+        controller.close();
+        request.respond(0);
+        return;
+      }
+      new Uint8Array(request.view!.buffer, request.view!.byteOffset, CHUNK).fill(made++);
+      request.respond(CHUNK);
+    },
+  });
+}
+
+async function countBytes(stream: ReadableStream<Uint8Array>) {
+  'use step';
+  let bytes = 0;
+  for await (const piece of stream) bytes += piece.byteLength;
+  return bytes;
+}
+```
+
+The writing step holds the chunk it is writing, the SDK stores byte streams unencrypted, and a returned stream is written in the background after its step completes. [Limits](../../docs/limits.md#streams) has the measurements and the rest.
 
 ## Encryption
 
@@ -83,7 +126,7 @@ openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET
 ```
 
 - **Keys.** `getEncryptionKeyForRun` derives each run's key with HKDF-SHA256 from the secret, with the run ID as info. The deployment ID is left out, so every release, and every retained executor, must have the same secret.
-- **What stays readable.** Names, statuses, event types, hook tokens, attributes and timestamps. The example API's `/runs/:id` and `/runs/:id/events` show ciphertext; `/result` and stream reads decrypt through the SDK.
+- **What stays readable.** Names, statuses, event types, hook tokens, attributes and timestamps, and byte streams (`type: 'bytes'`), which the SDK stores as written. The example API's `/runs/:id` and `/runs/:id/events` show ciphertext; `/result` and stream reads decrypt through the SDK.
 - **Rotation.** Not supported. A changed or deleted secret leaves every encrypted run unreadable. Runs started before the secret was set keep their plaintext payloads.
 - **The remote client** fetches run keys from `/world/rpc`, so `workflow web` can decrypt. Anyone holding `WORLD_RPC_TOKEN` can read every run.
 
