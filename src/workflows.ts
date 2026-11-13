@@ -1,5 +1,6 @@
 import * as demo from '../workflows/demo.js';
 import * as limits from '../workflows/limits.js';
+import * as stress from '../workflows/stress.js';
 
 /** Gives each exported workflow the ID `workflow build` generates for it, so `start()` can find it. */
 function withIds<M extends Record<string, object>>(file: string, module: M): { [K in keyof M]: M[K] & { workflowId: string } } {
@@ -11,7 +12,7 @@ function withIds<M extends Record<string, object>>(file: string, module: M): { [
 }
 
 /** Workflows `POST /runs` may start, by function name. */
-export const workflows = { ...withIds('demo', demo), ...withIds('limits', limits) };
+export const workflows = { ...withIds('demo', demo), ...withIds('limits', limits), ...withIds('stress', stress) };
 
 type WorkflowName = keyof typeof workflows;
 
