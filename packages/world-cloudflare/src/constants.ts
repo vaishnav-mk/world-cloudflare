@@ -30,6 +30,12 @@ export const EVENT_POLL_MS = 15_000;
 export const EVENT_POLL_BATCH = 100;
 export const STREAM_POLL_MS = 15_000;
 export const STREAM_READ_BATCH = 100;
+/**
+ * A page of stream chunks holds at most this many bytes, and always at least one chunk, whether a
+ * `RunStreams` call returns it or `getChunks` resolves it from R2. A page of 100 inline chunks
+ * would otherwise pass the 32 MiB RPC limit.
+ */
+export const STREAM_PAGE_MAX_BYTES = 4 * 1_048_576;
 export const MAX_TERMINAL_WAIT_MS = 30_000;
 
 /**

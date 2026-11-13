@@ -126,9 +126,14 @@ describe('payloads in R2', () => {
     await streams.write(runId, 'out', larger);
     await streams.close(runId, 'out');
     expect(await objects(runId)).toHaveLength(2);
-    const { data } = await streams.getChunks(runId, 'out');
-    expect(data.map(({ index }) => index)).toEqual([0, 1, 2]);
-    expect(same(data[0].data, small) && same(data[1].data, large) && same(data[2].data, larger)).toBe(true);
+    // The 12 MiB chunk would take the first page past STREAM_PAGE_MAX_BYTES, so it starts the next.
+    const first = await streams.getChunks(runId, 'out');
+    expect(first.data.map(({ index }) => index)).toEqual([0, 1]);
+    expect(first).toMatchObject({ cursor: '2', hasMore: true, done: true });
+    const second = await streams.getChunks(runId, 'out', { cursor: first.cursor ?? undefined });
+    expect(second.data.map(({ index }) => index)).toEqual([2]);
+    expect(second).toMatchObject({ cursor: null, hasMore: false });
+    expect(same(first.data[0].data, small) && same(first.data[1].data, large) && same(second.data[0].data, larger)).toBe(true);
     const read = new Uint8Array(await new Response(await streams.get(runId, 'out')).arrayBuffer());
     expect(same(read, Buffer.concat([small, large, larger]))).toBe(true);
   });

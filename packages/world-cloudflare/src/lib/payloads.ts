@@ -34,14 +34,19 @@ export function createPayloads(bucket: R2Bucket) {
     return Uint8Array.of(...PAYLOAD_REF_PREFIX, ...encoder.encode(key));
   }
 
-  async function resolve(bytes: Uint8Array, written?: Written): Promise<Uint8Array> {
-    if (!isPayloadRef(bytes)) return bytes;
-    const key = payloadRefKey(bytes);
-    const known = written?.get(key);
-    if (known !== undefined) return known;
+  /** The R2 object a ref points at, its body not yet read. */
+  async function open(ref: Uint8Array): Promise<R2ObjectBody> {
+    const key = payloadRefKey(ref);
     const object = await bucket.get(key);
     if (object === null) throw new Error(`Payload ${key} is missing from R2`);
-    return new Uint8Array(await object.arrayBuffer());
+    return object;
+  }
+
+  async function resolve(bytes: Uint8Array, written?: Written): Promise<Uint8Array> {
+    if (!isPayloadRef(bytes)) return bytes;
+    const known = written?.get(payloadRefKey(bytes));
+    if (known !== undefined) return known;
+    return new Uint8Array(await (await open(bytes)).arrayBuffer());
   }
 
   /** A copy of the request with each binary `eventData` field offloaded: the payload, and dynamic workflow code. */
@@ -77,5 +82,5 @@ export function createPayloads(bucket: R2Bucket) {
     return result;
   }
 
-  return { offload, resolve, offloadEvent, resolveAll };
+  return { offload, open, resolve, offloadEvent, resolveAll };
 }

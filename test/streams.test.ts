@@ -1,8 +1,29 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { PAYLOAD_INLINE_MAX_BYTES, STREAM_PAGE_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
 import { createStreamer } from '../packages/world-cloudflare/src/streams/streamer.js';
 
 const streams = createStreamer(env);
+const MiB = 1024 * 1024;
+
+/** Bytes no shifted or repeated piece of another call matches. */
+function pattern(length: number, seed: number): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(length);
+  for (let index = 0; index < length; index++) bytes[index] = Math.imul(index + seed * length, 0x9e3779b1) >>> 24;
+  return bytes;
+}
+const concat = (parts: Uint8Array[]) => Buffer.concat(parts);
+/** Compares without handing vitest megabytes to diff. */
+const same = (actual: Uint8Array, expected: Uint8Array) => Buffer.from(actual).equals(Buffer.from(expected));
+const objects = async (runId: string) => (await env.PAYLOADS.list({ prefix: `runs/${runId}/` })).objects;
+
+async function pieces(stream: ReadableStream<Uint8Array>): Promise<Uint8Array[]> {
+  const reader = stream.getReader();
+  const read: Uint8Array[] = [];
+  for (let result = await reader.read(); !result.done; result = await reader.read()) read.push(result.value);
+  return read;
+}
+
 describe('run-scoped live streams', () => {
   it('isolates names and preserves binary chunk indexes', async () => {
     await streams.streams.write('run-a', 'stdout', new Uint8Array([0, 255, 1]));
@@ -36,5 +57,82 @@ describe('run-scoped live streams', () => {
     expect(new TextDecoder().decode((await pending).value)).toBe('ready');
     await streams.streams.close('run-live', 'output');
     expect((await reader.read()).done).toBe(true);
+  });
+});
+
+describe('large stream chunks', () => {
+  it('pipes chunks in R2 to a live reader in pieces', async () => {
+    const runId = crypto.randomUUID();
+    const reader = (await streams.streams.get(runId, 'big')).getReader();
+    const first = reader.read();
+    const written = [pattern(3 * MiB + 5, 1), pattern(10, 2), pattern(2 * MiB, 3)];
+    await streams.streams.write(runId, 'big', written[0]);
+    await streams.streams.writeMulti!(runId, 'big', written.slice(1));
+    await streams.streams.close(runId, 'big');
+    const read: Uint8Array[] = [];
+    for (let result = await first; !result.done; result = await reader.read()) read.push(result.value);
+    expect(same(concat(read), concat(written))).toBe(true);
+    // No piece is a whole chunk from R2.
+    expect(Math.max(...read.map(({ byteLength }) => byteLength))).toBeLessThan(2 * MiB);
+    expect(await objects(runId)).toHaveLength(2);
+    // A negative start counts back from the end.
+    expect(same(concat(await pieces(await streams.streams.get(runId, 'big', -2))), concat(written.slice(1)))).toBe(true);
+  });
+
+  it('keeps a page of inline chunks under the RPC message limit', async () => {
+    const runId = crypto.randomUUID();
+    const written = Array.from({ length: 40 }, (_, index) => pattern(PAYLOAD_INLINE_MAX_BYTES, index));
+    for (const chunk of written) await streams.streams.write(runId, 'inline', chunk);
+    await streams.streams.close(runId, 'inline');
+    expect(await objects(runId)).toHaveLength(0);
+
+    const pages: number[][] = [];
+    const chunks: Uint8Array[] = [];
+    for (let cursor: string | null = '0'; cursor !== null;) {
+      const page = await streams.streams.getChunks(runId, 'inline', { cursor, limit: 1000 });
+      pages.push(page.data.map(({ index }) => index));
+      chunks.push(...page.data.map(({ data }) => data));
+      cursor = page.cursor;
+    }
+    const perPage = STREAM_PAGE_MAX_BYTES / PAYLOAD_INLINE_MAX_BYTES;
+    expect(pages).toHaveLength(40 / perPage);
+    expect(pages[1]).toEqual(Array.from({ length: perPage }, (_, index) => perPage + index));
+    expect(same(concat(chunks), concat(written))).toBe(true);
+    expect(same(concat(await pieces(await streams.streams.get(runId, 'inline'))), concat(written))).toBe(true);
+    // Executors on older World code read the stream through `read`.
+    const page = await env.RUN_STREAMS.getByName(runId).read('inline', 0);
+    expect(page.data).toHaveLength(perPage);
+    expect(page).toMatchObject({ hasMore: true, cursor: String(perPage) });
+  });
+
+  it('ends a page before a chunk in R2 that would take it over the byte limit', async () => {
+    const runId = crypto.randomUUID();
+    const written = [pattern(3 * MiB, 1), pattern(2 * MiB, 2), pattern(10, 3)];
+    await streams.streams.writeMulti!(runId, 'paged', written);
+    const first = await streams.streams.getChunks(runId, 'paged');
+    expect(first.data.map(({ index }) => index)).toEqual([0]);
+    expect(first).toMatchObject({ hasMore: true, cursor: '1', done: false });
+    const second = await streams.streams.getChunks(runId, 'paged', { cursor: '1' });
+    expect(second.data.map(({ index }) => index)).toEqual([1, 2]);
+    expect(same(concat([...first.data, ...second.data].map(({ data }) => data)), concat(written))).toBe(true);
+  });
+
+  it('stops reading R2 when the reader cancels mid-chunk', async () => {
+    const runId = crypto.randomUUID();
+    const chunk = pattern(5 * MiB, 1);
+    await streams.streams.write(runId, 'cancelled', chunk);
+    await streams.streams.close(runId, 'cancelled');
+    const reader = (await streams.streams.get(runId, 'cancelled')).getReader();
+    expect((await reader.read()).value?.byteLength).toBeLessThan(chunk.byteLength);
+    await reader.cancel();
+    expect(same(concat(await pieces(await streams.streams.get(runId, 'cancelled'))), chunk)).toBe(true);
+  });
+
+  it('errors a read whose chunk is missing from R2', async () => {
+    const runId = crypto.randomUUID();
+    await streams.streams.write(runId, 'lost', pattern(2 * MiB, 1));
+    await streams.streams.close(runId, 'lost');
+    await env.PAYLOADS.delete((await objects(runId)).map(({ key }) => key));
+    await expect(pieces(await streams.streams.get(runId, 'lost'))).rejects.toThrow();
   });
 });
