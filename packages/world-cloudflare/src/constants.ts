@@ -86,6 +86,11 @@ export const MAX_QUEUE_RETRY_DELAY_MS = 30_000;
  */
 export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
 /**
+ * Runs whose latest successful replay a queue shard remembers, to settle the wakes it covers. A
+ * forgotten run only costs one more replay.
+ */
+export const REPLAY_MARKS_MAX = 10_000;
+/**
  * Shard counts per epoch when `SHARD_EPOCHS` is unset. Queue shards: durability delivers one batch
  * per shard at a time, and a batch lasts as long as its slowest flow, so a long run holds up only
  * the runs on its own shard. Store shards: runs spread over warm objects instead of each paying to

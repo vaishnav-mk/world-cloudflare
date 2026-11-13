@@ -17,6 +17,11 @@ export class QueueConsumer extends WorkerEntrypoint<Env> {
     if (deliveries.some((delivery) => delivery.body.queueName.endsWith('_retry') && delivery.attempt === 1)) {
       return deliveries.map(() => wake);
     }
+    // A `_flaky` queue fails each message's first attempt and records every attempt as `<id>#<attempt>`.
+    if (deliveries.some((delivery) => delivery.body.queueName.endsWith('_flaky'))) {
+      for (const { id, attempt } of deliveries) await this.env.SINK.getByName('sink').record(`${id}#${attempt}`);
+      return deliveries.map(({ attempt }): DeliveryOutcome => attempt === 1 ? { kind: DeliveryResult.Failed, error: 'flaky' } : { kind: DeliveryResult.Done });
+    }
     // A `_slow` queue holds its delivery open, like a long flow invocation.
     if (deliveries.some((delivery) => delivery.body.queueName.endsWith('_slow'))) await scheduler.wait(1_500);
     for (const delivery of deliveries) await this.env.SINK.getByName('sink').record(delivery.id);

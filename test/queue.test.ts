@@ -122,6 +122,46 @@ describe('durability fanout', () => {
     await expect(routed.queue(queueName, { runId: 'bad-run' }, { deploymentId: 'unknown' })).rejects.toThrow('unavailable');
   });
 
+  it("delivers a run's replays one at a time, and settles pure wakes the replay before them covers", async () => {
+    const runId = `turns-${crypto.randomUUID()}`;
+    const slow = `${getQueueTopicPrefix('workflow')}turns_slow` as ValidQueueName;
+    // One push, so one batch: a wake that carries a retry count must be delivered; the two pure wakes need not.
+    const [named, ...pure] = await queue.queueBatch!(slow, [
+      { message: { runId, serverErrorRetryCount: 1 } }, { message: { runId } }, { message: { runId, requestedAt: new Date() } },
+    ]);
+    await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(named.messageId);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const received = await env.SINK.getByName('sink').received();
+    for (const { messageId } of pure) expect(received).not.toContain(messageId);
+  }, 15_000);
+
+  it('folds any number of wakes queued during a replay into one more replay', async () => {
+    const sink = env.SINK.getByName('sink');
+    const runId = `fold-${crypto.randomUUID()}`;
+    const slow = `${getQueueTopicPrefix('workflow')}fold_slow` as ValidQueueName;
+    const first = (await queue.queue(slow, { runId })).messageId;
+    const shard = env.QUEUE_SHARD.getByName(queueShardFor(runId, { runId }));
+    await expect.poll(() => runInDurableObject(shard, (_shard, state) =>
+      state.storage.sql.exec('SELECT id FROM inflight WHERE id = ?', first).toArray().length)).toBe(1);
+    // More than one batch of wakes, all queued while the first replay runs.
+    const wakes = await Promise.all(Array.from({ length: 25 }, () => queue.queue(slow, { runId, requestedAt: new Date() })));
+    const ids = new Set([first, ...wakes.map(({ messageId }) => messageId)]);
+    const delivered = async () => (await sink.received()).filter((id) => ids.has(id as typeof first)).length;
+    await expect.poll(delivered, { timeout: 10_000 }).toBe(2);
+    // Long enough for a third slow delivery to land, had there been one.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(await delivered()).toBe(2);
+  }, 25_000);
+
+  it('redelivers a failed replay instead of settling the wakes it would have covered', async () => {
+    const runId = `flaky-${crypto.randomUUID()}`;
+    const flaky = `${getQueueTopicPrefix('workflow')}replay_flaky` as ValidQueueName;
+    const [failed, other] = await queue.queueBatch!(flaky, [{ message: { runId } }, { message: { runId, requestedAt: new Date() } }]);
+    // The first replay fails, so the second wake is delivered too; the failed one is redelivered.
+    await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 8_000 })
+      .toEqual(expect.arrayContaining([`${failed.messageId}#1`, `${other.messageId}#1`, `${failed.messageId}#2`]));
+  }, 15_000);
+
   it('retains delayed delivery and rejects another deployment', async () => {
     await expect(queue.queue(queueName, { runId: 'run-2' }, { deploymentId: 'old-v0' })).rejects.toThrow('unavailable');
     const id = (await queue.queue(queueName, { runId: 'run-2' }, { delaySeconds: 1 })).messageId;
