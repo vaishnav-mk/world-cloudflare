@@ -1,10 +1,17 @@
-import { env } from 'cloudflare:test';
+import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { parse } from 'devalue';
 import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY } from '@workflow/world';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
+import { OutboxStatus } from '../packages/world-cloudflare/src/enums.js';
+
+/** Dispatch rows a run still owes. Other runs may share its shard, so `drainOutbox()`'s count is the shard's, not the run's. */
+function owed(runId: string): Promise<number> {
+  return runInDurableObject(env.WORLD_STORE.getByName(storeShardFor(runId)), (_store, state) =>
+    Number(state.storage.sql.exec('SELECT COUNT(*) AS n FROM dispatch_outbox WHERE run_id = ? AND status = ?', runId, OutboxStatus.Pending).one().n));
+}
 
 const store = createStorage(env);
 const bytes = (value: string) => new TextEncoder().encode(value);
@@ -26,10 +33,11 @@ describe('v5 event storage in SQLite DO', () => {
     const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
     expect(await stub.pendingHookWakeSlot(runId)).toBe(Number(received.event!.eventId.slice(5)));
     const before = (await env.SINK.getByName('sink').received()).length;
-    expect(await stub.drainOutbox()).toBe(1);
-    await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toHaveLength(before + 1);
+    expect(await owed(runId)).toBe(1);
+    await stub.drainOutbox();
+    await expect.poll(async () => (await env.SINK.getByName('sink').received()).length, { timeout: 5_000 }).toBeGreaterThan(before);
     expect(await stub.pendingHookWakeSlot(runId)).toBe(0);
-    expect(await stub.drainOutbox()).toBe(0);
+    expect(await owed(runId)).toBe(0);
   });
 
   it('reopens a published wake when its queue delivery reaches the DLQ', async () => {
@@ -111,7 +119,7 @@ describe('v5 event storage in SQLite DO', () => {
       runId, hookResumeTiming: { resumeRequestedAtMs: Date.now(), queuePublishRequestedAtMs: Date.now() },
     });
     expect(await env.WORLD_STORE.getByName(storeShardFor(runId)).pendingHookWakeSlot(runId)).toBe(0);
-    expect(await env.WORLD_STORE.getByName(storeShardFor(runId)).drainOutbox()).toBe(0);
+    expect(await owed(runId)).toBe(0);
   });
 
   it('does not clear a later hook wake when a queue key reuses an earlier delivery', async () => {
@@ -150,7 +158,7 @@ describe('v5 event storage in SQLite DO', () => {
     expect(await stub.pendingRunStartSlot(runId)).toBe(1);
     await store.events.create(runId, { eventType: 'run_started' });
     expect(await stub.pendingRunStartSlot(runId)).toBe(0);
-    expect(await stub.drainOutbox()).toBe(0);
+    expect(await owed(runId)).toBe(0);
   });
 
   it('does not clear step debt when the initial run start publishes', async () => {
@@ -185,10 +193,10 @@ describe('v5 event storage in SQLite DO', () => {
     expect(await stub.pendingHookWakeSlot(runId)).toBe(0);
     const key = `${getQueueTopicPrefix('workflow', 'blue')}example:lost-step:a0eb0f08`;
     const expectedId = `qmsg_${Buffer.from(await crypto.subtle.digest('SHA-256', bytes(key))).toString('hex')}`;
-    expect(await stub.drainOutbox()).toBe(1);
+    await stub.drainOutbox();
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(expectedId);
     expect(await stub.pendingStepDispatchSlot(runId, 'lost-step', 'double')).toBe(0);
-    expect(await stub.drainOutbox()).toBe(0);
+    expect(await owed(runId)).toBe(0);
   });
 
   it('settles only its own pending step when the SDK publishes normally', async () => {
@@ -212,7 +220,9 @@ describe('v5 event storage in SQLite DO', () => {
     expect(await stub.pendingStepDispatchSlot(runId, 'first-step', 'double')).toBe(0);
     expect(await stub.pendingStepDispatchSlot(runId, 'second-step', 'double')).toBe(Number(second.event!.eventId.slice(5)));
     expect(await stub.pendingStepDispatchSlot(runId, 'first-step', 'other')).toBe(0);
-    expect(await stub.drainOutbox()).toBe(1);
+    expect(await owed(runId)).toBe(1);
+    await stub.drainOutbox();
+    expect(await owed(runId)).toBe(0);
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(result.messageId);
     expect((await env.SINK.getByName('sink').received()).filter((id) => id === result.messageId)).toHaveLength(1);
   });
@@ -236,7 +246,7 @@ describe('v5 event storage in SQLite DO', () => {
     // Once a step starts, stale dispatch debt cannot start another body.
     await store.events.create(runId, { eventType: 'step_started', correlationId: 'race-step' });
     expect(await stub.pendingStepDispatchSlot(runId, 'race-step', 'double')).toBe(0);
-    expect(await stub.drainOutbox()).toBe(0);
+    expect(await owed(runId)).toBe(0);
   });
 
   it('deduplicates a racing SDK publish and outbox drain by step identity', async () => {
