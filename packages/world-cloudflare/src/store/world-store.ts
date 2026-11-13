@@ -131,10 +131,15 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return hookView(this.#db.getHook(hookId), resolveData);
   }
 
-  /** For `hooks.get`, which asks every store. The legacy store skips the old directory's copies of sharded hooks. */
+  /**
+   * For `hooks.get`, which asks every store. The legacy store skips the old directory's copies of
+   * sharded hooks, and a finished run's hook past its retention is gone, as with `getHook`.
+   */
   async findHook(hookId: string, resolveData?: ResolveDataMode): Promise<Hook | undefined> {
     const hook = this.#db.findHook(hookId);
-    if (hook === undefined || (this.#isLegacy && this.#db.isRunCopy(hook.runId))) return undefined;
+    if (hook === undefined || (this.#isLegacy && this.#db.isRunCopy(hook.runId)) || this.#db.isExpiredHook(hook, new Date())) {
+      return undefined;
+    }
     return hookView(hook, resolveData);
   }
 
