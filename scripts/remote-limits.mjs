@@ -1,7 +1,8 @@
 // Measures the World's limits against a deployed example Worker.
 //   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-limits.mjs [probe:value ...]
 // With no arguments it runs the default matrix below. Each probe starts one run of a
-// `workflows/limits.ts` workflow and reports how it ended.
+// `workflows/limits.ts` workflow and reports how it ended. A value such as `1024x64` passes
+// several numbers: `streamBytes:1024x64` moves 1024 MiB in 64 MiB chunks.
 import { randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -21,10 +22,16 @@ const DEFAULT_MATRIX = [
   ...[50, 200, 500].map((count) => ['parallelSteps', count]),
   ...[100, 1000, 3000].map((mega) => ['cpuStep', mega]),
   ...[MiB, 10 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['hookPayload', bytes]),
+  // [total MiB, chunk MiB]: the largest chunk, then throughput by chunk size, then total size.
+  ...[[32, 32], [48, 48], [64, 64], [96, 96], [1024, 1], [1024, 8], [1024, 32], [1024, 64], [4096, 32]]
+    .map((args) => ['streamBytes', args]),
 ];
 
 const matrix = process.argv.length > 2
-  ? process.argv.slice(2).map((arg) => { const [name, value] = arg.split(':'); return [name, Number(value)]; })
+  ? process.argv.slice(2).map((arg) => {
+    const [name, value] = arg.split(':');
+    return [name, value.includes('x') ? value.split('x').map(Number) : Number(value)];
+  })
   : DEFAULT_MATRIX;
 
 async function call(path, init = {}) {
@@ -83,7 +90,7 @@ function describe(error) {
   return [...new Set(messages)].slice(0, 3).join(' | ') || text.replace(/\s+/g, ' ').slice(0, 200);
 }
 
-const timeouts = { cpuStep: 300_000, sequentialSteps: 600_000, parallelSteps: 300_000 };
+const timeouts = { cpuStep: 300_000, sequentialSteps: 600_000, parallelSteps: 300_000, streamBytes: 900_000 };
 const results = [];
 for (const [name, value] of matrix) {
   const startedAt = Date.now();
@@ -99,6 +106,8 @@ for (const [name, value] of matrix) {
     row.seconds = Math.round((Date.now() - startedAt) / 100) / 10;
     if (run?.status === 'failed') row.error = describe(run.error);
     if (name === 'sequentialSteps' || name === 'parallelSteps') row.events = await eventCount(runId);
+    // Bytes read, the first wrong byte (-1 for none), and the reading step's seconds and MiB/s.
+    if (name === 'streamBytes' && run?.status === 'completed') row.result = JSON.parse((await call(`/runs/${runId}/result`)).text).value;
     if (name === 'streamChunk' && run?.status === 'completed') {
       const response = await fetch(`${base}/runs/${runId}/streams/limits`, { signal: AbortSignal.timeout(60_000) });
       row.streamed = (await response.arrayBuffer()).byteLength;
