@@ -131,7 +131,9 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
       },
       get: async (runId, eventId, params) =>
         resolveAll(await onRun(stores, runId, (store) => store.getEvent(runId, eventId, params?.resolveData))),
-      list: async (params) => resolveAll(await onRun(stores, params.runId, (store) => store.listEvents(params), answersUnknown)),
+      // An AbortSignal cannot cross RPC; the contract lets a World ignore it.
+      list: async ({ signal: _signal, ...params }) =>
+        resolveAll(await onRun(stores, params.runId, (store) => store.listEvents(params), answersUnknown)),
       listByCorrelationId: async (params) =>
         resolveAll(await onRun(stores, params.runId, (store) => store.listEventsByCorrelationId(params), answersUnknown)),
     },

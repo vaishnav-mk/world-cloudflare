@@ -31,6 +31,16 @@ describe('World v5 contract (workerd bindings)', () => {
     expect(created.run.specVersion).toBeLessThanOrEqual(SPEC_VERSION_MAX_SUPPORTED);
   });
 
+  it('lists events for a caller that passes an AbortSignal, which cannot cross RPC', async () => {
+    const runId = await newRun();
+    const listed = await world.events.list({ runId, signal: new AbortController().signal, specVersion: world.specVersion });
+    expect(listed.data.map((event) => event.eventType)).toEqual(['run_created']);
+  });
+
+  it('declares that only its own queue reaches the flow route', () => {
+    expect(world.queueAuthMode).toBe('skip');
+  });
+
   it('filters runs by one status, several statuses, or an empty set', async () => {
     const name = `contract-status-${crypto.randomUUID()}`;
     const pending = await newRun(name);

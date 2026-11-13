@@ -47,6 +47,8 @@ export function createQueue(env: QueueEnv): Queue {
 
   return {
     getDeploymentId: async () => env.DEPLOYMENT_ID,
+    // Only the queue consumer and private executor dispatch reach the flow route; no public route serves it.
+    queueAuthMode: 'skip',
 
     queue: async (queueName, message, opts) => {
       const [result] = await queueBatch(queueName, [{ message, opts }]);
