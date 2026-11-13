@@ -1,5 +1,5 @@
 diff --git a/packages/builders/src/base-builder.ts b/packages/builders/src/base-builder.ts
-index 1adbf22dc..687b20edf 100644
+index 1adbf22dc..ccdb9223b 100644
 --- a/packages/builders/src/base-builder.ts
 +++ b/packages/builders/src/base-builder.ts
 @@ -1,5 +1,6 @@
@@ -17,7 +17,39 @@ index 1adbf22dc..687b20edf 100644
  import {
    hashManifestSource,
    type ManifestEntryLocation,
-@@ -367,6 +369,7 @@ export abstract class BaseBuilder {
+@@ -66,6 +68,31 @@ const NODE_ESBUILD_SUPPORTED = {
+   'import-attributes': true,
+ } as const;
+ 
++/**
++ * A Workers build registers its World with `setWorld()`, so the built-in
++ * Node Worlds are stubbed rather than bundled: they are dead code there, and
++ * would double the bundle.
++ */
++const workerWorldStubPlugin: esbuild.Plugin = {
++  name: 'workflow-worker-world-stubs',
++  setup(build) {
++    build.onResolve(
++      { filter: /^@workflow\/world-(local|vercel)$/ },
++      ({ path }) => ({
++        path,
++        namespace: 'workflow-worker-world-stub',
++      })
++    );
++    build.onLoad(
++      { filter: /.*/, namespace: 'workflow-worker-world-stub' },
++      ({ path }) => ({
++        contents: `export function createWorld() { throw new Error(${JSON.stringify(`${path} does not run on Cloudflare Workers; register a World with setWorld()`)}); }`,
++        loader: 'js',
++      })
++    );
++  },
++};
++
+ /**
+  * Order the per-file manifest sections deterministically.
+  *
+@@ -367,6 +394,7 @@ export abstract class BaseBuilder {
        '**/.nuxt/**',
        '**/.output/**',
        '**/.vercel/**',
@@ -25,7 +57,17 @@ index 1adbf22dc..687b20edf 100644
        '**/.workflow-data/**',
        '**/.workflow-vitest/**',
        '**/.well-known/workflow/**',
-@@ -1790,18 +1793,66 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1217,6 +1245,9 @@ export const __steps_registered = ${stepsRegistered};
+           rewriteTsExtensions,
+           sideEffectEntries: normalizedSideEffectEntries,
+         }),
++        ...(this.config.buildTarget === 'cloudflare-workers'
++          ? [workerWorldStubPlugin]
++          : []),
+       ],
+       // Plugin should catch most things, but this lets users hard override
+       // if the plugin misses anything that should be externalized
+@@ -1790,18 +1821,66 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
        routeModuleBodyStartedAt: 'workflowRouteModuleBodyStartedAt',
      });
  
@@ -95,7 +137,7 @@ index 1adbf22dc..687b20edf 100644
  ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntrypointOptionsCode})`)}`;
  
      if (!bundleFinalOutput) {
-@@ -1811,10 +1862,12 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1811,10 +1890,12 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
        const bundleStartTime = Date.now();
        const { banner: importMetaBanner, define: importMetaDefine } =
          this.getCjsImportMetaPolyfill(format);
@@ -112,22 +154,33 @@ index 1adbf22dc..687b20edf 100644
        const finalResult = await esbuild.build({
          banner: {
            js: `// biome-ignore-all lint: generated file\n/* eslint-disable */\n${importMetaBanner}${finalEsmRequireBanner}`,
-@@ -1838,6 +1891,9 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+@@ -1836,8 +1917,20 @@ ${createWorkflowRouteHandlersCode(`workflowEntrypoint(workflowCode${workflowEntr
+         keepNames: true,
+         minify: false,
          define: importMetaDefine,
++        plugins:
++          this.config.buildTarget === 'cloudflare-workers'
++            ? [workerWorldStubPlugin]
++            : [],
          external: [
            '@aws-sdk/credential-provider-web-identity',
++          // Wrangler bundles the Worker, so the steps stay their own module,
++          // and each module stays under the size Wrangler's test pool loads.
 +          ...(this.config.buildTarget === 'cloudflare-workers'
-+            ? workerWasmFiles.map(([name]) => `./__quickjs_${name}.wasm`)
++            ? [
++                stepsRelativePath,
++                ...workerWasmFiles.map(([name]) => `./__quickjs_${name}.wasm`),
++              ]
 +            : []),
            ...(this.config.externalPackages || []),
          ],
        });
 diff --git a/packages/builders/src/cloudflare-workers.test.ts b/packages/builders/src/cloudflare-workers.test.ts
 new file mode 100644
-index 000000000..d8e0316e5
+index 000000000..ffc57b7ec
 --- /dev/null
 +++ b/packages/builders/src/cloudflare-workers.test.ts
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,74 @@
 +import {
 +  existsSync,
 +  mkdtempSync,
@@ -179,6 +232,10 @@ index 000000000..d8e0316e5
 +  ).toBe(buildTarget === 'standalone');
 +  // The isolate engine's factory: the same bundle, with globals as parameters.
 +  expect(bundle.includes('code: workflowCode,')).toBe(
++    buildTarget === 'cloudflare-workers'
++  );
++  // A Workers flow route imports its steps module instead of inlining it.
++  expect(bundle.includes('from "./__step_registrations.mjs"')).toBe(
 +    buildTarget === 'cloudflare-workers'
 +  );
 +  for (const name of [
@@ -1144,6 +1201,57 @@ index 19b421de7..254b647fd 100644
    }
 -  return getWorkflowVmFromEnv() === 'quickjs';
 +  return getWorkflowVmFromEnv() ?? 'node';
+ }
+ 
+ /**
+diff --git a/packages/core/src/runtime/wait-until-fallback.test.ts b/packages/core/src/runtime/wait-until-fallback.test.ts
+new file mode 100644
+index 000000000..7bee2d0e3
+--- /dev/null
++++ b/packages/core/src/runtime/wait-until-fallback.test.ts
+@@ -0,0 +1,21 @@
++import { afterEach, expect, it, vi } from 'vitest';
++import { waitUntil } from './wait-until.js';
++
++vi.mock('@vercel/functions', () => {
++  throw new Error('cannot load @vercel/functions');
++});
++
++const requestContext = Symbol.for('@vercel/request-context');
++const host = globalThis as { [requestContext]?: unknown };
++
++afterEach(() => {
++  delete host[requestContext];
++});
++
++it('hands the promise to the request context when @vercel/functions cannot load', async () => {
++  const handed = vi.fn();
++  host[requestContext] = { get: () => ({ waitUntil: handed }) };
++  const promise = Promise.resolve();
++  waitUntil(promise);
++  await vi.waitFor(() => expect(handed).toHaveBeenCalledWith(promise));
++});
+diff --git a/packages/core/src/runtime/wait-until.ts b/packages/core/src/runtime/wait-until.ts
+index 4f4845460..685c56d6f 100644
+--- a/packages/core/src/runtime/wait-until.ts
++++ b/packages/core/src/runtime/wait-until.ts
+@@ -1,7 +1,16 @@
+ export function waitUntil(promise: Promise<unknown>): void {
+-  void import('@vercel/functions').then(({ waitUntil }) => {
+-    waitUntil(promise);
+-  });
++  void import('@vercel/functions').then(
++    ({ waitUntil }) => {
++      waitUntil(promise);
++    },
++    // A host that cannot load the module (a Workers test pool cannot load its
++    // OIDC dependency) still has the request context the module reads.
++    () => {
++      (globalThis as any)[Symbol.for('@vercel/request-context')]
++        ?.get?.()
++        ?.waitUntil?.(promise);
++    }
++  );
  }
  
  /**
