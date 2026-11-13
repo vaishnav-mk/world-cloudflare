@@ -18,7 +18,7 @@ A passing typecheck is not conformance, and none of this is checked by the SDK's
 | `runs.waitForTerminalStatus` | ✓ | ✓ | ✗ | `AbortSignal` is ignored: it cannot cross RPC |
 | `steps.get`, `steps.list` | ✓ | ✓ | ✗ | |
 | `events.create`, atomic with entity state | ✓ | ✓ | ✓ | One SQLite transaction in the run's store shard |
-| `events.list` | ✓ | ✓ | ✓ | |
+| `events.list` | ✓ | ✓ | ✓ | `signal` is ignored: it cannot cross RPC |
 | `events.get`, `events.listByCorrelationId` | ✓ | ✓ | ✗ | |
 | `hooks.get`, `hooks.getByToken`, `hooks.list` | ✓ | ✓ | ✓ | `list` and `getByToken` remotely. `getByToken` reads the token's shard, a run's `list` its run's shard; `get` and a global `list` ask every store |
 | `resolveData: none` and `skip-step-inputs` | ✓ | ✓ | ✗ | `skip-step-inputs` leaves out `step_created` inputs, so replay never loads them from R2 |
@@ -98,7 +98,9 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Analytics | ✗ | ✗ | ✗ | |
 | `hookRetention`, `hookResumeDedup` | ✓ | ✓ | ✗ | Advertised |
 | `hookForceClaim` | ✗ | ✗ | ✗ | Not advertised |
-| `inBandFence`, `maxConcurrency`, `invoke` | ✗ | ✗ | ✗ | Not advertised |
+| `queueAuthMode: 'skip'` | ✓ | ✓ | ✗ | Only the queue consumer and private executor dispatch reach the flow route |
+| `inBandFence`, `maxConcurrency`, `invoke` | ✗ | ✗ | ✗ | Not advertised, so runs stay on spec 8 |
+| `atomicStartHook`, `resolvedHookResume`, `experimental_queueHold`, `events.subscribe` | ✗ | ✗ | ✗ | Not advertised |
 | `deploymentAffinity` | ✗ | ✗ | ✗ | Routing works but the executor registry is a config variable |
 
 ## Operations

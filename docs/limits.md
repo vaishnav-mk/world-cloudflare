@@ -60,7 +60,7 @@ Other costs:
 A 30,000-step `sequentialSteps` run (90,003 events) with QuickJS and per-deployment executors completed in 1,402 s, 81 s of it in pauses between invocations. Three things made that possible:
 - **VM snapshots.** The World implements `experimental_snapshots`: every 1,000 events (`WORKFLOW_SNAPSHOT_THRESHOLD`) the SDK saves the QuickJS heap when an invocation suspends, and the next one restores it instead of replaying the whole log. Each run's snapshot lives in its `RunStreams` object in 1.9 MB parts written in one transaction, and moves over RPC as a stream because it can pass 32 MiB. Without snapshots, the replay at 35,000 events took 80 s.
 - **An inline window for QuickJS.** The SDK runs steps inline in one invocation until its replay budget runs out, but that budget excludes step time, so a QuickJS invocation hit Workers' 300 s CPU limit first and never suspended or snapshotted. The SDK patch gives QuickJS the node engine's 2 minute inline window.
-- **No log rereads.** The SDK walked the whole event log once per step, so step cost grew with the log (13.6 ms per step at 30,000 events locally). The SDK patch memoizes those passes (`runtime/event-log-memo.ts`) and drops settled operations from QuickJS's pending list: 1.2 ms per step at 30,000 events.
+- **No log rereads.** The SDK walked the whole event log once per step, so step cost grew with the log (13.6 ms per step at 30,000 events locally). The SDK patch memoizes those passes (`runtime/event-log-memo.ts`), and the SDK drops settled operations from QuickJS's pending list: 1.2 ms per step at 30,000 events.
 
 The SDK takes the per-run event ceiling from the World's `run_started` result, and this World returns none, so runs are not stopped at 25,000 events.
 
