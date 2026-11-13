@@ -1,0 +1,22 @@
+{
+  "name": "workflow-sdk-cloudflare-test",
+  "workers_dev": false,
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  // The app test config with new runs on spec 9, the single-orchestrator model.
+  "vars": { "DEPLOYMENT_ID": "test-v1", "WORKFLOW_VM": "quickjs", "WORKFLOW_COMPRESSION_CODEC": "gzip", "WORKFLOW_SPEC_VERSION": "9",
+    "WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED": "1", "WORKFLOW_SNAPSHOT_THRESHOLD": "2" },
+  "durable_objects": { "bindings": [
+    { "name": "WORLD_STORE", "class_name": "WorldStore" },
+    { "name": "QUEUE_SHARD", "class_name": "QueueShard" },
+    { "name": "RUN_STREAMS", "class_name": "RunStreams" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldStore", "QueueShard", "RunStreams"] }],
+  "r2_buckets": [
+    { "binding": "DLQ", "bucket_name": "workflow-sdk-test-dlq" },
+    { "binding": "PAYLOADS", "bucket_name": "workflow-sdk-test-payloads" }
+  ],
+  "services": [{ "binding": "CONSUMER", "service": "workflow-sdk-cloudflare-test", "entrypoint": "QueueConsumer" }]
+}
