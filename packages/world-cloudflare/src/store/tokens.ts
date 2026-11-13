@@ -7,7 +7,7 @@ import type { HeldToken, TokenRelease } from '../types.js';
 import type { StoreSchema } from './tables.js';
 
 /** Whether a finished run's hook no longer keeps its token. */
-function retentionLapsed(hook: Hook, now: Date): boolean {
+export function retentionLapsed(hook: Hook, now: Date): boolean {
   return hook.tokenRetentionUntil === undefined || hook.tokenRetentionUntil.getTime() <= now.getTime();
 }
 
@@ -49,12 +49,17 @@ export class TokenRegistry {
     } else if (holder !== undefined && holder.hook.runId !== hook.runId) {
       throw new EntityConflictError(`Hook ${hook.hookId} already exists`);
     }
+    this.give(hook);
+    return null;
+  }
+
+  /** Gives `hook.token` to `hook`, whoever held it: a granted claim, or a completed takeover. */
+  give(hook: Hook): void {
     this.#qb.insert({
       tableName: 'tokens',
       data: { token: hook.token, hook_id: hook.hookId, data: encode(hook), finished: 0 },
       onConflict: 'REPLACE',
     }).execute();
-    return null;
   }
 
   /** Applies a release, unless another hook holds the token by now. */

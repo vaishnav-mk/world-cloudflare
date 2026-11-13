@@ -21,6 +21,9 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       inBandFence: true,
       // A spec 9 run's orchestrator messages share its queue shard, which delivers one at a time.
       maxConcurrency: true,
+      // The token's shard takes the token over once the holder's store disposed of its hook; see
+      // `WorldStore.claimHookTokenForced`.
+      hookForceClaim: true,
     },
     ...createStorage(env),
     ...createQueue(env),

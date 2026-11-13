@@ -1,4 +1,5 @@
 import { createHook, FatalError, getStepMetadata, getWritable, sleep } from 'workflow';
+import { HookForceClaimedError } from 'workflow/errors';
 
 export async function demo(value: number) {
   'use workflow';
@@ -21,6 +22,25 @@ export async function longDelay(value: number) {
 export async function approval(value: number) {
   'use workflow';
   using hook = createHook<number>();
+  return value + await hook;
+}
+
+/** Holds the token `force-<value>` until another run's forced hook takes it, and then returns -1. */
+export async function forceOwner(value: number) {
+  'use workflow';
+  using hook = createHook<number>({ token: `force-${value}` });
+  try {
+    return await hook;
+  } catch (error) {
+    if (HookForceClaimedError.is(error)) return -1;
+    throw error;
+  }
+}
+
+/** Takes the token `force-<value>` over from whichever run holds it. */
+export async function forceClaimer(value: number) {
+  'use workflow';
+  using hook = createHook<number>({ token: `force-${value}`, experimental_force: true });
   return value + await hook;
 }
 

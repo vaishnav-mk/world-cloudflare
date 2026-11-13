@@ -51,6 +51,11 @@ export function journalOf(data: AnyEventRequest, change: Change): AnyEventReques
     case EventType.RunStarted:
       // A lazy start's run fields are journaled in the implied run_created.
       return { eventType: EventType.RunStarted, specVersion: data.specVersion };
+    case EventType.HookCreated:
+      // A forced creation that took the token over names the hook it took, so a replay can wake that run.
+      return change.kind === ChangeKind.HookCreated && change.hook.claimedFrom !== undefined
+        ? { ...data, eventData: { ...data.eventData, forceClaimedFrom: change.hook.claimedFrom } }
+        : data;
     default:
       return data;
   }

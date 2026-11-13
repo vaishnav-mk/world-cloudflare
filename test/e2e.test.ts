@@ -139,6 +139,28 @@ it('resumes a durable hook and continues replay', async () => {
   expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 18 });
 });
 
+it("takes a hook token over from another run, which reads the takeover and the resume goes to the claimer", async () => {
+  const value = Math.floor(Math.random() * 1e9);
+  const statusOf = async (runId: string) => (await (await SELF.fetch(`https://local/runs/${runId}`, { headers })).json() as { status: string }).status;
+  const hookOf = (runId: string) => vi.waitFor(async () => {
+    const hooks = await (await SELF.fetch(`https://local/runs/${runId}/hooks`, { headers })).json() as { data: { token: string }[] };
+    expect(hooks.data[0]?.token).toBe(`force-${value}`);
+  }, { interval: 100, timeout: 10_000 });
+  const owner = await startRun('forceOwner', value);
+  await hookOf(owner);
+  const claimer = await startRun('forceClaimer', value);
+  await hookOf(claimer);
+  // The token's shard disposed of the owner's hook, and the claimer woke it to read that.
+  await expect.poll(() => statusOf(owner), { interval: 100, timeout: 15_000 }).toBe('completed');
+  expect(await (await SELF.fetch(`https://local/runs/${owner}/result`, { headers })).json()).toEqual({ value: -1 });
+  const resumed = await SELF.fetch(`https://local/hooks/force-${value}`, {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(1),
+  });
+  expect(resumed.status).toBe(200);
+  await expect.poll(() => statusOf(claimer), { interval: 100, timeout: 15_000 }).toBe('completed');
+  expect(await (await SELF.fetch(`https://local/runs/${claimer}/result`, { headers })).json()).toEqual({ value: value + 1 });
+});
+
 it('starts a v5 run, executes a real step, returns its result, and replays the subscription', async () => {
   const start = await SELF.fetch('https://local/runs', {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ value: 21 }),

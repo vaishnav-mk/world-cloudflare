@@ -1,5 +1,7 @@
 import { HookNotFoundError, WorkflowRunNotFoundError } from '@workflow/errors';
-import { isTerminalWorkflowRunStatus, slotToEventId, type Hook, type Step, type Wait, type WorkflowRun } from '@workflow/world';
+import {
+  isTerminalWorkflowRunStatus, slotToEventId, type Hook, type HookClaimedFrom, type Step, type Wait, type WorkflowRun,
+} from '@workflow/world';
 import { DOQB, FetchTypes, OrderTypes, Raw } from 'workers-qb';
 import { decode, encode } from '../lib/codec.js';
 import { allRows, findRow, requireRow } from '../lib/qb.js';
@@ -7,6 +9,9 @@ import type { EventRow, RecordRow } from './rows.js';
 import type { StoreSchema } from './tables.js';
 
 export type RecordTable = 'runs' | 'steps' | 'hooks';
+
+/** A hook another run took over: its token, the hook that took it, and what the takeover answered. */
+export type ForcedDisposal = { token: string; claimedBy: { runId: string; hookId: string }; claimedFrom: HookClaimedFrom };
 
 /** Upserts replace the encoded entity and keep the row's identity columns. */
 const replaceData = { data: new Raw('excluded.data') };
@@ -141,6 +146,27 @@ export class Db {
       if (retainedUntil === undefined || retainedUntil.getTime() <= now.getTime()) this.deleteHook(hook.hookId);
     }
     return hooks;
+  }
+
+  /** The takeover of a hook another run's forced claim disposed of, if any. */
+  findForcedDisposal(hookId: string): ForcedDisposal | undefined {
+    const row = findRow(this.#qb.fetchOne({
+      tableName: 'forced_disposals', where: { conditions: 'hook_id = ?', params: [hookId] },
+    }));
+    return row === undefined ? undefined : {
+      token: row.token, claimedBy: { runId: row.claimed_by_run_id, hookId: row.claimed_by_hook_id },
+      claimedFrom: decode<HookClaimedFrom>(row.claimed_from),
+    };
+  }
+
+  insertForcedDisposal(runId: string, hookId: string, { token, claimedBy, claimedFrom }: ForcedDisposal): void {
+    this.#qb.insert({
+      tableName: 'forced_disposals',
+      data: {
+        hook_id: hookId, run_id: runId, token, claimed_by_run_id: claimedBy.runId, claimed_by_hook_id: claimedBy.hookId,
+        claimed_from: encode(claimedFrom),
+      },
+    }).execute();
   }
 
   /** Every hook whose token passes `keep`. Only the matches are decoded. */

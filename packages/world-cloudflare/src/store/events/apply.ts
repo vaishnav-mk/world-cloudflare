@@ -164,11 +164,21 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): v
     case ChangeKind.StepAppend:
       db.putStep(change.step);
       break;
-    case ChangeKind.HookCreated:
+    case ChangeKind.HookCreated: {
+      const taken = db.findForcedDisposal(change.hook.hookId);
+      if (taken !== undefined) {
+        // Another run's forced claim took the token before this creation committed: it is disposed at once.
+        appendEvent(db, runId, {
+          eventType: EventType.HookDisposed, correlationId: change.hook.hookId, specVersion: tx.specVersion,
+          eventData: { token: change.hook.token, forceClaimedBy: taken.claimedBy },
+        }, now);
+        break;
+      }
       // The token's shard granted the token, so a hook here that still has it belongs to a finished run past its retention.
       db.deleteHookByToken(change.hook.token);
       db.insertHook(change.hook);
       break;
+    }
     case ChangeKind.HookDisposed:
       db.deleteRunHook(runId, change.hook.hookId);
       releases.owe(change.hook, true);

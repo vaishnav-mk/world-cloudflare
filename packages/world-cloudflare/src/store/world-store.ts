@@ -1,7 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
-import { EntityConflictError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
+import { EntityConflictError, HookForceClaimedError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  CreateEventSchema, isTerminalWorkflowRunStatus, slotToEventId,
+  CreateEventSchema, isTerminalWorkflowRunStatus, slotToEventId, SPEC_VERSION_LEGACY, SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM,
+  type HookClaimedFrom,
   type AnyEventRequest, type BatchEventItemResult, type BatchEventRequest, type CreateEventBatchParams,
   type CreateEventParams, type Event, type EventBatchResult, type EventListResponse, type EventResult, type GetWorkflowRunParams, type Hook,
   type ListEventsByCorrelationIdParams, type ListEventsParams, type ListHooksParams, type ListWorkflowRunStepsParams,
@@ -31,13 +32,14 @@ import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './
 import { advanceFence, applyEvent, checkFence } from './events/apply.js';
 import { checkBatch } from './events/batch.js';
 import { newHook } from './events/hooks.js';
-import { skippedEvents } from './events/journal.js';
-import type { Tokens } from './events/types.js';
+import { appendEvent, skippedEvents } from './events/journal.js';
+import type { TokenAnswer, Tokens } from './events/types.js';
 import { Outbox } from './outbox.js';
 import { listRecords, readEventPage } from './pages.js';
 import { toEvent } from './rows.js';
 import { TokenOutbox } from './token-outbox.js';
 import { TokenRegistry } from './tokens.js';
+import { TokenTakeovers, type Takeover } from './takeovers.js';
 import { hookView, runView, stepView } from './views.js';
 
 /** Storage key a token shard sets once it has imported the legacy store's tokens. */
@@ -78,6 +80,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   readonly #pushQueue: ReturnType<typeof shardPusher>;
   readonly #releases: TokenOutbox;
   readonly #tokens: TokenRegistry;
+  readonly #takeovers: TokenTakeovers;
   readonly #waiters = new Waiters();
   readonly #pageReads = new Semaphore(EVENT_PAGE_READS);
   readonly #isLegacy: boolean;
@@ -91,6 +94,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     this.#pushQueue = shardPusher(env.QUEUE_SHARD);
     this.#releases = new TokenOutbox(ctx.storage.sql);
     this.#tokens = new TokenRegistry(ctx.storage.sql);
+    this.#takeovers = new TokenTakeovers(ctx.storage.sql);
     this.#isLegacy = ctx.id.name === STORE_NAME;
     migrateOnStart(ctx, migrations);
   }
@@ -208,6 +212,12 @@ export class WorldStore extends DurableObject<WorldEnv> {
       if (tokens.kind === TokenClaim.Granted && this.#db.findHook(tokens.hook.hookId) === undefined) {
         this.#releases.owe(tokens.hook, true);
         this.ctx.waitUntil(this.#push());
+      }
+      // A resume of a hook another run took: make sure the token names its new holder before the
+      // resumer looks it up again. The alarm on the token's shard covers a failure here.
+      if (HookForceClaimedError.is(error)) {
+        await this.#store(tokenShardFor(error.token)).finishTakeover(error.token)
+          .catch((cause: unknown) => console.error('Could not finish a token takeover', cause));
       }
       throw error;
     }
@@ -350,14 +360,24 @@ export class WorldStore extends DurableObject<WorldEnv> {
   /** Claims a new hook's token from the token's shard. A write the transaction rejects anyway claims nothing. */
   async #claimToken(runId: string, data: EventOf<EventType.HookCreated>): Promise<Tokens> {
     const run = this.#db.getRun(runId);
-    if (isTerminalWorkflowRunStatus(run.status) || data.eventData.force || this.#db.findHook(data.correlationId)) {
-      return { kind: TokenClaim.None };
-    }
+    if (isTerminalWorkflowRunStatus(run.status) || this.#db.findHook(data.correlationId)) return { kind: TokenClaim.None };
     const hook = newHook(run, data, data.specVersion ?? run.specVersion ?? mintSpecVersion(), new Date());
     // Releases this store owes go first, so a run can claim again a token it just disposed of.
     await this.#push();
-    const holderRunId = await this.#store(tokenShardFor(hook.token)).claimHookToken(hook);
+    const shard = this.#store(tokenShardFor(hook.token));
+    if (data.eventData.force) return shard.claimHookTokenForced(hook);
+    const holderRunId = await shard.claimHookToken(hook);
     return holderRunId === null ? { kind: TokenClaim.Granted, hook } : { kind: TokenClaim.Held, holderRunId };
+  }
+
+  /** A run-scoped call on the store that holds the run: its shard, else the legacy store. */
+  async #onRun<T>(runId: string, call: (store: WorldStore | DurableObjectStub<WorldStore>) => Promise<T>): Promise<T> {
+    try {
+      return await call(this.#store(storeShardFor(runId)));
+    } catch (error) {
+      if (!WorkflowRunNotFoundError.is(error)) throw error;
+    }
+    return call(this.#store(STORE_NAME));
   }
 
   /**
@@ -393,6 +413,110 @@ export class WorldStore extends DurableObject<WorldEnv> {
     if (shard !== this.ctx.id.name) return this.#store(shard).claimHookToken(hook);
     await this.#importLegacyTokens(shard);
     return this.ctx.storage.transactionSync(() => this.#tokens.claim(hook, new Date()));
+  }
+
+  /**
+   * Claims a token for a forced `hook_created`, taking it over from a live holder. The holder's
+   * store disposes of its hook before the token moves, so a resume that already found the holder is
+   * refused there rather than landing in a run that no longer holds the token. The answer is the
+   * grant, whose hook names what it took in `claimedFrom`; or a refusal, when the holder's run
+   * predates forced disposals and would never read one.
+   */
+  async claimHookTokenForced(hook: Hook): Promise<TokenAnswer> {
+    const shard = tokenShardFor(hook.token);
+    if (shard !== this.ctx.id.name) return this.#store(shard).claimHookTokenForced(hook);
+    await this.#importLegacyTokens(shard);
+    // Before the takeover row commits, so a crash cannot strand it.
+    await this.#armAlarm(Date.now() + DISPATCH_RECOVERY_DELAY_MS, 'token takeover');
+    const decided = this.ctx.storage.transactionSync((): TokenAnswer | Takeover => {
+      const holder = this.#tokens.find(hook.token);
+      // Granted before: a retried write gets the same answer, with what the token was taken from.
+      if (holder !== undefined && holder.hook.hookId === hook.hookId && holder.hook.runId === hook.runId) {
+        return { kind: TokenClaim.Granted, hook: holder.hook };
+      }
+      if (holder === undefined || this.#tokens.claim(hook, new Date()) === null) return { kind: TokenClaim.Granted, hook };
+      const pending = this.#takeovers.find(hook.token);
+      if (pending !== undefined && pending.claimer.hookId !== hook.hookId) {
+        throw new WorkflowWorldError(`Hook token ${hook.token} is being taken over by another run; retry`, { status: 503 });
+      }
+      if (pending !== undefined) return pending;
+      this.#takeovers.add(holder.hook, hook, Date.now() + DISPATCH_RECOVERY_DELAY_MS);
+      return { holder: holder.hook, claimer: hook, attempts: 0 };
+    });
+    return 'kind' in decided ? decided : this.#takeOver(decided);
+  }
+
+  /** Finishes a takeover a resume found half done; see `createEvent`. */
+  async finishTakeover(token: string): Promise<void> {
+    const takeover = this.#takeovers.find(token);
+    if (takeover !== undefined) await this.#takeOver(takeover);
+  }
+
+  /** The holder's store disposes of its hook, then the token moves to the claimer. A failure backs off for the alarm. */
+  async #takeOver({ holder, claimer, attempts }: Takeover): Promise<TokenAnswer> {
+    const { token } = claimer;
+    let claimedFrom: HookClaimedFrom | null;
+    try {
+      claimedFrom = await this.#onRun(holder.runId, (store) => store.disposeForcedHook(
+        holder.runId, holder.hookId, token, { runId: claimer.runId, hookId: claimer.hookId },
+      ));
+    } catch (error) {
+      await this.#armAlarm(this.ctx.storage.transactionSync(() => this.#takeovers.recordFailure(token, attempts)), 'token takeover retry');
+      throw error;
+    }
+    return this.ctx.storage.transactionSync((): TokenAnswer => {
+      // Another call finished this takeover first, and another claim may have started since.
+      if (this.#takeovers.find(token)?.claimer.hookId !== claimer.hookId) {
+        const current = this.#tokens.find(token);
+        return current?.hook.hookId === claimer.hookId
+          ? { kind: TokenClaim.Granted, hook: current.hook }
+          : { kind: TokenClaim.Held, holderRunId: current?.hook.runId ?? holder.runId };
+      }
+      this.#takeovers.remove(token);
+      if (claimedFrom === null) return { kind: TokenClaim.Refused, holderRunId: holder.runId };
+      const taken = { ...claimer, claimedFrom };
+      this.#tokens.give(taken);
+      return { kind: TokenClaim.Granted, hook: taken };
+    });
+  }
+
+  /**
+   * For a token's shard taking a hook of this store's run for another run's forced claim: journals
+   * `hook_disposed{forceClaimedBy}` while the run can still read it, and removes the hook. The
+   * takeover is kept, so a later resume is refused naming the new holder, and a hook not created yet
+   * is disposed of as it commits. Returns what the claimer journals as `forceClaimedFrom`, or null
+   * for a running run that predates forced disposals, which keeps its hook.
+   */
+  async disposeForcedHook(
+    runId: string, hookId: string, token: string, claimedBy: { runId: string; hookId: string },
+  ): Promise<HookClaimedFrom | null> {
+    this.#own(runId);
+    if (this.#isLegacy) this.#refuseRunCopy(runId);
+    const db = this.#db;
+    const outcome = this.ctx.storage.transactionSync(() => {
+      const prior = db.findForcedDisposal(hookId);
+      if (prior !== undefined) return { claimedFrom: prior.claimedFrom, journaled: false };
+      const run = db.getRun(runId);
+      const running = !isTerminalWorkflowRunStatus(run.status);
+      const specVersion = run.specVersion ?? SPEC_VERSION_LEGACY;
+      if (running && specVersion < SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM) return null;
+      // A finished run has nothing to wake, so its takeover names no wake target.
+      const claimedFrom: HookClaimedFrom = running
+        ? { runId, hookId, workflowName: run.workflowName, deploymentId: run.deploymentId, runSpecVersion: specVersion }
+        : { runId, hookId };
+      const holds = db.findHook(hookId)?.runId === runId;
+      if (holds && running) {
+        appendEvent(db, runId, {
+          eventType: EventType.HookDisposed, correlationId: hookId, specVersion, eventData: { token, forceClaimedBy: claimedBy },
+        }, new Date());
+      }
+      if (holds) db.deleteRunHook(runId, hookId);
+      db.insertForcedDisposal(runId, hookId, { token, claimedBy, claimedFrom });
+      return { claimedFrom, journaled: holds && running };
+    });
+    if (outcome === null) return null;
+    if (outcome.journaled) this.#waiters.wake(runId);
+    return outcome.claimedFrom;
   }
 
   /** Applies releases from the stores whose hooks held these tokens. */
@@ -605,7 +729,10 @@ export class WorldStore extends DurableObject<WorldEnv> {
     const drained = await drainOutbox(this.#db, this.#outbox,
       (runId, payload, key) => this.env.QUEUE_SHARD.getByName(queueShardFor(runId, payload, key)));
     await this.#push();
-    const due = [this.#outbox.nextDueAt(), this.#releases.nextDueAt()].filter((at) => at !== null);
+    for (const token of this.#takeovers.due(Date.now())) await this.finishTakeover(token).catch((error: unknown) => {
+      console.error('Token takeover failed', { token, error });
+    });
+    const due = [this.#outbox.nextDueAt(), this.#releases.nextDueAt(), this.#takeovers.nextDueAt()].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));
     return drained;
   }

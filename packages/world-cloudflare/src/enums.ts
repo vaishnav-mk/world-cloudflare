@@ -110,6 +110,8 @@ export enum TokenClaim {
   Granted = 'granted',
   /** The token's shard reports that another run holds the token. */
   Held = 'held',
+  /** A forced claim the holder's run cannot take: it predates forced disposals, so it would never read one. */
+  Refused = 'refused',
   /** No claim was made, so the write cannot create a hook. */
   None = 'none',
 }
