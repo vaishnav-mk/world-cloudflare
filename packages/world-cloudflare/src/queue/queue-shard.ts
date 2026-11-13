@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DurabilityFanout, DurabilityScheduler, type DurabilityFanoutMessage, type StoredMessage } from 'durability';
+import { DurabilityFanout, DurabilityScheduler, type DurabilityFanoutMessage, type FanoutTarget, type StoredMessage } from 'durability';
 import { DurabilityRouting, type EnqueueResult as RoutedResult } from 'durability/routing';
 import { parse } from 'devalue';
 import migrations from '../../drizzle/queue/migrations.js';
@@ -25,6 +25,9 @@ type DeadLetter =
   | { kind: MessageKind.WaitContinuation; runId: string; correlationId: string }
   | { kind: MessageKind.HookWake; runId: string };
 
+/** The single `flow` shard's delivery lanes before queue shards. */
+const LEGACY_LANES = Array.from({ length: 8 }, (_, lane) => `${FLOW_TARGET}-${lane}`);
+
 /** One queue shard: delayed, retried delivery of its runs' messages to the `CONSUMER` entrypoint. */
 export class QueueShard extends DurableObject<WorldEnv> {
   readonly #dedup = new DedupTable(this.ctx.storage.sql);
@@ -39,11 +42,11 @@ export class QueueShard extends DurableObject<WorldEnv> {
       maxAttempts: Number(this.env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS),
       delay: (attempt) => Math.min(MAX_QUEUE_RETRY_DELAY_MS, attempt * 1000),
     },
-    targets: {
-      [FLOW_TARGET]: {
-        ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages) => this.#deliver(messages),
-      },
-    },
+    // `flow`, plus the lanes the single `flow` shard delivered to before queue shards, so messages
+    // it still holds for them are delivered. New messages go to `flow` only.
+    targets: Object.fromEntries([FLOW_TARGET, ...LEGACY_LANES].map((target): [string, FanoutTarget<Envelope>] => [target, {
+      ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages) => this.#deliver(messages),
+    }])),
     dlq: (message) => this.#deadLetter(message),
   });
 
@@ -76,7 +79,9 @@ export class QueueShard extends DurableObject<WorldEnv> {
     const ids = new Map<Plan, string>();
     let failure = 'Message was not enqueued';
     if (sends.length) {
-      const result = await this.#fanout.enqueue(sends.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })));
+      const result = await this.#fanout.enqueue(
+        sends.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })), { targets: [FLOW_TARGET] },
+      );
       if (result.success) {
         for (const [index, send] of sends.entries()) {
           ids.set(send, result.value[index]);
