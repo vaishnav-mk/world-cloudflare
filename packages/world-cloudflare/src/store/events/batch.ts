@@ -7,12 +7,25 @@ const UNBATCHABLE: ReadonlySet<string> = new Set<string>([
   EventType.HookCreated, EventType.HookDisposed, EventType.AttrSet,
 ]);
 
+/** What a spec 9 batch may hold: step and wait events, any number per entity. */
+const APPENDS: ReadonlySet<string> = new Set<string>([
+  EventType.StepCreated, EventType.StepStarted, EventType.StepCompleted, EventType.StepFailed, EventType.StepRetrying,
+  EventType.WaitCreated, EventType.WaitCompleted,
+]);
+
 /**
- * Rejects a batch the contract does not allow, before any of it is applied: an unbatchable event
- * type, or more than one event for an entity unless it is `step_created` then `step_started`, which
- * creates the step already running, with its input on the `step_created`.
+ * Rejects a batch the contract does not allow, before any of it is applied. A spec 9 run's batch
+ * holds step and wait events only. An earlier run's batch holds no unbatchable event type, and one
+ * event per entity unless it is `step_created` then `step_started`, which creates the step already
+ * running, with its input on the `step_created`.
  */
-export function checkBatch(events: readonly BatchEventRequest[]): void {
+export function checkBatch(events: readonly BatchEventRequest[], appends: boolean): void {
+  if (appends) {
+    for (const { event } of events) {
+      if (!APPENDS.has(event.eventType)) throw new Error(`${event.eventType} cannot be batched on a spec 9 run`);
+    }
+    return;
+  }
   const byEntity = new Map<string, BatchEventRequest['event'][]>();
   for (const { event } of events) {
     if (UNBATCHABLE.has(event.eventType)) throw new Error(`${event.eventType} cannot be batched`);

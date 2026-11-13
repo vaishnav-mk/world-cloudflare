@@ -1,5 +1,6 @@
 import * as errors from '@workflow/errors';
-import { mintedSpecVersion, type World, type WorkflowRun } from '@workflow/world';
+import type { World, WorkflowRun } from '@workflow/world';
+import { mintSpecVersion } from '../lib/spec.js';
 import {
   decodeResult, encode, isRecord, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcError,
 } from './protocol.js';
@@ -35,7 +36,7 @@ export function createWorld(options: { url?: string; token?: string } = {}): Wor
   };
 
   const world = {
-    specVersion: mintedSpecVersion(),
+    specVersion: mintSpecVersion(),
     runs: {
       get: call(RpcMethod.RunsGet),
       getMany: call(RpcMethod.RunsGetMany),

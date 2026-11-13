@@ -4,6 +4,7 @@ import {
   type AnyEventRequest, type EventResult, type WorkflowRun,
 } from '@workflow/world';
 import { EventType, RunStatus, StepStatus } from '../../enums.js';
+import { isSingleOrchestrator } from '../../lib/spec.js';
 import { unreachable } from '../../lib/unreachable.js';
 import type { EventOf } from '../../types.js';
 import type { Db } from '../db.js';
@@ -65,6 +66,20 @@ export function checkRunAccepts(db: Db, run: WorkflowRun, data: AnyEventRequest)
   if (!isTerminalWorkflowRunStatus(run.status)) {
     const alreadyStarted = data.eventType === EventType.RunStarted && run.status === RunStatus.Running;
     return alreadyStarted ? { run, allocated: 0 } : undefined;
+  }
+  if (isSingleOrchestrator(run.specVersion)) {
+    // Spec 9: outcomes of steps and waits still land after the run ends; new step and wait work does not.
+    switch (data.eventType) {
+      case EventType.StepCompleted:
+      case EventType.StepFailed:
+      case EventType.WaitCompleted:
+        return undefined;
+      case EventType.StepCreated:
+      case EventType.StepStarted:
+      case EventType.StepRetrying:
+      case EventType.WaitCreated:
+        throw new RunExpiredError(`Run ${run.runId} is finished`, run.runId, run.status);
+    }
   }
   switch (data.eventType) {
     case EventType.RunCancelled:

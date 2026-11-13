@@ -1,11 +1,12 @@
-import { EntityConflictError, WorkflowRunNotFoundError } from '@workflow/errors';
+import { EntityConflictError, InBandSupersededError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  getQueueTopicPrefix, getRunQueueNamespace, isTerminalWorkflowRunStatus, mintedSpecVersion,
+  getQueueTopicPrefix, getRunQueueNamespace, IN_BAND_SEQ_AT_RUN_CREATION, isTerminalWorkflowRunStatus,
   requireEventSlot, ValidQueueName,
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type WorkflowRun,
 } from '@workflow/world';
 import { ulid } from 'ulid';
 import { ChangeKind, EventType } from '../../enums.js';
+import { isSingleOrchestrator, mintSpecVersion } from '../../lib/spec.js';
 import type { Db } from '../db.js';
 import type { Outbox } from '../outbox.js';
 import { toEvent } from '../rows.js';
@@ -29,11 +30,13 @@ export function applyEvent(
   checkParams(data, params);
   const runId = requestedRunId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
   if (runId === null) throw new Error('runId is required');
+  const existing = db.findRun(runId);
+  const specVersion = data.specVersion ?? existing?.specVersion ?? mintSpecVersion();
+  // The fence goes first: a stale writer touches nothing and hears 412, never another refusal.
+  const fence = checkFence(db, runId, existing, data, specVersion, params);
   const replayed = replayedResume(db, runId, data, params);
   if (replayed) return replayed;
 
-  const existing = db.findRun(runId);
-  const specVersion = data.specVersion ?? existing?.specVersion ?? mintedSpecVersion();
   const tx: Tx = { db, outbox, releases, tokens, runId, now: new Date(), specVersion };
   const created = createRun(tx, data, existing);
   const run = created?.run ?? existing;
@@ -43,19 +46,68 @@ export function applyEvent(
 
   const change = changeFor(tx, run, data);
   if (change.kind === ChangeKind.HookConflict) {
-    return eventResult(db, appendEvent(db, runId, change.conflict, tx.now), change, params);
+    const conflict = appendEvent(db, runId, change.conflict, tx.now, { occurredAt: params.occurredAt });
+    advanceFence(db, runId, fence, 1);
+    return eventResult(db, conflict, change, params, 1);
   }
   if (created?.implied) appendEvent(db, runId, created.implied, tx.now);
   if (change.kind === ChangeKind.LazyStepStart) appendEvent(db, runId, change.implied, tx.now);
   const event = appendEvent(db, runId, { ...journalOf(data, change), specVersion }, tx.now, params);
   persist(tx, data, event, change);
-  return eventResult(db, event, change, params);
+  // A lazy step start also writes its implied step_created. A lazy run start's implied run_created is
+  // the creation, which the fence counted before this write.
+  const allocated = change.kind === ChangeKind.LazyStepStart ? 2 : 1;
+  advanceFence(db, runId, fence, allocated);
+  return eventResult(db, event, change, params, allocated);
+}
+
+/** A spec 9 run's in-band count before a write, and whether the write is in-band. */
+export type Fence = { count: number; inBand: boolean; creates: boolean };
+
+/**
+ * The in-band fence of spec 9 runs. An in-band write must name the run's current in-band count,
+ * or it is refused with `InBandSupersededError` before anything is written. `run_created` counts as
+ * the first in-band position and is never fenced itself; a lazy `run_started` that creates the run
+ * is checked against that position. Undefined for a run without the fence: below spec 9, or missing.
+ */
+export function checkFence(
+  db: Db, runId: string, existing: WorkflowRun | undefined, data: AnyEventRequest, specVersion: number,
+  params: CreateEventParams,
+): Fence | undefined {
+  const inBand = params.inBand === true;
+  let fence: Fence | undefined;
+  if (existing !== undefined) {
+    if (data.eventType === EventType.RunCreated) return undefined;
+    const count = db.seqInBand(runId);
+    fence = count === null ? undefined : { count, inBand, creates: false };
+  } else if (!isSingleOrchestrator(specVersion)) {
+    return undefined;
+  } else if (data.eventType === EventType.RunCreated) {
+    return { count: 0, inBand: true, creates: true };
+  } else if (data.eventType === EventType.RunStarted) {
+    fence = { count: IN_BAND_SEQ_AT_RUN_CREATION, inBand, creates: true };
+  } else {
+    // A missing run: the write fails as not found.
+    return undefined;
+  }
+  if (!inBand) return fence;
+  if (params.expectedSeqInBand === undefined) {
+    throw new WorkflowWorldError('An in-band write needs expectedSeqInBand', { status: 400 });
+  }
+  if (fence === undefined) throw new WorkflowWorldError(`Run ${runId} has no in-band fence`, { status: 400 });
+  if (params.expectedSeqInBand !== fence.count) {
+    throw new InBandSupersededError(`Run ${runId} has another in-band writer`, { seq: db.lastSlot(runId), seqInBand: fence.count });
+  }
+  return fence;
+}
+
+/** Counts the positions an in-band write allocated, and stores a new run's count. */
+export function advanceFence(db: Db, runId: string, fence: Fence | undefined, allocated: number): void {
+  if (fence === undefined || (!fence.inBand && !fence.creates)) return;
+  db.setSeqInBand(runId, fence.count + (fence.inBand ? allocated : 0));
 }
 
 function checkParams(data: AnyEventRequest, params: CreateEventParams): void {
-  if (params.inBand || params.expectedSeqInBand !== undefined) {
-    throw new Error('In-band writer fencing is not supported');
-  }
   const resumesHook = data.eventType === EventType.HookReceived;
   if (!resumesHook && (params.resumeId || params.resumePayloadDigest)) {
     throw new Error('resumeId is valid only for hook_received');
@@ -109,6 +161,7 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): v
   switch (change.kind) {
     case ChangeKind.Step:
     case ChangeKind.LazyStepStart:
+    case ChangeKind.StepAppend:
       db.putStep(change.step);
       break;
     case ChangeKind.HookCreated:
@@ -121,6 +174,7 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): v
       releases.owe(change.hook, true);
       break;
     case ChangeKind.Wait:
+    case ChangeKind.WaitAppend:
       db.putWait(runId, change.correlationId, change.wait);
       break;
   }
@@ -139,13 +193,16 @@ function recordDispatch(tx: Tx, data: AnyEventRequest, event: Event, run: Workfl
     const queueName = ValidQueueName.parse(`${prefix}${run.workflowName}`);
     outbox.add(runId, requireEventSlot(event.eventId), queueName, run.deploymentId, dueAt.getTime());
   };
+  // A spec 9 run's runtime re-sends its step messages and arms its timers itself, under its own keys.
+  const appends = isSingleOrchestrator(run.specVersion);
   switch (data.eventType) {
     case EventType.RunCreated:
     case EventType.HookReceived:
-    case EventType.StepCreated:
       return owe(now);
+    case EventType.StepCreated:
+      return appends ? undefined : owe(now);
     case EventType.WaitCreated:
-      return owe(data.eventData.resumeAt);
+      return appends ? undefined : owe(data.eventData.resumeAt);
     case EventType.RunStarted:
       return outbox.publishThrough(runId, Number.MAX_SAFE_INTEGER, EventType.RunCreated);
     case EventType.StepStarted:

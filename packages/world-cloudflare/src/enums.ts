@@ -98,6 +98,10 @@ export enum ChangeKind {
   HookConflict = 'hook-conflict',
   HookDisposed = 'hook-disposed',
   Wait = 'wait',
+  /** Spec 9: a step event is an append; the step record follows it but is not returned. */
+  StepAppend = 'step-append',
+  /** Spec 9: a wait event is an append; the wait record follows it but is not returned. */
+  WaitAppend = 'wait-append',
 }
 
 /** How `hook_created` learns whether its token, unique across runs, is free. */

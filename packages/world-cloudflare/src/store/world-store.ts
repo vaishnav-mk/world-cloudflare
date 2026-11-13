@@ -1,9 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
-import { EntityConflictError, WorkflowRunNotFoundError } from '@workflow/errors';
+import { EntityConflictError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  CreateEventSchema, isTerminalWorkflowRunStatus, mintedSpecVersion, slotToEventId,
+  CreateEventSchema, isTerminalWorkflowRunStatus, slotToEventId,
   type AnyEventRequest, type BatchEventItemResult, type BatchEventRequest, type CreateEventBatchParams,
-  type CreateEventParams, type Event, type EventBatchResult, type EventResult, type GetWorkflowRunParams, type Hook,
+  type CreateEventParams, type Event, type EventBatchResult, type EventListResponse, type EventResult, type GetWorkflowRunParams, type Hook,
   type ListEventsByCorrelationIdParams, type ListEventsParams, type ListHooksParams, type ListWorkflowRunStepsParams,
   type ListWorkflowRunsParams, type PaginatedResponse, type Step, type StepWithoutData, type WorkflowRun,
   type WorkflowRunWithoutData,
@@ -14,6 +14,7 @@ import {
   MIN_ALARM_DELAY_MS, REDRIVE_DELAY_MS, RELEASE_KINDS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
+import { isSingleOrchestrator, mintSpecVersion } from '../lib/spec.js';
 import { EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
 import { toJson } from '../lib/json.js';
 import { Semaphore } from '../lib/semaphore.js';
@@ -27,9 +28,10 @@ import type {
 } from '../types.js';
 import { Db } from './db.js';
 import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './dispatch.js';
-import { applyEvent } from './events/apply.js';
+import { advanceFence, applyEvent, checkFence } from './events/apply.js';
 import { checkBatch } from './events/batch.js';
 import { newHook } from './events/hooks.js';
+import { skippedEvents } from './events/journal.js';
 import type { Tokens } from './events/types.js';
 import { Outbox } from './outbox.js';
 import { listRecords, readEventPage } from './pages.js';
@@ -40,6 +42,19 @@ import { hookView, runView, stepView } from './views.js';
 
 /** Storage key a token shard sets once it has imported the legacy store's tokens. */
 const LEGACY_TOKENS_IMPORTED = 'legacy-tokens-imported';
+
+/** A batch item the World refuses on its own, as its single create would be: a 4xx, not a failure of the batch. */
+function isItemRefusal(error: unknown): error is WorkflowWorldError {
+  // `WorkflowWorldError.is` matches the base name only; these errors were made in this object.
+  if (!(error instanceof WorkflowWorldError)) return false;
+  const { status } = error;
+  return status === undefined ? EntityConflictError.is(error) : status >= 400 && status < 500;
+}
+
+function itemRefusal({ status, code, name, message }: WorkflowWorldError): BatchEventItemResult {
+  // An EntityConflictError carries no status: it is the 409.
+  return status === undefined ? { status: 409, error: 'conflict', message } : { status, error: code ?? name, message };
+}
 
 /** A write that frees hook tokens: a disposal, or the run finishing. */
 function freesTokens(data: AnyEventRequest, result: EventResult): boolean {
@@ -162,9 +177,16 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return toEvent(this.#db.getEvent(runId, slot), resolveData);
   }
 
-  async listEvents(params: ListEventsParams): Promise<PaginatedResponse<Event>> {
+  async listEvents(params: ListEventsParams): Promise<EventListResponse> {
     this.#own(params.runId);
-    return this.#pageReads.run(() => readEventPage(this.#db, params));
+    return this.#pageReads.run(async () => {
+      const page = await readEventPage(this.#db, params);
+      // A spec 9 run's fence counts, read right after the page's last read: nothing is awaited
+      // between, so no write lands in between.
+      const seqInBand = this.#db.seqInBand(params.runId);
+      const snapshot = seqInBand === null ? undefined : { seq: this.#db.lastSlot(params.runId), seqInBand };
+      return { ...page, ...(snapshot === undefined ? {} : { snapshot }) };
+    });
   }
 
   async listEventsByCorrelationId(params: ListEventsByCorrelationIdParams): Promise<PaginatedResponse<Event>> {
@@ -201,42 +223,61 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async createEventBatch(
     runId: string, events: BatchEventRequest[], params: CreateEventBatchParams = {},
   ): Promise<EventBatchResult> {
-    checkBatch(events);
     this.#own(runId);
     if (this.#isLegacy) this.#refuseRunCopy(runId);
+    const run = this.#db.getRun(runId);
+    const appends = isSingleOrchestrator(run.specVersion);
+    checkBatch(events, appends);
     const parsed = events.map((item) => ({ ...item, event: CreateEventSchema.parse(item.event) }));
     await this.#armFor(parsed.map(({ event }) => event));
     const storage = this.ctx.storage;
     // A batch cannot hold hook_created, so it never needs a token claim.
     const tokens: Tokens = { kind: TokenClaim.None };
-    const outcomes = storage.transactionSync(() => parsed.map(({ event, occurredAt, computeInstanceId }) => {
-      try {
-        // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
-        return storage.transactionSync(() => applyEvent(this.#db, this.#outbox, this.#releases, tokens, runId, event, {
-          resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
-        }));
-      } catch (error) {
-        if (EntityConflictError.is(error)) return error;
-        throw error;
-      }
-    }));
+    const db = this.#db;
+    const { outcomes, blockStart } = storage.transactionSync(() => {
+      // The whole block is one fenced allocation.
+      const fence = parsed.length === 0 ? undefined
+        : checkFence(db, runId, run, parsed[0].event, run.specVersion ?? mintSpecVersion(), params);
+      const start = db.lastSlot(runId) + 1;
+      // On a spec 9 run, an entity's later events are refused behind its refused one.
+      const refused = new Set<string>();
+      const applied = parsed.map(({ event, occurredAt, computeInstanceId }): EventResult | WorkflowWorldError => {
+        const entity = 'correlationId' in event ? event.correlationId : undefined;
+        if (appends && entity !== undefined && refused.has(entity)) {
+          return new EntityConflictError(`An earlier event for ${entity} in this batch was refused`);
+        }
+        try {
+          // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
+          return storage.transactionSync(() => applyEvent(db, this.#outbox, this.#releases, tokens, runId, event, {
+            resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
+          }));
+        } catch (error) {
+          if (!isItemRefusal(error)) throw error;
+          if (entity !== undefined) refused.add(entity);
+          return error;
+        }
+      });
+      advanceFence(db, runId, fence, applied.reduce((sum, outcome) => sum + (outcome instanceof Error ? 0 : outcome.allocated ?? 0), 0));
+      return { outcomes: applied, blockStart: start };
+    });
     const results: BatchEventItemResult[] = [];
     const committed: EventResult[] = [];
     let frees = false;
     for (const [index, outcome] of outcomes.entries()) {
       if (outcome instanceof Error || outcome.event === undefined) {
-        const message = outcome instanceof Error ? outcome.message : 'The run is finished';
-        results.push({ status: 409, error: 'conflict', message });
+        results.push(outcome instanceof Error ? itemRefusal(outcome) : { status: 409, error: 'conflict', message: 'The run is finished' });
         continue;
       }
       committed.push(outcome);
       frees ||= freesTokens(parsed[index].event, outcome);
-      const { event, run, step, wait } = outcome;
-      results.push({ status: 200, event, run, step, wait });
+      const { event, run: changedRun, step, wait } = outcome;
+      results.push({ status: 200, event, run: changedRun, step, wait });
     }
     this.#wake(committed);
     await this.#afterWrite(frees);
-    return { results };
+    const allocated = committed.reduce((sum, outcome) => sum + (outcome.allocated ?? 0), 0);
+    const skipped = skippedEvents(db, runId, params.eventCount, blockStart, params.resolveData);
+    return { results, allocated, ...(skipped === undefined ? {} : { events: skipped.events, hasMore: skipped.hasMore }) };
   }
 
   #wake(results: EventResult[]): void {
@@ -251,6 +292,9 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async #armFor(events: AnyEventRequest[]): Promise<void> {
     let at = Number.POSITIVE_INFINITY;
     for (const data of events) {
+      // A spec 9 run's steps and waits owe the outbox nothing (see `recordDispatch`).
+      const append = data.eventType === EventType.StepCreated || data.eventType === EventType.WaitCreated;
+      if (append && isSingleOrchestrator(data.specVersion)) continue;
       if (data.eventType === EventType.WaitCreated) {
         at = Math.min(at, Math.max(Date.now() + 1, data.eventData.resumeAt.getTime()));
       } else if (DISPATCH_KINDS.has(data.eventType) || RELEASE_KINDS.has(data.eventType)) {
@@ -309,7 +353,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     if (isTerminalWorkflowRunStatus(run.status) || data.eventData.force || this.#db.findHook(data.correlationId)) {
       return { kind: TokenClaim.None };
     }
-    const hook = newHook(run, data, data.specVersion ?? run.specVersion ?? mintedSpecVersion(), new Date());
+    const hook = newHook(run, data, data.specVersion ?? run.specVersion ?? mintSpecVersion(), new Date());
     // Releases this store owes go first, so a run can claim again a token it just disposed of.
     await this.#push();
     const holderRunId = await this.#store(tokenShardFor(hook.token)).claimHookToken(hook);

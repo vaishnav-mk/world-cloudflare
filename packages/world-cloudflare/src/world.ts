@@ -1,6 +1,7 @@
 import { env as platformEnv } from 'cloudflare:workers';
-import { mintedSpecVersion, type World } from '@workflow/world';
+import type { World } from '@workflow/world';
 import { createGetEncryptionKeyForRun } from './lib/encryption.js';
+import { mintSpecVersion } from './lib/spec.js';
 import { createQueue } from './queue/queue.js';
 import { createStorage } from './store/storage.js';
 import { createSnapshots } from './streams/snapshots.js';
@@ -10,12 +11,14 @@ import type { WorldEnv } from './types.js';
 /** The Cloudflare World. Defaults to the Worker's own bindings. */
 export function createWorld(env: WorldEnv = platformEnv): World {
   return {
-    specVersion: mintedSpecVersion(),
+    specVersion: mintSpecVersion(),
     capabilities: {
       // Hooks keep `tokenRetentionUntil` past their run's end; see `Db.isExpiredHook`.
       hookRetention: { active: true },
       // A unique `(run_id, resume_id)` index, and the store returns the committed event to a retry.
       hookResumeDedup: true,
+      // Spec 9 runs count their in-band positions in `runs.seq_in_band`; see `checkFence`.
+      inBandFence: true,
     },
     ...createStorage(env),
     ...createQueue(env),

@@ -352,7 +352,9 @@ describe('World v5 contract (workerd bindings)', () => {
   });
 
   it('advertises exactly the capabilities it implements', () => {
-    expect(world.capabilities).toEqual({ hookRetention: { active: true }, hookResumeDedup: true });
+    expect(world.capabilities).toEqual({
+      hookRetention: { active: true }, hookResumeDedup: true, inBandFence: true,
+    });
   });
 
   it('validates queue names and delays, keeps keyed message IDs stable, and delays delivery', async () => {

@@ -1,10 +1,11 @@
 import {
-  getEventDataPayloadField, mintedSpecVersion, requireEventSlot,
+  getEventDataPayloadField, requireEventSlot,
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult,
 } from '@workflow/world';
 import { SINCE_CURSOR_LIMIT } from '../../constants.js';
 import { ChangeKind, EventType, SortOrder } from '../../enums.js';
 import { encode } from '../../lib/codec.js';
+import { mintSpecVersion } from '../../lib/spec.js';
 import type { Db } from '../db.js';
 import { listEvents } from '../pages.js';
 import { toEvent, type EventRow } from '../rows.js';
@@ -26,7 +27,7 @@ export function appendEvent(
     slot: db.lastSlot(runId) + 1,
     kind: data.eventType,
     correlation_id: 'correlationId' in data ? data.correlationId ?? null : null,
-    spec_version: data.specVersion ?? mintedSpecVersion(),
+    spec_version: data.specVersion ?? mintSpecVersion(),
     created_at: (params.occurredAt ?? now).getTime(),
     occurred_at: params.occurredAt?.getTime() ?? null,
     resume_id: params.resumeId ?? null,
@@ -55,12 +56,15 @@ export function journalOf(data: AnyEventRequest, change: Change): AnyEventReques
   }
 }
 
-/** The `events.create` result: the event, the entities it touched, and any events the writer missed. */
-export function eventResult(db: Db, event: Event, change: Change, params: CreateEventParams): EventResult {
+/**
+ * The `events.create` result: the event, the entities it touched, how many positions it took, and
+ * any events the writer missed.
+ */
+export function eventResult(db: Db, event: Event, change: Change, params: CreateEventParams, allocated: number): EventResult {
   const reportsRun = event.eventType.startsWith('run_') || event.eventType === EventType.AttrSet;
   const result: EventResult = {
     event,
-    allocated: change.kind === ChangeKind.LazyStepStart ? 2 : 1,
+    allocated,
     ...(reportsRun ? { run: change.run } : {}),
     ...entitiesOf(change),
   };
@@ -71,18 +75,24 @@ export function eventResult(db: Db, event: Event, change: Change, params: Create
     });
     return { ...result, events: page.data, cursor: page.cursor, hasMore: page.hasMore };
   }
-  // A stale writer gets the events it skipped, one page at most: a writer far behind would
-  // otherwise get the whole log, past the 32 MiB RPC limit. The SDK re-reads a truncated report.
-  const seen = params.eventCount;
-  const slot = requireEventSlot(event.eventId);
-  if (seen !== undefined && Number.isSafeInteger(seen) && seen >= 0 && slot > seen + 1) {
-    const rows = db.eventsBetween(event.runId, seen, slot, SINCE_CURSOR_LIMIT + 1);
-    const events = rows.slice(0, SINCE_CURSOR_LIMIT).map((row) => toEvent(row, params.resolveData));
-    const hasMore = rows.length > SINCE_CURSOR_LIMIT;
-    const last = events.at(-1);
-    return { ...result, events, cursor: hasMore && last ? `eid:${last.eventId}` : null, hasMore };
-  }
-  return result;
+  const skipped = skippedEvents(db, event.runId, params.eventCount, requireEventSlot(event.eventId), params.resolveData);
+  return skipped === undefined ? result : { ...result, ...skipped };
+}
+
+/**
+ * The events a stale writer skipped: those after the `seen` events it held and before `slot`,
+ * where its write landed. One page at most: a writer far behind would otherwise get the whole log,
+ * past the 32 MiB RPC limit. The SDK re-reads a truncated report.
+ */
+export function skippedEvents(
+  db: Db, runId: string, seen: number | undefined, slot: number, resolveData: CreateEventParams['resolveData'],
+): { events: Event[]; cursor: string | null; hasMore: boolean } | undefined {
+  if (seen === undefined || !Number.isSafeInteger(seen) || seen < 0 || slot <= seen + 1) return undefined;
+  const rows = db.eventsBetween(runId, seen, slot, SINCE_CURSOR_LIMIT + 1);
+  const events = rows.slice(0, SINCE_CURSOR_LIMIT).map((row) => toEvent(row, resolveData));
+  const hasMore = rows.length > SINCE_CURSOR_LIMIT;
+  const last = events.at(-1);
+  return { events, cursor: hasMore && last ? `eid:${last.eventId}` : null, hasMore };
 }
 
 function entitiesOf(change: Change): Pick<EventResult, 'step' | 'hook' | 'wait' | 'stepCreated'> {
@@ -98,6 +108,9 @@ function entitiesOf(change: Change): Pick<EventResult, 'step' | 'hook' | 'wait' 
     case ChangeKind.Run:
     case ChangeKind.HookConflict:
     case ChangeKind.HookDisposed:
+    // Spec 9 writes return no step or wait: the runtime folds them from the log.
+    case ChangeKind.StepAppend:
+    case ChangeKind.WaitAppend:
       return {};
   }
 }

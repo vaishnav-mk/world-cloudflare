@@ -68,13 +68,14 @@ export async function drainOutbox(db: Db, outbox: Outbox, shardFor: ShardFor): P
  * written with that time, and every reschedule only moves it later.
  */
 function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
-  const runStatus = db.findRun(row.run_id)?.status;
+  const run = db.findRun(row.run_id);
+  const runStatus = run?.status;
   switch (row.kind) {
     case EventType.RunCreated:
       if (runStatus !== RunStatus.Pending) return SETTLE;
-      return { action: DispatchAction.Publish, message: wakeMessage(row, 'run-start'), stillOwed: () => true };
+      return { action: DispatchAction.Publish, message: wakeMessage(row, 'run-start', run?.specVersion), stillOwed: () => true };
     case EventType.HookReceived:
-      return { action: DispatchAction.Publish, message: wakeMessage(row, 'hook-wake'), stillOwed: () => true };
+      return { action: DispatchAction.Publish, message: wakeMessage(row, 'hook-wake', run?.specVersion), stillOwed: () => true };
     case EventType.StepCreated: {
       const step = db.findStep(row.run_id, row.correlation_id);
       if (step?.status !== StepStatus.Pending || runStatus !== RunStatus.Running) return SETTLE;
@@ -133,6 +134,10 @@ function waitMessage(row: OutboxRow, correlationId: string): Message {
   };
 }
 
-function wakeMessage(row: OutboxRow, prefix: 'run-start' | 'hook-wake'): Message {
-  return { key: `${prefix}:${row.run_id}:${row.slot}`, body: { runId: row.run_id } };
+/** Stamped with the run's spec version, as the SDK stamps its own wakes, so the queue routes it by the run's model. */
+function wakeMessage(row: OutboxRow, prefix: 'run-start' | 'hook-wake', runSpecVersion: number | undefined): Message {
+  return {
+    key: `${prefix}:${row.run_id}:${row.slot}`,
+    body: { runId: row.run_id, ...(runSpecVersion === undefined ? {} : { runSpecVersion }) },
+  };
 }

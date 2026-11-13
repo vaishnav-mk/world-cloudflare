@@ -61,4 +61,6 @@ export type Change =
   | { kind: ChangeKind.HookCreated; run: WorkflowRun; hook: Hook }
   | { kind: ChangeKind.HookConflict; run: WorkflowRun; conflict: HookConflictEvent }
   | { kind: ChangeKind.HookDisposed; run: WorkflowRun; hook: Hook }
-  | { kind: ChangeKind.Wait; run: WorkflowRun; wait: Wait; correlationId: string };
+  | { kind: ChangeKind.Wait; run: WorkflowRun; wait: Wait; correlationId: string }
+  | { kind: ChangeKind.StepAppend; run: WorkflowRun; step: Step }
+  | { kind: ChangeKind.WaitAppend; run: WorkflowRun; wait: Wait; correlationId: string };

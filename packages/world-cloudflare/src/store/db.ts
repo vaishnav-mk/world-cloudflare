@@ -47,6 +47,17 @@ export class Db {
     }).execute();
   }
 
+  /** A spec 9 run's in-band count, or null for a run without the fence. */
+  seqInBand(runId: string): number | null {
+    return findRow(this.#qb.fetchOne<'runs', 'seq_in_band'>({
+      tableName: 'runs', fields: ['seq_in_band'], where: { conditions: 'id = ?', params: [runId] },
+    }))?.seq_in_band ?? null;
+  }
+
+  setSeqInBand(runId: string, count: number): void {
+    this.#qb.update({ tableName: 'runs', data: { seq_in_band: count }, where: { conditions: 'id = ?', params: [runId] } }).execute();
+  }
+
   /** Legacy store: whether `id` is the old directory's index copy of a run that lives on a store shard. */
   isRunCopy(id: string): boolean {
     return findRow(this.#qb.fetchOne({
