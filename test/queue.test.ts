@@ -2,7 +2,6 @@ import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject 
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
-import { QueueShard } from '../packages/world-cloudflare/src/queue/queue-shard.js';
 import { queueShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
@@ -79,9 +78,10 @@ describe('durability fanout', () => {
       state.storage.sql.exec(
         'INSERT INTO inflight (id, queue_name, encoded) VALUES (?, ?, ?)', 'cut-off', queueName, '[{"runId":1},"orphan"]',
       );
-      // A new instance over the same storage, as after a deploy or a storage reset.
-      new QueueShard(state, env);
     });
+    // Resets the object, so the next call starts a new instance over the same storage, as after a deploy.
+    await runInDurableObject(env.QUEUE_SHARD.getByName('orphans'), (_shard, state) => state.abort('reset')).catch(() => {});
+    await env.QUEUE_SHARD.getByName('orphans').wake();
     await expect.poll(async () => (await env.SINK.getByName('sink').received()).length, { timeout: 5_000 }).toBe(before + 1);
     expect(await runInDurableObject(env.QUEUE_SHARD.getByName('orphans'), (_shard, state) =>
       state.storage.sql.exec('SELECT id FROM inflight').toArray())).toEqual([]);

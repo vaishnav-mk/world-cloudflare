@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { expect, it } from 'vitest';
@@ -23,6 +23,41 @@ it('creates each object’s tables on first use', async () => {
   await runInDurableObject(env.RUN_STREAMS.getByName(crypto.randomUUID()), (_streams, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['chunks', 'snapshot', 'snapshot_parts', 'streams']));
   });
+});
+
+it('upgrades a queue shard from durability 4.2 with its pending message intact', async () => {
+  // A fresh stub per call: a stub stays broken once its object resets.
+  const shardName = crypto.randomUUID();
+  const shard = () => env.QUEUE_SHARD.getByName(shardName);
+  const id = crypto.randomUUID();
+  const keyOf = (state: DurableObjectState) => state.storage.sql.exec<{ name: string }>(
+    `SELECT name FROM pragma_table_info('durability_fanout_deliveries') WHERE pk > 0 ORDER BY pk`,
+  ).toArray().map(({ name }) => name);
+  await shard().enqueue(id, 'workflow_demo', '[]', 500);
+  await runInDurableObject(shard(), (_shard, state) => {
+    // Back to durability 4.2's schema the way a 4.2 deploy reverts newer migrations: run each stored
+    // down script and forget it. That drops the fanout channel keys and the memo table.
+    const sql = state.storage.sql;
+    const newer = sql.exec<{ name: string; down: string }>(
+      `SELECT name, down FROM durability_migrations WHERE name IN ('durability_0017_fanout_channels', 'durability_0012_create_memos')`,
+    ).toArray();
+    expect(newer).toHaveLength(2);
+    for (const { name, down } of newer) {
+      sql.exec(down);
+      sql.exec('DELETE FROM durability_migrations WHERE name = ?', name);
+    }
+    expect(keyOf(state)).toEqual(['id']);
+  });
+  // A new instance runs durability 5's migrations over that storage, as on deploy.
+  await runInDurableObject(shard(), (_shard, state) => state.abort('reset')).catch(() => {});
+  await runInDurableObject(shard(), (_shard, state) => {
+    expect(keyOf(state)).toEqual(['channel', 'id']);
+    expect(state.storage.sql.exec('SELECT id, channel FROM durability_fanout_messages').toArray()).toEqual([{ id, channel: 'default' }]);
+  });
+  // The new instance has no in-memory timer, so the message waits for the physical alarm.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(await runDurableObjectAlarm(shard())).toBe(true);
+  await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);
 });
 
 it('applies the baselines over tables created before Drizzle, keeping their rows', async () => {
