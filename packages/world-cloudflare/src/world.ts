@@ -1,5 +1,8 @@
 import { env as platformEnv } from 'cloudflare:workers';
+import { WorkflowWorldError } from '@workflow/errors';
 import type { World } from '@workflow/world';
+import { MAX_EXECUTION_CONTEXT_BYTES } from './constants.js';
+import { dynamicCodeKey } from './lib/payloads.js';
 import { createGetEncryptionKeyForRun } from './lib/encryption.js';
 import { currentDeadline } from './lib/request-context.js';
 import { mintSpecVersion } from './lib/spec.js';
@@ -30,6 +33,20 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       // The token's shard takes the token over once the holder's store disposed of its hook; see
       // `WorldStore.claimHookTokenForced`.
       hookForceClaim: true,
+      // The code is stored with the run like any payload, in R2 once it is large.
+      dynamicWorkflowCode: true,
+    },
+    // A dynamic run's code too large for its run_created goes to R2 first, under the run's prefix.
+    uploadDynamicWorkflowCode: async (runId, { code }) => {
+      const key = dynamicCodeKey(runId);
+      await env.PAYLOADS.put(key, code);
+      return key;
+    },
+    validateRunExecutionContext: (context) => {
+      const bytes = new TextEncoder().encode(JSON.stringify(context)).byteLength;
+      if (bytes > MAX_EXECUTION_CONTEXT_BYTES) {
+        throw new WorkflowWorldError(`The run's execution context is ${bytes} bytes, over the ${MAX_EXECUTION_CONTEXT_BYTES}-byte limit`, { status: 400 });
+      }
     },
     // The queue gives up on a delivery after FLOW_ATTEMPT_TIMEOUT_MS, so the SDK hands off before then.
     getRuntimeDeadline: async () => currentDeadline(),

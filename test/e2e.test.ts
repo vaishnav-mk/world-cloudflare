@@ -177,6 +177,19 @@ it('admits one start per start Hook token, and resumes the Hook before the run o
   expect(await run.returnValue).toBe(value + 1);
 });
 
+it.skipIf(process.env.WORKFLOW_EXPERIMENTAL_DYNAMIC_WORKFLOWS !== '1')('runs dynamic workflows, with their code inline or uploaded ahead', async () => {
+  const steps = { double: { stepId: 'step//./workflows/demo//double' } };
+  const source = (padding: string) => `async function workflow(value) {\n  "use workflow";\n  // ${padding}\n  return steps.double(value);\n}`;
+  const inline = await start(source(''), [5], { experimental_dynamic: { steps } });
+  // Random text that compresses past the inline limit, so start() uploads it first.
+  const noise = Array.from(crypto.getRandomValues(new Uint8Array(60_000)), (byte) => (byte % 36).toString(36)).join('');
+  const uploaded = await start(source(noise), [7], { experimental_dynamic: { steps } });
+  expect([await inline.returnValue, await uploaded.returnValue]).toEqual([10, 14]);
+  const code = await world.runs.get(uploaded.runId);
+  expect(code.dynamicWorkflowCode).toBeInstanceOf(Uint8Array);
+  expect((await env.PAYLOADS.list({ prefix: `runs/${uploaded.runId}/dynamic-code/` })).objects).toHaveLength(1);
+});
+
 it('starts a v5 run, executes a real step, returns its result, and replays the subscription', async () => {
   const start = await SELF.fetch('https://local/runs', {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ value: 21 }),

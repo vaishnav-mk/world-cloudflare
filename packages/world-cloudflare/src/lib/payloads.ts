@@ -13,6 +13,16 @@ export function isPayloadRef(bytes: Uint8Array): boolean {
   return bytes.byteLength >= PAYLOAD_REF_PREFIX.byteLength && PAYLOAD_REF_PREFIX.every((byte, index) => bytes[index] === byte);
 }
 
+/** A ref to the payload at an R2 key. */
+export function payloadRef(key: string): Uint8Array {
+  return Uint8Array.of(...PAYLOAD_REF_PREFIX, ...encoder.encode(key));
+}
+
+/** The R2 key of a dynamic run's uploaded workflow code; see `World.uploadDynamicWorkflowCode`. */
+export function dynamicCodeKey(runId: string): string {
+  return `runs/${runId}/dynamic-code/${crypto.randomUUID()}`;
+}
+
 /** The R2 key a ref points at. */
 export function payloadRefKey(ref: Uint8Array): string {
   return decoder.decode(ref.subarray(PAYLOAD_REF_PREFIX.byteLength));
@@ -31,7 +41,7 @@ export function createPayloads(bucket: R2Bucket) {
     const key = `runs/${runId}/${crypto.randomUUID()}`;
     await bucket.put(key, bytes);
     written?.set(key, bytes);
-    return Uint8Array.of(...PAYLOAD_REF_PREFIX, ...encoder.encode(key));
+    return payloadRef(key);
   }
 
   /** The R2 object a ref points at, its body not yet read. */

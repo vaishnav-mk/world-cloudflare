@@ -1,9 +1,10 @@
-import { EntityConflictError, RunExpiredError } from '@workflow/errors';
+import { EntityConflictError, RunExpiredError, WorkflowWorldError } from '@workflow/errors';
 import {
   applyAttributeChanges, isTerminalWorkflowRunStatus, startHookId, validateAttributeChanges, validateAttributeEventDataSize,
   type AnyEventRequest, type EventResult, type StartHook, type WorkflowRun,
 } from '@workflow/world';
 import { EventType, RunStatus, StepStatus, TokenClaim } from '../../enums.js';
+import { payloadRef } from '../../lib/payloads.js';
 import { isSingleOrchestrator } from '../../lib/spec.js';
 import { unreachable } from '../../lib/unreachable.js';
 import type { EventOf } from '../../types.js';
@@ -12,7 +13,7 @@ import type { RunUpdateEvent, Tx } from './types.js';
 
 type NewRunFields = Pick<WorkflowRun, 'deploymentId' | 'workflowName' | 'input'> & Partial<Pick<WorkflowRun,
   'executionContext' | 'dynamicWorkflowCode' | 'encryptionPublicKey' | 'attributes' | 'startHook'>> & {
-  dynamicWorkflowCodeRef?: unknown;
+  dynamicWorkflowCodeRef?: string;
   allowReservedAttributes?: boolean;
 };
 
@@ -53,14 +54,20 @@ export function createRun(
 }
 
 function newRun(tx: Tx, fields: NewRunFields): WorkflowRun {
-  if (fields.dynamicWorkflowCodeRef) throw new Error('Dynamic workflow code refs are not supported');
+  // Code uploaded ahead of the run is kept as a payload ref, which reads resolve from R2. Only the
+  // run's own uploads qualify, so a ref cannot point at another run's data.
+  const ref = fields.dynamicWorkflowCodeRef;
+  if (ref !== undefined && (typeof ref !== 'string' || !ref.startsWith(`runs/${tx.runId}/dynamic-code/`))) {
+    throw new WorkflowWorldError(`Run ${tx.runId} has no uploaded workflow code at that ref`, { status: 400 });
+  }
+  const dynamicWorkflowCode = ref === undefined ? fields.dynamicWorkflowCode : payloadRef(ref);
   if (fields.startHook !== undefined && tx.tokens.kind !== TokenClaim.Granted) throw new Error('A start Hook needs its token claimed first');
   const changes = Object.entries(fields.attributes ?? {}).map(([key, value]) => ({ key, value }));
   validateAttributeChanges(changes, { allowReservedAttributes: fields.allowReservedAttributes === true });
   return {
     runId: tx.runId, status: RunStatus.Pending,
     deploymentId: fields.deploymentId, workflowName: fields.workflowName, input: fields.input,
-    executionContext: fields.executionContext, dynamicWorkflowCode: fields.dynamicWorkflowCode,
+    executionContext: fields.executionContext, dynamicWorkflowCode,
     attributes: fields.attributes ?? {}, encryptionPublicKey: fields.encryptionPublicKey,
     // The admitted start Hook's request, echoed with its ID: how `start()` knows it was admitted.
     ...(fields.startHook === undefined ? {} : { startHook: { ...fields.startHook, hookId: startHookId(tx.runId) } }),

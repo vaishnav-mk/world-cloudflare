@@ -405,10 +405,25 @@ describe('World v5 contract (workerd bindings)', () => {
     await expect(world.runs.cancelMany!({ runIds: [pending, pending] })).rejects.toThrow('duplicates');
   });
 
+  it("stores a dynamic run's uploaded code with the run, and refuses a ref outside the run", async () => {
+    const runId = `wrun_${crypto.randomUUID()}`;
+    const ref = await world.uploadDynamicWorkflowCode!(runId, { workflowName: 'dynamic', code: bytes('code') });
+    const eventData = { deploymentId: 'test-v1', workflowName: 'dynamic', input: bytes('in') };
+    const stolen = await world.events.create(`wrun_${crypto.randomUUID()}`, {
+      eventType: 'run_created', eventData: { ...eventData, dynamicWorkflowCodeRef: ref },
+    }).catch((error: unknown) => error);
+    expect(stolen).toMatchObject({ status: 400 });
+    const created = await world.events.create(runId, { eventType: 'run_created', eventData: { ...eventData, dynamicWorkflowCodeRef: ref } });
+    expect(created.run.dynamicWorkflowCode).toEqual(bytes('code'));
+    expect((await world.runs.get(runId)).dynamicWorkflowCode).toEqual(bytes('code'));
+    expect((await world.events.list({ runId })).data[0]).not.toHaveProperty('eventData.dynamicWorkflowCodeRef');
+    expect(() => world.validateRunExecutionContext!({ big: 'x'.repeat(70_000) })).toThrow('limit');
+  });
+
   it('advertises exactly the capabilities it implements', () => {
     expect(world.capabilities).toEqual({
       hookRetention: { active: true }, atomicStartHook: { active: true }, hookResumeDedup: true, resolvedHookResume: true, inBandFence: true, maxConcurrency: true,
-      hookForceClaim: true,
+      hookForceClaim: true, dynamicWorkflowCode: true,
     });
   });
 
