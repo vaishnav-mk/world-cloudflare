@@ -41,7 +41,8 @@ export function retryDelayMs(attempt: number, maxMs = MAX_QUEUE_RETRY_DELAY_MS):
  * delays are not deliveries: only `DeliveryCounts` feeds `attempt`.
  */
 export class Deliverer {
-  readonly #env: Pick<WorldEnv, 'QUEUE_MAX_ATTEMPTS'>;
+  /** Deliveries before a message is dead-lettered (`QUEUE_MAX_ATTEMPTS`). */
+  readonly #maxAttempts: number;
   readonly #runners: RunnerStubs;
   /** The runner for this shard's messages that replay no run (`stepRunnerFor`). */
   readonly #stepRunner: string;
@@ -54,7 +55,11 @@ export class Deliverer {
   constructor(
     env: Pick<WorldEnv, 'QUEUE_MAX_ATTEMPTS'>, runners: RunnerStubs, stepRunner: string, counts: DeliveryCounts, holds: Holds, inflight: InflightTable,
   ) {
-    this.#env = env;
+    const maxAttempts = Number(env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS);
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+      throw new Error(`QUEUE_MAX_ATTEMPTS must be a positive integer, not ${env.QUEUE_MAX_ATTEMPTS}`);
+    }
+    this.#maxAttempts = maxAttempts;
     this.#runners = runners;
     this.#stepRunner = stepRunner;
     this.#counts = counts;
@@ -65,7 +70,6 @@ export class Deliverer {
   async deliver(messages: FanoutMessage[]): Promise<void> {
     const due: (HandOff & { message: FanoutMessage; appends: boolean; replays: string | undefined })[] = [];
     const running = new Set<string>();
-    const maxAttempts = Number(this.#env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS);
     const now = Date.now();
     this.#counts.prune(now - DELIVERY_COUNT_RETENTION_MS);
     for (const message of messages) {
@@ -97,7 +101,7 @@ export class Deliverer {
       const replayedAt = runId === undefined ? undefined : this.#replayed.get(runId);
       // Left unsettled, so the fanout acks it.
       if (replay?.pure && before.deliveries === 0 && replayedAt !== undefined && deadline <= replayedAt) continue;
-      if (before.deliveries - before.handoffs >= maxAttempts) {
+      if (before.deliveries - before.handoffs >= this.#maxAttempts) {
         await message.deadLetter();
         continue;
       }
