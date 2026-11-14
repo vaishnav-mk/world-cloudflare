@@ -218,7 +218,10 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return legacy.holdsRun(this.#store.db, runId);
   }
 
-  // Dispatch outbox (`dispatch.ts`), called by the queue client and the queue shard's dead-letter handler.
+  // Dispatch outbox (`dispatch.ts`). The queue client calls `dispatch` and `dispatchedSteps`, and the
+  // dead-letter handler the `reopenPublished*` calls. The per-message `pending*` and `mark*` calls
+  // are what queue clients made before `dispatch`; they stay for executors retained from then, since
+  // RPC names are frozen.
 
   /** The outbox slot each queue message would settle, 0 where none is owed, in one call. */
   async pendingDispatchSlots(claims: OutboxClaim[]): Promise<number[]> {
