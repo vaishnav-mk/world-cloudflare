@@ -96,7 +96,10 @@ describe('forced hook claims', () => {
     await world.events.create(owner, hookCreated(owned, token));
     const shard = env.WORLD_STORE.getByName(tokenShardFor(token));
     const hook = { ...(await world.hooks.getByToken(token)), runId: claimer, hookId: hookId('claiming') } satisfies Hook;
-    const first = await shard.claimHookTokenForced(hook);
+    // An old direct caller has no accepted event to recover. It must retry on an updated writer.
+    expect(await shard.claimHookTokenForced(hook).catch((error: unknown) => error)).toMatchObject({ status: 503 });
+    const created = await world.events.create(claimer, hookCreated(hook.hookId, token, true));
+    const first = { kind: 'granted', hook: created.hook };
     expect(first).toMatchObject({ kind: 'granted', hook: { claimedFrom: { runId: owner, hookId: owned } } });
     expect(await shard.claimHookTokenForced(hook)).toEqual(first);
     expect((await eventsOf(owner)).filter((event) => event.eventType === 'hook_disposed')).toHaveLength(1);

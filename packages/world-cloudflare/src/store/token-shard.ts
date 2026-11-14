@@ -3,6 +3,8 @@ import { STORE_NAME } from '../constants.js';
 import { tokenShardFor } from '../lib/shards.js';
 import type { ResolveDataMode, TokenRelease } from '../types.js';
 import type { StoreContext } from './context.js';
+import { retentionLapsed } from './tokens.js';
+import { retryClaim } from './force-claims.js';
 import { hookView } from './views.js';
 
 /** Storage key a token shard sets once it has imported the legacy store's tokens. */
@@ -22,7 +24,15 @@ export async function claimHookToken(store: StoreContext, hook: Hook): Promise<s
   const shard = tokenShardFor(hook.token);
   if (shard !== store.name) return store.peer(shard).claimHookToken(hook);
   await importLegacyTokens(store, shard);
-  return store.ctx.storage.transactionSync(() => store.tokens.claim(hook, new Date()));
+  return store.ctx.storage.transactionSync(() => {
+    if (store.takeovers.find(hook.token) !== undefined) throw retryClaim(hook.token);
+    const holder = store.tokens.find(hook.token);
+    if (holder !== undefined) {
+      if (holder.hook.hookId === hook.hookId && holder.hook.runId === hook.runId) return null;
+      if (!holder.finished || !retentionLapsed(holder.hook, new Date())) return holder.hook.runId;
+    }
+    throw retryClaim(hook.token);
+  });
 }
 
 /** Applies releases from the stores whose hooks held these tokens. */

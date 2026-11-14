@@ -1,13 +1,17 @@
-import { EntityConflictError, HookForceClaimedError, WorkflowWorldError } from '@workflow/errors';
+import { EntityConflictError, HookForceClaimedError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  CreateEventSchema, isTerminalWorkflowRunStatus,
+  CreateEventSchema, isTerminalWorkflowRunStatus, START_HOOK_CANDIDATE_MAX_AGE_MS, ulidToDate,
   type AnyEventRequest, type BatchEventItemResult, type BatchEventRequest, type CreateEventBatchParams, type CreateEventParams,
   type EventBatchResult, type EventResult,
 } from '@workflow/world';
+import { ulid } from 'ulid';
 import { DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, RELEASE_KINDS } from '../constants.js';
 import { BackfillStage, EventType, TokenClaim } from '../enums.js';
+import { encode } from '../lib/codec.js';
+import { sha256Hex } from '../lib/hash.js';
 import { tokenShardFor } from '../lib/shards.js';
 import { isSingleOrchestrator, mintSpecVersion } from '../lib/spec.js';
+import type { HookClaimIntent } from '../types.js';
 import type { StoreContext } from './context.js';
 import { applyEvent } from './events/apply.js';
 import { checkBatch } from './events/batch.js';
@@ -15,28 +19,49 @@ import { advanceFence, checkFence } from './events/fence.js';
 import { skippedEvents } from './events/journal.js';
 import type { Tokens } from './events/types.js';
 import { refuseRunCopy } from './legacy.js';
-import { beforeWrite } from './token-claims.js';
+import { finishIntent, preflight, prepareHook } from './token-claims.js';
 
 /** Writes one event and everything it changes in one transaction; see `applyEvent`. */
 export async function createEvent(
-  store: StoreContext, runId: string | null, request: AnyEventRequest, params?: CreateEventParams,
+  store: StoreContext, runId: string | null, request: AnyEventRequest, params: CreateEventParams = {},
 ): Promise<EventResult> {
   const data = CreateEventSchema.parse(request);
-  const tokens = await beforeWrite(store, runId, data);
-  await armFor(store, [data]);
+  if (runId === null && !store.isLegacy) throw new WorkflowRunNotFoundError('null');
+  const id = runId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
+  if (id === null) throw new Error('runId is required');
+  // Reject already-stale writers before even flushing existing debt; recheck after the awaits.
+  checkFence(store.db, id, store.db.findRun(id), data, data.specVersion ?? mintSpecVersion(), params);
+  // Never hold a run gate across release delivery or index RPCs.
+  await store.pushReleases();
   let result: EventResult;
   try {
-    // No awaits inside: the slot, event, state and outbox rows commit together.
-    result = store.ctx.storage.transactionSync(() => applyEvent(
-      store.db, store.outbox, store.releases, store.index, tokens, runId, data, params,
-    ));
+    result = await store.writeRun(id, async () => {
+      await resumeRunIntent(store, id);
+      checkFence(store.db, id, store.db.findRun(id), data, data.specVersion ?? mintSpecVersion(), params);
+      const hook = await prepareHook(store, id, data);
+      if (hook === undefined) {
+        await armFor(store, [data]);
+        return store.ctx.storage.transactionSync(() => applyEvent(
+          store.db, store.outbox, store.releases, store.index, { kind: TokenClaim.None }, id, data, params,
+        ));
+      }
+      const createdAt = data.eventType === EventType.HookCreated ? null : ulidToDate(id.slice('wrun_'.length));
+      const operation = { id: crypto.randomUUID(), source: store.name, hook, force: data.eventType === EventType.HookCreated && data.eventData.force === true };
+      const intent: HookClaimIntent = {
+        operation, digest: await sha256Hex(encode(operation)),
+        request: { ...data, specVersion: hook.specVersion }, params,
+        ...(createdAt === null ? {} : { expiresAt: createdAt.getTime() + START_HOOK_CANDIDATE_MAX_AGE_MS }),
+      };
+      // Only local storage inside this transaction. A failed alarm rolls admission back too.
+      await store.ctx.storage.transaction(async () => {
+        preflight(store, id, data, params, hook);
+        store.intents.add(intent);
+        await store.armAlarm(Date.now() + DISPATCH_RECOVERY_DELAY_MS, 'hook intent');
+      });
+      return finishIntent(store, intent);
+    });
   } catch (error) {
-    // A token granted for a write that did not commit, such as one racing the run's end, goes back,
-    // unless a concurrent write of the same hook committed with it.
-    if (tokens.kind === TokenClaim.Granted && store.db.findHook(tokens.hook.hookId) === undefined) {
-      store.releases.owe(tokens.hook, true);
-      store.ctx.waitUntil(store.pushReleases());
-    }
+    store.ctx.waitUntil(store.pushReleases());
     // A resume of a hook another run took: make sure the token names its new holder before the
     // resumer looks it up again. The alarm on the token's shard covers a failure here.
     if (HookForceClaimedError.is(error)) {
@@ -78,40 +103,44 @@ export async function createEventBatch(
   store: StoreContext, runId: string, events: BatchEventRequest[], params: CreateEventBatchParams,
 ): Promise<EventBatchResult> {
   const { db, ctx: { storage } } = store;
-  store.own(runId);
-  if (store.isLegacy) refuseRunCopy(db, runId);
-  const run = db.getRun(runId);
-  const appends = isSingleOrchestrator(run.specVersion);
-  checkBatch(events, appends);
-  const parsed = events.map((item) => ({ ...item, event: CreateEventSchema.parse(item.event) }));
-  await armFor(store, parsed.map(({ event }) => event));
-  // A batch cannot hold hook_created, so it never needs a token claim.
-  const tokens: Tokens = { kind: TokenClaim.None };
-  const { outcomes, blockStart } = storage.transactionSync(() => {
-    // The whole block is one fenced allocation.
-    const fence = parsed.length === 0 ? undefined
-      : checkFence(db, runId, run, parsed[0].event, run.specVersion ?? mintSpecVersion(), params);
-    const start = db.lastSlot(runId) + 1;
-    // On a spec 9 run, an entity's later events are refused behind its refused one.
-    const refused = new Set<string>();
-    const applied = parsed.map(({ event, occurredAt, computeInstanceId }): EventResult | WorkflowWorldError => {
-      const entity = 'correlationId' in event ? event.correlationId : undefined;
-      if (appends && entity !== undefined && refused.has(entity)) {
-        return new EntityConflictError(`An earlier event for ${entity} in this batch was refused`);
-      }
-      try {
-        // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
-        return storage.transactionSync(() => applyEvent(db, store.outbox, store.releases, store.index, tokens, runId, event, {
-          resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
-        }));
-      } catch (error) {
-        if (!isItemRefusal(error)) throw error;
-        if (entity !== undefined) refused.add(entity);
-        return error;
-      }
-    });
-    advanceFence(db, runId, fence, applied.reduce((sum, outcome) => sum + (outcome instanceof Error ? 0 : outcome.allocated ?? 0), 0));
-    return { outcomes: applied, blockStart: start };
+  const { outcomes, blockStart, parsed } = await store.writeRun(runId, async () => {
+    await resumeRunIntent(store, runId);
+    store.own(runId);
+    if (store.isLegacy) refuseRunCopy(db, runId);
+    const run = db.getRun(runId);
+    const appends = isSingleOrchestrator(run.specVersion);
+    checkBatch(events, appends);
+    const parsed = events.map((item) => ({ ...item, event: CreateEventSchema.parse(item.event) }));
+    if (parsed.length !== 0) checkFence(db, runId, run, parsed[0].event, run.specVersion ?? mintSpecVersion(), params);
+    await armFor(store, parsed.map(({ event }) => event));
+    // A batch cannot hold hook_created, so it never needs a token claim.
+    const tokens: Tokens = { kind: TokenClaim.None };
+    return { ...storage.transactionSync(() => {
+      // The whole block is one fenced allocation.
+      const fence = parsed.length === 0 ? undefined
+        : checkFence(db, runId, run, parsed[0].event, run.specVersion ?? mintSpecVersion(), params);
+      const start = db.lastSlot(runId) + 1;
+      // On a spec 9 run, an entity's later events are refused behind its refused one.
+      const refused = new Set<string>();
+      const applied = parsed.map(({ event, occurredAt, computeInstanceId }): EventResult | WorkflowWorldError => {
+        const entity = 'correlationId' in event ? event.correlationId : undefined;
+        if (appends && entity !== undefined && refused.has(entity)) {
+          return new EntityConflictError(`An earlier event for ${entity} in this batch was refused`);
+        }
+        try {
+          // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
+          return storage.transactionSync(() => applyEvent(db, store.outbox, store.releases, store.index, tokens, runId, event, {
+            resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
+          }));
+        } catch (error) {
+          if (!isItemRefusal(error)) throw error;
+          if (entity !== undefined) refused.add(entity);
+          return error;
+        }
+      });
+      advanceFence(db, runId, fence, applied.reduce((sum, outcome) => sum + (outcome instanceof Error ? 0 : outcome.allocated ?? 0), 0));
+      return { outcomes: applied, blockStart: start };
+    }), parsed };
   });
   const results: BatchEventItemResult[] = [];
   const committed: EventResult[] = [];
@@ -131,6 +160,19 @@ export async function createEventBatch(
   const allocated = committed.reduce((sum, outcome) => sum + (outcome.allocated ?? 0), 0);
   const skipped = skippedEvents(db, runId, params.eventCount, blockStart, params.resolveData);
   return { results, allocated, ...(skipped === undefined ? {} : { events: skipped.events, hasMore: skipped.hasMore }) };
+}
+
+/** After reset, accepted work precedes every later mutation of this run. Caller holds its gate. */
+async function resumeRunIntent(store: StoreContext, runId: string): Promise<void> {
+  const pending = store.intents.find(runId);
+  if (pending === undefined) return;
+  try {
+    const result = await finishIntent(store, pending);
+    wake(store, [result]);
+  } catch (error) {
+    // Expiration/conflict completed the intent. A transient failure still blocks later mutations.
+    if (store.intents.find(runId) !== undefined) throw error;
+  }
 }
 
 /** A batch item the World refuses on its own, as its single create would be: a 4xx, not a failure of the batch. */
@@ -194,7 +236,8 @@ async function afterWrite(store: StoreContext, frees: boolean): Promise<void> {
   }
   await indexed;
   // A finished run usually owes nothing now, so its store need not wake for the recovery alarm.
-  if (frees && store.outbox.nextDueAt() === null && store.index.nextDueAt() === null
+  if (frees && store.releases.nextDueAt() === null && store.outbox.nextDueAt() === null && store.index.nextDueAt() === null
+    && store.intents.nextDueAt() === null && store.takeovers.nextDueAt() === null
     && store.feed.backfill().stage === BackfillStage.Reported) {
     await store.ctx.storage.deleteAlarm();
   }

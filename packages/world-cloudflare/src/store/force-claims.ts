@@ -5,6 +5,9 @@ import {
 import { DISPATCH_RECOVERY_DELAY_MS, STORE_NAME } from '../constants.js';
 import { EventType, TokenClaim } from '../enums.js';
 import { storeShardFor, tokenShardFor } from '../lib/shards.js';
+import { encode } from '../lib/codec.js';
+import { sha256Hex } from '../lib/hash.js';
+import type { HookClaimDecision, HookClaimOperation, HookClaimReceipt } from '../types.js';
 import type { Peer, StoreContext } from './context.js';
 import { appendEvent } from './events/journal.js';
 import type { TokenAnswer } from './events/types.js';
@@ -29,26 +32,119 @@ export async function claimHookTokenForced(store: StoreContext, hook: Hook): Pro
   const shard = tokenShardFor(hook.token);
   if (shard !== store.name) return store.peer(shard).claimHookTokenForced(hook);
   await importLegacyTokens(store, shard);
-  // Before the takeover row commits, so a crash cannot strand it.
-  await store.armAlarm(Date.now() + DISPATCH_RECOVERY_DELAY_MS, 'token takeover');
-  const { tokens, takeovers } = store;
-  const decided = store.ctx.storage.transactionSync((): TokenAnswer | Takeover => {
-    const holder = tokens.find(hook.token);
-    // Granted before: a retried write gets the same answer, with what the token was taken from.
-    if (holder !== undefined && holder.hook.hookId === hook.hookId && holder.hook.runId === hook.runId) {
-      return { kind: TokenClaim.Granted, hook: holder.hook };
+  const pending = store.takeovers.find(hook.token);
+  if (pending !== undefined) {
+    if (pending.claimer.hookId === hook.hookId && pending.claimer.runId === hook.runId && pending.operation === null) {
+      return takeOver(store, pending);
     }
-    if (tokens.claim(hook, new Date()) === null) return { kind: TokenClaim.Granted, hook };
-    if (holder === undefined) throw new Error('A conflicting token needs a holder');
-    const pending = takeovers.find(hook.token);
-    if (pending !== undefined && pending.claimer.hookId !== hook.hookId) {
-      throw new WorkflowWorldError(`Hook token ${hook.token} is being taken over by another run; retry`, { status: 503 });
-    }
-    if (pending !== undefined) return pending;
-    takeovers.add(holder.hook, hook, Date.now() + DISPATCH_RECOVERY_DELAY_MS);
-    return { holder: holder.hook, claimer: hook, attempts: 0 };
+    throw retryClaim(hook.token);
+  }
+  const holder = store.tokens.find(hook.token);
+  if (holder !== undefined && holder.hook.hookId === hook.hookId && holder.hook.runId === hook.runId) {
+    return { kind: TokenClaim.Granted, hook: holder.hook };
+  }
+  // Old stores cannot prove recoverable requester admission. Retained executors use createEvent instead.
+  throw retryClaim(hook.token);
+}
+
+export function retryClaim(token: string): WorkflowWorldError {
+  return new WorkflowWorldError(`Hook token ${token} needs an accepted operation or has a pending takeover; retry`, { status: 503 });
+}
+
+/** Validate RPC input against the immutable accepted operation before any registry side effect. */
+async function acceptedOperation(store: StoreContext, input: unknown): Promise<{ operation: HookClaimOperation; digest: string }> {
+  if (input === null || typeof input !== 'object' || !('id' in input) || typeof input.id !== 'string'
+    || !('source' in input) || typeof input.source !== 'string') {
+    throw new WorkflowWorldError('Invalid hook operation', { status: 400 });
+  }
+  // This status RPC never enters a run gate, including same-store and reciprocal takeovers.
+  const evidence = await store.peer(input.source).hookClaimEvidence(input.id);
+  if (evidence === undefined) throw new WorkflowWorldError('Hook operation has no accepted intent; retry', { status: 503 });
+  const digest = await sha256Hex(encode(input));
+  if (evidence !== digest) throw new WorkflowWorldError('Hook operation ID reused', { status: 400 });
+  // SAFETY: the immutable admission digest authenticates the entire operation's parsed shape.
+  return { operation: input as HookClaimOperation, digest };
+}
+
+/** Reconstruct grants from the caller's admitted Hook, not a second permanent metadata copy. */
+function readDecision(store: StoreContext, operation: HookClaimOperation): HookClaimDecision | undefined {
+  // SAFETY: only writeDecision writes this key.
+  const receipt = store.ctx.storage.kv.get<HookClaimReceipt>(`hook-decision:${operation.id}`);
+  if (receipt === undefined) return undefined;
+  return receipt.kind === TokenClaim.Granted
+    ? { kind: TokenClaim.Granted, hook: { ...operation.hook, ...(receipt.claimedFrom === undefined ? {} : { claimedFrom: receipt.claimedFrom }) } }
+    : receipt;
+}
+
+function writeDecision(store: StoreContext, operation: HookClaimOperation, answer: HookClaimDecision): void {
+  const receipt: HookClaimReceipt = answer.kind === TokenClaim.Granted
+    ? { kind: TokenClaim.Granted, ...(answer.hook.claimedFrom === undefined ? {} : { claimedFrom: answer.hook.claimedFrom }) }
+    : answer;
+  store.ctx.storage.kv.put(`hook-decision:${operation.id}`, receipt);
+}
+
+/** Both ordinary and forced acquisitions use immutable, operation-bound receipts. */
+export async function claimAcceptedHook(store: StoreContext, input: HookClaimOperation): Promise<HookClaimDecision> {
+  const { operation, digest: binding } = await acceptedOperation(store, input);
+  const { hook } = operation;
+  const shard = tokenShardFor(hook.token);
+  if (shard !== store.name) return store.peer(shard).claimAcceptedHook(operation);
+  await importLegacyTokens(store, shard);
+  const { storage } = store.ctx;
+  const decision = () => {
+    // SAFETY: only this protocol writes operation bindings and canonical answers.
+    const prior = storage.kv.get<string>(`hook-operation:${operation.id}`);
+    if (prior !== undefined && prior !== binding) throw new WorkflowWorldError('Hook operation ID reused', { status: 400 });
+    if (storage.kv.get(`hook-cancelled:${operation.id}`) !== undefined) throw retryClaim(hook.token);
+    return readDecision(store, operation);
+  };
+  const prior = decision();
+  if (prior !== undefined) return prior;
+  const decided = await storage.transaction(async () => {
+    const outcome = storage.transactionSync((): HookClaimDecision | Takeover => {
+      const answer = decision();
+      if (answer !== undefined) return answer;
+      const pending = store.takeovers.find(hook.token);
+      if (pending !== undefined) {
+        if (pending.operation?.id === operation.id) return pending;
+        throw retryClaim(hook.token);
+      }
+      storage.kv.put(`hook-operation:${operation.id}`, binding);
+      const holder = store.tokens.find(hook.token);
+      if (holder !== undefined && holder.hook.hookId === hook.hookId && holder.hook.runId !== hook.runId) {
+        const rejected = { kind: TokenClaim.Rejected } as const;
+        writeDecision(store, operation, rejected);
+        return rejected;
+      }
+      const heldBy = store.tokens.claim(hook, new Date());
+      if (heldBy === null || !operation.force) {
+        const result: TokenAnswer = heldBy === null ? { kind: TokenClaim.Granted, hook } : { kind: TokenClaim.Held, holderRunId: heldBy };
+        writeDecision(store, operation, result);
+        return result;
+      }
+      if (holder === undefined) throw new Error('A conflicting token needs a holder');
+      store.takeovers.add(holder.hook, hook, Date.now() + DISPATCH_RECOVERY_DELAY_MS, operation);
+      return { holder: holder.hook, claimer: hook, attempts: 0, operation };
+    });
+    // The reservation and its alarm commit together, without an RPC or an alarm-deletion gap.
+    if (!('kind' in outcome)) await store.armAlarm(Date.now() + DISPATCH_RECOVERY_DELAY_MS, 'token takeover');
+    return outcome;
   });
   return 'kind' in decided ? decided : takeOver(store, decided);
+}
+
+/** A durable cancellation closes delayed ordinary acquisitions before a release can run. */
+export async function cancelAcceptedHook(store: StoreContext, input: HookClaimOperation): Promise<void> {
+  const { operation, digest: binding } = await acceptedOperation(store, input);
+  const shard = tokenShardFor(operation.hook.token);
+  if (shard !== store.name) return store.peer(shard).cancelAcceptedHook(operation);
+  if (operation.force) throw new WorkflowWorldError('Forced claims must roll forward', { status: 400 });
+  store.ctx.storage.transactionSync(() => {
+    const prior = store.ctx.storage.kv.get<string>(`hook-operation:${operation.id}`);
+    if (prior !== undefined && prior !== binding) throw new WorkflowWorldError('Hook operation ID reused', { status: 400 });
+    store.ctx.storage.kv.put(`hook-operation:${operation.id}`, binding);
+    store.ctx.storage.kv.put(`hook-cancelled:${operation.id}`, true);
+  });
 }
 
 /** On the token's shard: finishes a takeover a resume found half done, or the alarm found due. */
@@ -58,7 +154,8 @@ export async function finishTakeover(store: StoreContext, token: string): Promis
 }
 
 /** The holder's store disposes of its hook, then the token moves to the claimer. A failure backs off for the alarm. */
-async function takeOver(store: StoreContext, { holder, claimer, attempts }: Takeover): Promise<TokenAnswer> {
+async function takeOver(store: StoreContext, takeover: Takeover): Promise<TokenAnswer> {
+  const { holder, claimer, operation } = takeover;
   const { token } = claimer;
   const { tokens, takeovers, ctx: { storage } } = store;
   let claimedFrom: HookClaimedFrom | null;
@@ -67,22 +164,31 @@ async function takeOver(store: StoreContext, { holder, claimer, attempts }: Take
       holder.runId, holder.hookId, token, { runId: claimer.runId, hookId: claimer.hookId },
     ));
   } catch (error) {
-    await store.armAlarm(storage.transactionSync(() => takeovers.recordFailure(token, attempts)), 'token takeover retry');
+    await store.armAlarm(storage.transactionSync(() => takeovers.recordFailure(takeover)), 'token takeover retry');
     throw error;
   }
   return storage.transactionSync((): TokenAnswer => {
     // Another call finished this takeover first, and another claim may have started since.
-    if (takeovers.find(token)?.claimer.hookId !== claimer.hookId) {
-      const current = tokens.find(token);
-      return current?.hook.hookId === claimer.hookId
-        ? { kind: TokenClaim.Granted, hook: current.hook }
-        : { kind: TokenClaim.Held, holderRunId: current?.hook.runId ?? holder.runId };
+    if (operation !== null) {
+      // SAFETY: only claimAcceptedHook and this transaction write canonical decisions.
+      const prior = readDecision(store, operation);
+      if (prior !== undefined) {
+        if (prior.kind === TokenClaim.Rejected) throw new Error('A reserved takeover cannot have an identity conflict');
+        return prior;
+      }
     }
-    takeovers.remove(token);
-    if (claimedFrom === null) return { kind: TokenClaim.Refused, holderRunId: holder.runId };
-    const taken = { ...claimer, claimedFrom };
-    tokens.give(taken);
-    return { kind: TokenClaim.Granted, hook: taken };
+    if (!takeovers.matches(takeover)) throw retryClaim(token);
+    const current = tokens.find(token);
+    if (current !== undefined && (current.hook.hookId !== holder.hookId || current.hook.runId !== holder.runId)) {
+      throw retryClaim(token);
+    }
+    const answer: TokenAnswer = claimedFrom === null
+      ? { kind: TokenClaim.Refused, holderRunId: holder.runId }
+      : { kind: TokenClaim.Granted, hook: { ...claimer, claimedFrom } };
+    if (answer.kind === TokenClaim.Granted) tokens.give(answer.hook);
+    if (operation !== null) writeDecision(store, operation, answer);
+    takeovers.remove(takeover);
+    return answer;
   });
 }
 

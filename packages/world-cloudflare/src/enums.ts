@@ -108,6 +108,8 @@ export enum ChangeKind {
 export enum TokenClaim {
   /** The token's shard granted the token to this hook. */
   Granted = 'granted',
+  /** An immutable registry identity conflict, before any ownership change. */
+  Rejected = 'rejected',
   /** The token's shard reports that another run holds the token. */
   Held = 'held',
   /** A forced claim the holder's run cannot take: it predates forced disposals, so it would never read one. */

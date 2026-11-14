@@ -5,6 +5,7 @@ import { Waiters } from '../lib/waiters.js';
 import { shardPusher } from '../queue/push.js';
 import type { IndexAnswer, WorldEnv } from '../types.js';
 import { Db } from './db.js';
+import { HookClaimIntents } from './hook-intents.js';
 import { IndexOutbox } from './index-outbox.js';
 import { IndexFeed } from './indexing.js';
 import { Outbox } from './outbox.js';
@@ -27,6 +28,8 @@ export class StoreContext {
   readonly releases: TokenOutbox;
   readonly tokens: TokenRegistry;
   readonly takeovers: TokenTakeovers;
+  readonly intents: HookClaimIntents;
+  readonly #writes = new Map<string, { gate: Semaphore; users: number }>();
   readonly index: IndexOutbox;
   readonly runIndex: RunIndex;
   readonly feed: IndexFeed;
@@ -54,6 +57,7 @@ export class StoreContext {
     this.releases = new TokenOutbox(sql);
     this.tokens = new TokenRegistry(sql);
     this.takeovers = new TokenTakeovers(sql);
+    this.intents = new HookClaimIntents(sql, ctx.storage.kv);
     this.index = new IndexOutbox(sql, this.db);
     this.runIndex = new RunIndex(sql, this.db, name);
     this.feed = new IndexFeed(this);
@@ -86,13 +90,28 @@ export class StoreContext {
     if (!this.isLegacy) this.db.getRun(runId);
   }
 
-  /** Moves the alarm earlier when needed. On failure the cron covers the legacy store's rows, the next write a shard's. */
+  /** Only event writers enter. Token/disposal/status RPCs must remain callable during remote claims. */
+  async writeRun<T>(runId: string, work: () => Promise<T>): Promise<T> {
+    let entry = this.#writes.get(runId);
+    if (entry === undefined) {
+      entry = { gate: new Semaphore(1), users: 0 };
+      this.#writes.set(runId, entry);
+    }
+    entry.users++;
+    try {
+      return await entry.gate.run(work);
+    } finally {
+      if (--entry.users === 0) this.#writes.delete(runId);
+    }
+  }
+
+  /** Moves the alarm earlier. A scheduling failure must not acknowledge unrecoverable work. */
   async armAlarm(at: number, purpose: string): Promise<void> {
     try {
       const alarm = await this.ctx.storage.getAlarm();
       if (alarm === null || alarm > at) await this.ctx.storage.setAlarm(at);
-    } catch (error) {
-      console.error(`Failed to schedule ${purpose}`, error);
+    } catch (cause) {
+      throw new Error(`Failed to schedule ${purpose}`, { cause });
     }
   }
 

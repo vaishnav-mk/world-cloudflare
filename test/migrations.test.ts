@@ -15,7 +15,7 @@ it('creates each object’s tables on first use', async () => {
   await runInDurableObject(env.WORLD_STORE.getByName(crypto.randomUUID()), (_store, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining([
       'directory_outbox', 'directory_releases', 'dispatch_outbox', 'events', 'forced_disposals', 'hooks', 'index_hooks', 'index_outbox',
-      'index_runs', 'index_sources', 'runs', 'start_hook_refusals', 'steps', 'token_releases', 'token_takeovers', 'tokens', 'waits',
+      'hook_claim_intents', 'index_runs', 'index_sources', 'runs', 'start_hook_refusals', 'steps', 'token_releases', 'token_takeovers', 'tokens', 'waits',
     ]));
   });
   await runInDurableObject(env.QUEUE_SHARD.getByName(crypto.randomUUID()), (_shard, state) => {
@@ -23,6 +23,25 @@ it('creates each object’s tables on first use', async () => {
   });
   await runInDurableObject(env.RUN_STREAMS.getByName(crypto.randomUUID()), (_streams, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining(['chunks', 'snapshot', 'snapshot_parts', 'streams']));
+  });
+});
+
+it('adds hook intents and operation identities without losing an old pending takeover', async () => {
+  await runInDurableObject(env.WORLD_STORE.getByName(crypto.randomUUID()), async (_store, state) => {
+    const sql = state.storage.sql;
+    sql.exec('DROP TABLE hook_claim_intents');
+    sql.exec('ALTER TABLE token_takeovers DROP COLUMN operation');
+    const latest = storeMigrations.journal.entries.at(-1);
+    if (latest === undefined) throw new Error('Expected a store migration');
+    sql.exec('DELETE FROM __drizzle_migrations WHERE created_at = ?', latest.when);
+    sql.exec('INSERT INTO token_takeovers (token, holder, claimer, attempts, next_at) VALUES (?, ?, ?, ?, ?)',
+      'kept-token', 'kept-holder', 'kept-claimer', 3, Date.now() + 60_000);
+    await migrate(drizzle(state.storage), storeMigrations);
+    expect(sql.exec('SELECT token, holder, claimer, attempts, operation FROM token_takeovers').toArray()).toEqual([
+      { token: 'kept-token', holder: 'kept-holder', claimer: 'kept-claimer', attempts: 3, operation: null },
+    ]);
+    expect(tables(sql)).toContain('hook_claim_intents');
+    sql.exec('DELETE FROM token_takeovers');
   });
 });
 
@@ -71,7 +90,7 @@ it('applies the baselines over tables created before Drizzle, keeping their rows
         'DROP TABLE directory_outbox', 'DROP TABLE directory_releases', 'ALTER TABLE runs DROP COLUMN index_slot',
         'DROP TABLE tokens', 'DROP TABLE token_releases',
         'DROP TABLE forced_disposals', 'DROP TABLE token_takeovers', 'ALTER TABLE runs DROP COLUMN seq_in_band',
-        'DROP TABLE start_hook_refusals',
+        'DROP TABLE start_hook_refusals', 'DROP TABLE hook_claim_intents',
         'DROP TABLE index_outbox', 'DROP TABLE index_runs', 'DROP TABLE index_hooks', 'DROP TABLE index_sources',
       ] },
     { namespace: env.QUEUE_SHARD, migrations: queueMigrations,

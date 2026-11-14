@@ -28,13 +28,13 @@ export function applyEvent(
   db: Db, outbox: Outbox, releases: TokenOutbox, index: IndexOutbox, tokens: Tokens, requestedRunId: string | null,
   data: AnyEventRequest, params: CreateEventParams = {},
 ): EventResult {
-  checkParams(data, params);
   const runId = requestedRunId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
   if (runId === null) throw new Error('runId is required');
   const existing = db.findRun(runId);
   const specVersion = data.specVersion ?? existing?.specVersion ?? mintSpecVersion();
   // The fence goes first: a stale writer touches nothing and hears 412, never another refusal.
   const fence = checkFence(db, runId, existing, data, specVersion, params);
+  checkParams(data, params);
   const replayed = replayedResume(db, runId, data, params);
   if (replayed) return replayed;
 
@@ -141,6 +141,8 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change, ru
           eventType: EventType.HookDisposed, correlationId: change.hook.hookId, specVersion: tx.specVersion,
           eventData: { token: change.hook.token, forceClaimedBy: taken.claimedBy },
         }, now);
+        // Conditional release is harmless if the next owner already holds it, and closes replayed grants.
+        releases.owe(change.hook, true);
         break;
       }
       insertHook(tx, change.hook);

@@ -12,7 +12,7 @@ import { MessageKind } from '../enums.js';
 import { holdsRuns, objectOptions } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type {
-  EnqueueResult, HeldToken, IndexAnswer, IndexBatch, IndexPage, OutboxClaim, QueueDispatch, ResolveDataMode, TokenRelease, WorldEnv,
+  EnqueueResult, HeldToken, HookClaimDecision, HookClaimOperation, IndexAnswer, IndexBatch, IndexPage, OutboxClaim, QueueDispatch, ResolveDataMode, TokenRelease, WorldEnv,
 } from '../types.js';
 import { StoreContext } from './context.js';
 import * as dispatch from './dispatch.js';
@@ -20,6 +20,7 @@ import type { TokenAnswer } from './events/types.js';
 import * as forceClaims from './force-claims.js';
 import * as legacy from './legacy.js';
 import * as reads from './reads.js';
+import { recoverIntents } from './token-claims.js';
 import * as tokenShard from './token-shard.js';
 import * as writes from './writes.js';
 
@@ -46,7 +47,13 @@ export class WorldStore extends DurableObject<WorldEnv> {
     this.#store = new StoreContext(ctx, env.QUEUE_SHARD, env.RUNNER, (name) =>
       (name === ctx.id.name ? this : transientAsWorldError(this.env.WORLD_STORE.getByName(name, objectOptions()))));
     migrateOnStart(ctx, migrations);
-    if (holdsRuns(this.#store.name)) ctx.blockConcurrencyWhile(() => this.#store.feed.resume());
+    ctx.blockConcurrencyWhile(async () => {
+      const store = this.#store;
+      if (holdsRuns(store.name)) await store.feed.resume();
+      const due = [store.intents.nextDueAt(), store.takeovers.nextDueAt()].filter((at) => at !== null);
+      // No network recovery under the constructor gate. The alarm replays accepted work.
+      if (due.length !== 0) await store.armAlarm(Math.min(...due), 'hook recovery startup');
+    });
   }
 
   // Reads, from the World client (`reads.ts`).
@@ -169,6 +176,18 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return forceClaims.claimHookTokenForced(this.#store, hook);
   }
 
+  async claimAcceptedHook(operation: HookClaimOperation): Promise<HookClaimDecision> {
+    return forceClaims.claimAcceptedHook(this.#store, operation);
+  }
+
+  async cancelAcceptedHook(operation: HookClaimOperation): Promise<void> {
+    return forceClaims.cancelAcceptedHook(this.#store, operation);
+  }
+
+  async hookClaimEvidence(id: string): Promise<string | undefined> {
+    return this.#store.intents.evidence(id);
+  }
+
   async finishTakeover(token: string): Promise<void> {
     return forceClaims.finishTakeover(this.#store, token);
   }
@@ -272,13 +291,18 @@ export class WorldStore extends DurableObject<WorldEnv> {
    */
   async drainOutbox(): Promise<number> {
     const store = this.#store;
+    // Persist the next recovery attempt before doing network work, even if this alarm resets.
+    if (store.intents.nextDueAt() !== null || store.takeovers.nextDueAt() !== null) {
+      await store.armAlarm(Date.now() + MIN_ALARM_DELAY_MS, 'hook recovery');
+    }
+    await recoverIntents(store);
     const drained = await dispatch.drainOutbox(store);
     await store.pushReleases();
     for (const token of store.takeovers.due(Date.now())) {
       await forceClaims.finishTakeover(store, token).catch((error: unknown) => console.error('Token takeover failed', { token, error }));
     }
     const indexAt = holdsRuns(store.name) ? await store.feed.alarm() : null;
-    const due = [store.outbox.nextDueAt(), store.releases.nextDueAt(), store.takeovers.nextDueAt(), indexAt].filter((at) => at !== null);
+    const due = [store.outbox.nextDueAt(), store.releases.nextDueAt(), store.takeovers.nextDueAt(), store.intents.nextDueAt(), indexAt].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));
     return drained;
   }

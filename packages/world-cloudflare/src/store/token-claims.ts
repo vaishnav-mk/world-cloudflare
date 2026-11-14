@@ -1,79 +1,50 @@
-import { HookConflictError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
+import { EntityConflictError, HookConflictError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  isTerminalWorkflowRunStatus, START_HOOK_ADMISSION_REJECTED_CODE, START_HOOK_CANDIDATE_MAX_AGE_MS, ulidToDate,
-  type AnyEventRequest, type StartHook, type StartHookRejectionReason,
+  START_HOOK_ADMISSION_REJECTED_CODE, START_HOOK_CANDIDATE_MAX_AGE_MS, ulidToDate,
+  type AnyEventRequest, type CreateEventParams, type EventResult, type Hook, type StartHook, type StartHookRejectionReason,
 } from '@workflow/world';
-import { MAX_START_HOOK_RETENTION_MS, STORE_NAME } from '../constants.js';
+import { DISPATCH_RECOVERY_DELAY_MS, MAX_START_HOOK_RETENTION_MS, STORE_NAME } from '../constants.js';
 import { EventType, TokenClaim } from '../enums.js';
 import { storeShardFor, tokenShardFor } from '../lib/shards.js';
 import { mintSpecVersion } from '../lib/spec.js';
-import type { EventOf } from '../types.js';
+import type { HookClaimIntent } from '../types.js';
 import type { StoreContext } from './context.js';
+import { applyEvent } from './events/apply.js';
 import { newHook, startHookOf } from './events/hooks.js';
-import type { Tokens } from './events/types.js';
 import { refuseRunCopy } from './legacy.js';
 
-/**
- * Checks this store takes the write, and claims a new hook's token from the token's shard before
- * it. A store shard takes writes only for runs that hash to it; the legacy store refuses writes to
- * the old directory's index copies.
- */
-export async function beforeWrite(store: StoreContext, runId: string | null, data: AnyEventRequest): Promise<Tokens> {
-  if (store.isLegacy) {
-    if (runId === null) return { kind: TokenClaim.None };
-    refuseRunCopy(store.db, runId);
-  } else if (runId === null || storeShardFor(runId) !== store.name) {
-    throw new WorkflowRunNotFoundError(String(runId));
+/** Build the provisional grant. No registry mutation is permitted before reducer admission. */
+export async function prepareHook(store: StoreContext, runId: string, data: AnyEventRequest): Promise<Hook | undefined> {
+  if (store.isLegacy) refuseRunCopy(store.db, runId);
+  else if (storeShardFor(runId) !== store.name) throw new WorkflowRunNotFoundError(runId);
+  if (data.eventType === EventType.HookCreated) {
+    const run = store.db.getRun(runId);
+    return newHook(run, data, data.specVersion ?? run.specVersion ?? mintSpecVersion(), new Date());
   }
-  switch (data.eventType) {
-    case EventType.HookCreated:
-      return claimToken(store, runId, data);
-    case EventType.RunCreated:
-      return data.eventData.startHook === undefined ? { kind: TokenClaim.None } : admit(store, runId, data, data.eventData.startHook);
-    case EventType.RunStarted: {
-      // A lazy start creates a run it cannot find, so a shard first rules out a legacy run.
-      if (!store.isLegacy && store.db.findRun(runId) === undefined && await store.peer(STORE_NAME).holdsRun(runId)) {
-        throw new WorkflowRunNotFoundError(runId);
-      }
-      const startHook = data.eventData?.startHook;
-      return startHook === undefined ? { kind: TokenClaim.None } : admit(store, runId, data, startHook);
-    }
-    default:
-      return { kind: TokenClaim.None };
+  const run = store.db.findRun(runId);
+  if (data.eventType !== EventType.RunCreated && data.eventType !== EventType.RunStarted) return undefined;
+  if (data.eventType === EventType.RunStarted && !store.isLegacy && run === undefined && await store.peer(STORE_NAME).holdsRun(runId)) {
+    throw new WorkflowRunNotFoundError(runId);
   }
+  const startHook = data.eventData?.startHook;
+  if (startHook === undefined) return undefined;
+  checkCandidate(store, runId, data.eventType, startHook);
+  if (run !== undefined) return undefined;
+  const { deploymentId, workflowName, encryptionPublicKey } = data.eventData ?? {};
+  if (deploymentId === undefined || workflowName === undefined) throw new WorkflowRunNotFoundError(runId);
+  return startHookOf(runId, { deploymentId, workflowName, encryptionPublicKey }, startHook, data.specVersion ?? mintSpecVersion(), new Date());
 }
 
-/** Claims a new hook's token from the token's shard. A write the transaction rejects anyway claims nothing. */
-async function claimToken(store: StoreContext, runId: string, data: EventOf<EventType.HookCreated>): Promise<Tokens> {
-  const run = store.db.getRun(runId);
-  if (isTerminalWorkflowRunStatus(run.status) || store.db.findHook(data.correlationId)) return { kind: TokenClaim.None };
-  const hook = newHook(run, data, data.specVersion ?? run.specVersion ?? mintSpecVersion(), new Date());
-  // Releases this store owes go first, so a run can claim again a token it just disposed of.
-  await store.pushReleases();
-  const shard = store.peer(tokenShardFor(hook.token));
-  if (data.eventData.force) return shard.claimHookTokenForced(hook);
-  const holderRunId = await shard.claimHookToken(hook);
-  return holderRunId === null ? { kind: TokenClaim.Granted, hook } : { kind: TokenClaim.Held, holderRunId };
+function rejected(message: string, reason: StartHookRejectionReason): WorkflowWorldError {
+  return new WorkflowWorldError(message, { status: 400, code: START_HOOK_ADMISSION_REJECTED_CODE, reason });
 }
 
-/**
- * Admits a start Hook candidate (`start({ experimental_hook })`), on its `run_created` or the
- * queued `run_started` that may create it: claims the token on its shard, and the write then
- * creates the run with its start Hook. A refusal is recorded, so every later copy of the candidate
- * is refused naming the same run; an admitted candidate is its run. Answers None for a candidate
- * already admitted, whose write replays.
- */
-async function admit(
-  store: StoreContext, runId: string, data: EventOf<EventType.RunCreated | EventType.RunStarted>, startHook: StartHook,
-): Promise<Tokens> {
+function checkCandidate(store: StoreContext, runId: string, eventType: 'run_created' | 'run_started', startHook: StartHook): void {
   const { db } = store;
-  const rejected = (message: string, reason: StartHookRejectionReason) =>
-    new WorkflowWorldError(message, { status: 400, code: START_HOOK_ADMISSION_REJECTED_CODE, reason });
   const createdAt = runId.startsWith('wrun_') ? ulidToDate(runId.slice('wrun_'.length)) : null;
   if (createdAt === null) throw rejected(`A start Hook candidate needs a wrun_<ulid> run ID, not ${runId}`, 'invalid');
   const run = db.findRun(runId);
-  // Past the bound a candidate can never be created, so nothing waits on its decision either.
-  if (Date.now() - createdAt.getTime() > START_HOOK_CANDIDATE_MAX_AGE_MS && (run === undefined || data.eventType === EventType.RunCreated)) {
+  if (Date.now() - createdAt.getTime() > START_HOOK_CANDIDATE_MAX_AGE_MS && (run === undefined || eventType === EventType.RunCreated)) {
     throw rejected(`Start Hook candidate ${runId} is too old to be created`, 'expired');
   }
   const until = startHook.tokenRetentionUntil;
@@ -86,24 +57,69 @@ async function admit(
     throw rejected(`Start Hook candidate ${runId} was decided under another token`, 'token_mismatch');
   }
   if (refused !== undefined) throw new HookConflictError(startHook.token, refused.conflictingRunId);
-  if (run !== undefined) {
-    if (run.startHook === undefined) throw rejected(`Run ${runId} was created without a start Hook`, 'ordinary_run');
-    return { kind: TokenClaim.None };
+  if (run !== undefined && run.startHook === undefined) throw rejected(`Run ${runId} was created without a start Hook`, 'ordinary_run');
+}
+
+/** The actual reducer is the validator; nested transactionSync rolls back its provisional writes. */
+export function preflight(store: StoreContext, runId: string, data: AnyEventRequest, params: CreateEventParams, hook: Hook): void {
+  const rollback = {};
+  try {
+    store.ctx.storage.transactionSync(() => {
+      applyEvent(store.db, store.outbox, store.releases, store.index,
+        { kind: TokenClaim.Granted, hook }, runId, data, params);
+      throw rollback;
+    });
+  } catch (error) {
+    if (error !== rollback) throw error;
   }
-  const { deploymentId, workflowName, encryptionPublicKey } = data.eventData ?? {};
-  if (deploymentId === undefined || workflowName === undefined) throw new WorkflowRunNotFoundError(runId);
-  const hook = startHookOf(runId, { deploymentId, workflowName, encryptionPublicKey }, startHook,
-    data.specVersion ?? mintSpecVersion(), new Date());
-  await store.pushReleases();
-  const holderRunId = await store.peer(tokenShardFor(hook.token)).claimHookToken(hook);
-  if (holderRunId === null) return { kind: TokenClaim.Granted, hook };
-  // Another copy of this candidate may have been decided meanwhile; the first decision stands.
-  const decided = store.ctx.storage.transactionSync(() => {
-    const admitted = db.findRun(runId)?.startHook !== undefined;
-    const prior = db.findStartHookRefusal(runId);
-    if (!admitted && prior === undefined) db.insertStartHookRefusal(runId, hook.token, holderRunId);
-    return admitted ? undefined : prior?.conflictingRunId ?? holderRunId;
+}
+
+/** Runs only under the run gate. Acceptance is irreversible; reset/retry must roll it forward. */
+export async function finishIntent(store: StoreContext, intent: HookClaimIntent): Promise<EventResult> {
+  const { operation, request, params, expiresAt } = intent;
+  const { hook } = operation;
+  const shard = store.peer(tokenShardFor(hook.token));
+  if (expiresAt !== undefined && Date.now() > expiresAt) {
+    // A cancellation receipt precedes the conditional release, including claims delayed in transit.
+    await shard.cancelAcceptedHook(operation);
+    store.ctx.storage.transactionSync(() => {
+      store.releases.owe(hook, true);
+      store.intents.complete(intent);
+    });
+    throw rejected(`Start Hook candidate ${hook.runId} is too old to be created`, 'expired');
+  }
+  const tokens = await shard.claimAcceptedHook(operation);
+  if (tokens.kind === TokenClaim.Rejected) {
+    store.intents.complete(intent);
+    throw new EntityConflictError(`Hook ${hook.hookId} already exists`);
+  }
+  if (request.eventType !== EventType.HookCreated && tokens.kind !== TokenClaim.Granted) {
+    if (tokens.kind !== TokenClaim.Held && tokens.kind !== TokenClaim.Refused) throw new Error('Expected a token decision');
+    store.ctx.storage.transactionSync(() => {
+      store.db.insertStartHookRefusal(hook.runId, hook.token, tokens.holderRunId);
+      store.intents.complete(intent);
+    });
+    throw new HookConflictError(hook.token, tokens.holderRunId);
+  }
+  return store.ctx.storage.transactionSync(() => {
+    const result = applyEvent(store.db, store.outbox, store.releases, store.index, tokens, hook.runId, request, params);
+    store.intents.complete(intent);
+    return result;
   });
-  if (decided === undefined) return { kind: TokenClaim.None };
-  throw new HookConflictError(hook.token, decided);
+}
+
+/** Recovery enters the same gate as writers, but never holds it while flushing release/index RPCs. */
+export async function recoverIntents(store: StoreContext): Promise<void> {
+  await Promise.all(store.intents.due().map((runId) => store.writeRun(runId, async () => {
+    const intent = store.intents.find(runId);
+    if (intent === undefined) return;
+    try {
+      const result = await finishIntent(store, intent);
+      if (result.event !== undefined) store.waiters.wake(runId);
+    } catch (error) {
+      store.intents.retry(intent);
+      console.error('Hook claim recovery failed', { runId, error });
+    }
+  })));
+  if (store.intents.nextDueAt() !== null) await store.armAlarm(Date.now() + DISPATCH_RECOVERY_DELAY_MS, 'hook intent retry');
 }

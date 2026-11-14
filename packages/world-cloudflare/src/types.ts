@@ -1,11 +1,26 @@
 import type {
-  AnyEventRequest, Hook, MessageId, PaginatedResponse, Queue, QueueOptions, QueuePayload, ValidQueueName, WorkflowRunWithoutData,
+  AnyEventRequest, CreateEventParams, Hook, HookClaimedFrom, MessageId, PaginatedResponse, Queue, QueueOptions, QueuePayload, ValidQueueName, WorkflowRunWithoutData,
 } from '@workflow/world';
-import type { BackfillStage, DeliveryResult, EventType, MessageKind, ResolveData } from './enums.js';
+import type { BackfillStage, DeliveryResult, EventType, MessageKind, ResolveData, TokenClaim } from './enums.js';
 import type { QueueShard } from './queue/queue-shard.js';
 import type { Runner } from './runner/runner.js';
+import type { TokenAnswer } from './store/events/types.js';
 import type { WorldStore } from './store/world-store.js';
 import type { RunStreams } from './streams/run-streams.js';
+
+/** An internal acquisition, backed by a durable accepted event on its source store. */
+export type HookClaimOperation = { id: string; source: string; hook: Hook; force: boolean };
+export type HookClaimDecision = TokenAnswer | { kind: TokenClaim.Rejected };
+/** The request reconstructs the Hook. Never retain its metadata in a receipt. */
+export type HookClaimReceipt = Exclude<HookClaimDecision, { kind: TokenClaim.Granted }>
+  | { kind: TokenClaim.Granted; claimedFrom?: HookClaimedFrom };
+export type HookClaimIntent = {
+  operation: HookClaimOperation;
+  digest: string;
+  request: AnyEventRequest;
+  params: CreateEventParams;
+  expiresAt?: number;
+};
 
 /** Bindings the World needs. Every Worker that hosts or calls the World declares the same names. */
 export type WorldEnv = {

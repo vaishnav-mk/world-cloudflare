@@ -128,11 +128,22 @@ export const forcedDisposals = sqliteTable('forced_disposals', {
  */
 export const tokenTakeovers = sqliteTable('token_takeovers', {
   token: text('token').primaryKey(),
+  /** Null only for takeovers accepted before operation receipts. */
+  operation: text('operation'),
   /** The encoded hook that holds the token. */
   holder: text('holder').notNull(),
   /** The encoded hook taking it over. */
   claimer: text('claimer').notNull(),
   attempts: integer('attempts').notNull().default(0),
+  next_at: integer('next_at').notNull(),
+});
+
+/** Accepted events awaiting a token decision. One per run, with store-wide hook ID reservations. */
+export const hookClaimIntents = sqliteTable('hook_claim_intents', {
+  run_id: text('run_id').primaryKey(),
+  operation_id: text('operation_id').notNull().unique(),
+  hook_id: text('hook_id').notNull().unique(),
+  data: text('data').notNull(),
   next_at: integer('next_at').notNull(),
 });
 
@@ -214,6 +225,7 @@ export type StoreSchema = {
   token_releases: typeof tokenReleases.$inferSelect;
   forced_disposals: typeof forcedDisposals.$inferSelect;
   token_takeovers: typeof tokenTakeovers.$inferSelect;
+  hook_claim_intents: typeof hookClaimIntents.$inferSelect;
   start_hook_refusals: typeof startHookRefusals.$inferSelect;
   index_outbox: typeof indexOutbox.$inferSelect;
   index_runs: typeof indexRuns.$inferSelect;
