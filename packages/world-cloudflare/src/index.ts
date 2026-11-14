@@ -3,7 +3,7 @@ import { legacyStore, onRun } from './store/route.js';
 import type { WorldEnv } from './types.js';
 import { createWorld } from './world.js';
 
-export { createWorld } from './world.js';
+export { createWorld, registerWorld } from './world.js';
 export { createExecutor } from './executor.js';
 export { createQueueConsumer } from './queue/consumer.js';
 export { QueueShard } from './queue/queue-shard.js';

@@ -26,3 +26,18 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       ? {} : { getEncryptionKeyForRun: createGetEncryptionKeyForRun(env.WORKFLOW_ENCRYPTION_SECRET) }),
   };
 }
+
+/**
+ * Makes `world` the SDK's World, as `setWorld()` from `workflow/runtime` does, by writing the
+ * World cache the SDK reads from `globalThis`.
+ * shortcut: `workflow/runtime` 5.5.0 draws a random ID as it loads, which Workers forbid at startup;
+ * switch to `setWorld()` once a release defers it (upstream main does).
+ */
+export function registerWorld(world: World): void {
+  // SAFETY: the keys `setWorld()` writes; every copy of the SDK in the Worker reads them.
+  const cache = globalThis as unknown as Record<symbol, World | undefined>;
+  cache[Symbol.for('@workflow/world//cache')] = world;
+  cache[Symbol.for('@workflow/world//stubbedCache')] = world;
+  cache[Symbol.for('@workflow/world//cachePromise')] = undefined;
+  cache[Symbol.for('@workflow/world//stubbedCachePromise')] = undefined;
+}
