@@ -371,9 +371,11 @@ it('fails a step that writes a chunk over the chunk limit on its first attempt',
 it('passes a 256 MiB byte stream in chunks at the chunk limit from one step to the next', async () => {
   const chunk = STREAM_CHUNK_MAX_BYTES / MiB;
   const runId = await startRun('streamBytes', [256, chunk]);
-  const result = await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json() as { value: unknown };
+  const result = await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json() as { value: { mibPerSecond: number } };
   // The reading step checked every byte against the pattern the writing step made.
   expect(result.value).toMatchObject({ bytes: 256 * MiB, firstMismatch: -1 });
+  // A sanity floor: locally it read about 380 MiB/s, and 210 MiB/s with 4 KiB reads from the World.
+  expect(result.value.mibPerSecond).toBeGreaterThan(100);
   // Each chunk is an R2 object, and the steps' payloads carry only the stream's name.
   expect((await payloadObjects(runId)).map(({ size }) => size)).toEqual(Array.from({ length: 256 / chunk }, () => chunk * MiB));
 }, 120_000);
