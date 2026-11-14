@@ -2,10 +2,12 @@ import { WorkflowWorldError } from '@workflow/errors';
 import { unwrapInvocationOutcome } from '@workflow/errors/invocation';
 import { MessageId, ValidQueueName, type Queue, type QueueOptions, type QueuePayload } from '@workflow/world';
 import { stringify } from 'devalue';
-import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS } from '../constants.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS, PAYLOAD_MAX_BYTES } from '../constants.js';
 import { MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { fnv1a32Hex, messageIdFor, sha256Hex } from '../lib/hash.js';
+import { isRecord } from '../lib/is-record.js';
+import { tooLarge } from '../lib/payloads.js';
 import { currentRequest, type FlowRequest } from '../lib/request-context.js';
 import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
@@ -124,6 +126,10 @@ export function createQueue(env: QueueEnv): HoldingQueue {
      * delivery in progress, if any. The outcome carries the handler's errors with their class.
      */
     invoke: async (runId, payload, { idempotencyKey = crypto.randomUUID(), timeoutMs } = {}) => {
+      // A hook resume carries its payload to the run's executor, which would run out of memory on
+      // one far over the limit before the write that rejects it, so it is refused here.
+      const bytes = isRecord(payload) && payload.payload instanceof Uint8Array ? payload.payload.byteLength : 0;
+      if (bytes > PAYLOAD_MAX_BYTES) throw tooLarge(`A ${bytes}-byte hook payload is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`);
       const outcome = transientAsWorldError(env.RUNNER.getByName(runnerShardFor(runId), objectOptions())).invoke(runId, payload, idempotencyKey);
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timedOut = new Promise<never>((_, reject) => {

@@ -3,7 +3,7 @@ import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import type { WorldEnv } from '@workflow/world-cloudflare';
-import { TURN_BATCH_MAX, TURN_CALLS_IN_FLIGHT } from '../packages/world-cloudflare/src/constants.js';
+import { PAYLOAD_MAX_BYTES, TURN_BATCH_MAX, TURN_CALLS_IN_FLIGHT } from '../packages/world-cloudflare/src/constants.js';
 import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
 import { queueShardFor, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
@@ -360,5 +360,12 @@ describe('durability fanout', () => {
     await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor('run-2', { runId: 'run-2' })));
     expect(await env.SINK.getByName('sink').received()).not.toContain(id);
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 4000 }).toContain(id);
+  });
+});
+
+describe('invocations', () => {
+  it('refuses a hook payload over the payload limit before reaching the run', async () => {
+    const payload = { type: 'hook_resume', version: 1, hookId: 'hook_big', token: 'token-big', payload: new Uint8Array(PAYLOAD_MAX_BYTES + 1) };
+    await expect(queue.invoke?.('wrun_big', payload)).rejects.toMatchObject({ status: 413, fatal: true });
   });
 });
