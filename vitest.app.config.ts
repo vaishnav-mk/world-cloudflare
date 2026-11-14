@@ -5,5 +5,5 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   plugins: [cloudflareTest({ wrangler: { configPath: './wrangler.app.test.jsonc' } })],
   resolve: { alias: workerAliases },
-  test: { include: ['test/e2e.test.ts'], testTimeout: 30_000 },
+  test: { include: ['test/e2e.test.ts', 'test/world-testing.test.ts'], testTimeout: 30_000 },
 });
