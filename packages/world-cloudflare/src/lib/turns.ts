@@ -1,7 +1,7 @@
 import { TURN_BATCH_MAX, TURN_CALLS_IN_FLIGHT } from '../constants.js';
 import { currentRequest, type FlowRequest } from './request-context.js';
 
-type Waiting<Item, Result> = { item: Item; resolve: (result: Result | undefined) => void; reject: (error: unknown) => void };
+type Waiting<Item, Result> = { item: Item; resolve: (result: Result) => void; reject: (error: unknown) => void };
 
 /**
  * Gathers the calls a flow request makes under one key in the same turn, and sends them
@@ -11,7 +11,7 @@ type Waiting<Item, Result> = { item: Item; resolve: (result: Result | undefined)
  */
 export function gatherTurns<Item, Result>(
   send: (key: string, items: Item[]) => Promise<readonly Result[]>,
-): (key: string, item: Item) => Promise<Result | undefined> {
+): (key: string, item: Item) => Promise<Result> {
   const turns = new WeakMap<FlowRequest, Map<string, Waiting<Item, Result>[]>>();
   const sendAll = async (key: string, batch: Waiting<Item, Result>[]) => {
     let next = 0;
@@ -19,10 +19,10 @@ export function gatherTurns<Item, Result>(
       for (let start = next; start < batch.length; start = next) {
         next += TURN_BATCH_MAX;
         const chunk = batch.slice(start, start + TURN_BATCH_MAX);
-        await send(key, chunk.map(({ item }) => item)).then(
-          (results) => chunk.forEach(({ resolve }, index) => resolve(results[index])),
-          (error: unknown) => chunk.forEach(({ reject }) => reject(error)),
-        );
+        await send(key, chunk.map(({ item }) => item)).then((results) => {
+          if (results.length !== chunk.length) throw new Error(`${results.length} results for ${chunk.length} calls`);
+          chunk.forEach(({ resolve }, index) => resolve(results[index]));
+        }).catch((error: unknown) => chunk.forEach(({ reject }) => reject(error)));
       }
     };
     await Promise.all(Array.from({ length: TURN_CALLS_IN_FLIGHT }, lane));

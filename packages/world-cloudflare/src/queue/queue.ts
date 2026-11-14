@@ -111,7 +111,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
         }
       }
       const result = await publish(queueName, { message, opts: rest });
-      if (result === undefined || result.error !== undefined) throw new Error(result?.error ?? 'Message was not enqueued');
+      if (result.error !== undefined) throw new Error(result.error);
       return hold === undefined
         ? { messageId: result.messageId }
         : { messageId: result.messageId, experimental_hold: { status: 'not_held', reason: 'unsupported' } };

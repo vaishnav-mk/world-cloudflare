@@ -65,7 +65,6 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
   });
   async function gathered(runId: string, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
     const result = await createStep(runId, { request, params });
-    if (result === undefined) throw new Error('Incomplete create response');
     if (result instanceof Error) throw toWorldError(result);
     return result;
   }
