@@ -1,20 +1,8 @@
 import { isSingleOrchestratorMessage, MessageId, type QueuePayload, type ValidQueueName } from '@workflow/world';
 import { currentInvocationStart } from '../lib/request-context.js';
 import type { EnqueueRequest, QueueHandler, QueueResult } from '../types.js';
+import { wakeSeconds } from './handler.js';
 import type { QueueShard } from './queue-shard.js';
-import { MAX_SPEC9_REDELIVERY_SECONDS, MAX_WAKE_SECONDS } from '../constants.js';
-
-/**
- * What a handler's `{ timeoutSeconds }` asks of the queue, or undefined for an acknowledgment.
- * JSON has no Infinity, so an unbounded or negative wait gets the longest delay instead, never 0,
- * which on a spec 9 run is a handoff that is not an attempt.
- */
-export function wakeSeconds(result: unknown, payload: unknown): number | undefined {
-  if (typeof result !== 'object' || result === null || !('timeoutSeconds' in result)) return undefined;
-  const seconds = Number(result.timeoutSeconds);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds;
-  return isSingleOrchestratorMessage(payload) ? MAX_SPEC9_REDELIVERY_SECONDS : MAX_WAKE_SECONDS;
-}
 
 /** How long the queue waits before it redelivers a held message whose handler rejected. */
 const HELD_FAILURE_RETRY_MS = 1_000;
