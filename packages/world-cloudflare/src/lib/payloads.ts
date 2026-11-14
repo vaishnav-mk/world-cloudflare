@@ -51,12 +51,15 @@ export function createPayloads(bucket: R2Bucket) {
       return bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
     }
     const key = `runs/${runId}/${crypto.randomUUID()}`;
-    // A part at a time: handed whole bytes, the runtime copies all of them before sending any.
-    const { readable, writable } = new FixedLengthStream(bytes.byteLength);
+    // A part at a time: handed whole bytes, the runtime copies all of them before sending any. The
+    // stream holds two parts, so the next is queued while one is sent and the upload never waits on
+    // this isolate between parts. A failed upload errors the stream, which rejects `ready`.
+    const { readable, writable } = new FixedLengthStream(bytes.byteLength, { highWaterMark: 2 * R2_PUT_PART_BYTES });
     const writer = writable.getWriter();
     const parts = (async () => {
       for (let offset = 0; offset < bytes.byteLength; offset += R2_PUT_PART_BYTES) {
-        await writer.write(bytes.subarray(offset, offset + R2_PUT_PART_BYTES));
+        await writer.ready;
+        writer.write(bytes.subarray(offset, offset + R2_PUT_PART_BYTES)).catch(() => {});
       }
       await writer.close();
     })();
