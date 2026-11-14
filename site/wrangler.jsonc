@@ -1,0 +1,8 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "world-cloudflare-site",
+  "main": "@tanstack/react-start/server-entry",
+  "compatibility_date": "2026-11-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true }
+}
