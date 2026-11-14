@@ -100,7 +100,7 @@ The run's store admits `start({ experimental_hook })`: it claims the token on it
 | `QueueOptions.retentionSeconds` | Partly | Partly | | No message expires by age, but one whose deliveries keep failing is dead-lettered after `QUEUE_MAX_ATTEMPTS`: about 25 minutes before, about 4 hours now (below) |
 | `QueueOptions.experimental_hold` | Missing | Built | queue | Not in 5.2.0's `QueueOptions`, so the World types it itself (`HoldingQueue`). The shard enqueues the message behind a lease the sender renews (1 to 3,600 s, default 30). `consume` runs it as its first delivery; a `{ timeoutSeconds }` result or a `release` delivers it again at once under the same ID. Only this deployment's messages, and never a repeat of an accepted key |
 | `QueueOptions.specVersion`, `headers` | Built | Built | | The payload is devalue-encoded whatever the version |
-| `QueueOptions.region` | N/A | N/A | | No regions; Durable Objects are placed where they are first used |
+| `QueueOptions.region` | N/A | N/A | | No per-message regions; the World creates its objects in the `LOCATION_HINT` region, or near their first caller ([placement](limits.md#shards-and-placement)) |
 | One replay per run at a time | Missing | Built | queue, stress | A run's workflow messages (`orchestratorRunIdOf`, any spec version), keyed timers included, go to its run's queue shard, which delivers one batch at a time and holds a run's second message in a batch until the batch ends. A wake that asks only for a replay is settled without a delivery once a later replay of its run has succeeded. Step messages and intermediate timer hops are never held. 5.2.0 asks this only of spec 9 runs; it also keeps the SDK's in-process step single-flight from making one request wait on a promise another settles, which Workers reject |
 | `{ timeoutSeconds: n }` by run spec | Partly | Built | queue, e2e lanes | Spec 9: the same message after `n` s, counted; `0` is a handoff, not counted. Spec 8: continued after `n` s. An unbounded value waits 900 s (spec 9) or 23 hours (spec 8), never 0 |
 | `meta.messageId` stable across redeliveries | Built | Built | queue | A copy made after a reset keeps it |
@@ -151,14 +151,14 @@ The run's store admits `start({ experimental_hook })`: it claims the token on it
 | Versioned schema migrations | ✓ | Drizzle Kit, additive, applied by each Durable Object on start |
 | Published to npm | ✗ | The `@workflow` scope belongs to Vercel |
 | Listed in `worlds-manifest.json` | ✗ | |
-| Runs on the published SDK | ✓ | `workflow` 5.5.0 as published; two performance changes are prepared upstream (the spec 8 event-log memo, and QuickJS's inline window) |
+| Runs on the published SDK | ✓ | `workflow` 5.5.0 as published. Reading about 4 GiB of stream in one step needs an SDK fix ([streams](limits.md#streams)) |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World; its scenarios are ported ([Conformance](#conformance)) |
 | Retention and cleanup of finished runs | ✗ | Runs, outbox, dedup and takeover rows, and R2 payloads, are kept forever |
-| Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers with QuickJS, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |
+| Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |
 | Cleanup of orphaned R2 payloads | ✗ | A write that fails after its payload reached R2 leaves the object behind |
 | Store shards, no single object per run or token | ✓ | Store shards hold runs and hook tokens, 128 by default, and `SHARD_EPOCHS` adds more for new runs; runs created before them stay in the legacy store |
 | Sharding beyond one queue shard | ✓ | 256 queue shards by default |
-| Multi-region placement | ✗ | |
+| Multi-region placement | ✗ | One region per deployment, with `LOCATION_HINT` |
 
 ## Upgrading
 
