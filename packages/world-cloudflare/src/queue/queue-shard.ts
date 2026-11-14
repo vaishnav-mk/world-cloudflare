@@ -140,7 +140,10 @@ export class QueueShard extends DurableObject<WorldEnv> {
 
   /** The sender starts running its held message: that is the message's first delivery. */
   async beginHeld(id: string): Promise<Counts> {
-    return this.#counts.begin(id, Date.now());
+    const now = Date.now();
+    const held = this.#holds.find(id);
+    if (held === undefined || held.done || held.leaseUntil <= now) throw new Error('Held message has no live lease');
+    return this.#counts.begin(id, now);
   }
 
   /** Extends the lease of a message its sender still runs. Returns whether it is still held. */

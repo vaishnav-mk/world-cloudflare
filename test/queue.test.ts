@@ -354,6 +354,23 @@ describe('durability fanout', () => {
     expect(await sink.received()).not.toContain(consumed.messageId);
   });
 
+  it('refuses a late inline consume after the expired hold starts its queued backstop', async () => {
+    const runId = crypto.randomUUID();
+    const slow = `${getQueueTopicPrefix('workflow')}held_slow` as ValidQueueName;
+    const queued = await queue.queue(slow, { runId }, { experimental_hold: { visibilityTimeoutSeconds: 1 } });
+    const held = queued.experimental_hold;
+    if (held?.status !== 'held') throw new Error('expected a held message');
+    const shard = env.QUEUE_SHARD.getByName(queueShardFor(runId, { runId }));
+    await expect.poll(() => runInDurableObject(shard, (_shard, state) =>
+      state.storage.sql.exec('SELECT id FROM inflight WHERE id = ?', queued.messageId).toArray().length), { timeout: 3_000 }).toBe(1);
+    let calls = 0;
+    await expect(held.consume(async () => { calls++; })).rejects.toThrow('lease');
+    expect(calls).toBe(0);
+    expect(await runInDurableObject(shard, (_shard, state) =>
+      state.storage.sql.exec('SELECT deliveries FROM delivery_counts WHERE id = ?', queued.messageId).one().deliveries)).toBe(1);
+    await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 3_000 }).toContain(queued.messageId);
+  });
+
   it('delivers a released or handed-off held message at once, still under its ID', async () => {
     const sink = env.SINK.getByName('sink');
     const released = await queue.queue(queueName, { runId: crypto.randomUUID() }, { experimental_hold: true });
