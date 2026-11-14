@@ -2,9 +2,11 @@ import { DurableObject } from 'cloudflare:workers';
 import { DurabilityFanout, DurabilityScheduler, type FanoutTarget } from 'durability';
 import { DurabilityRouting, type EnqueueResult as RoutedResult } from 'durability/routing';
 import migrations from '../../drizzle/queue/migrations.js';
-import { FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET } from '../constants.js';
+import { FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, STEPS_CHANNEL } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus } from '../enums.js';
+import { groupBy } from '../lib/group.js';
+import { readPayload, replayOf } from '../lib/messages.js';
 import { unreachable } from '../lib/unreachable.js';
 import type { EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
 import { deadLetter } from './dead-letter.js';
@@ -24,7 +26,8 @@ const LEGACY_LANES = Array.from({ length: 8 }, (_, lane) => `${FLOW_TARGET}-${la
  * One queue shard: delayed, retried delivery of its runs' messages to the runners
  * (`runnerShardFor`), which run the workflow code. A shard holds all of a run's replay messages
  * (`queueShardFor`), delivers them one at a time to the run's runner, and settles the pure ones a
- * later successful replay covers without delivering them.
+ * later successful replay covers without delivering them. Other messages, such as steps, have a lane
+ * of their own, which never waits for a replay.
  */
 export class QueueShard extends DurableObject<WorldEnv> {
   readonly #dedup = new DedupTable(this.ctx.storage.sql);
@@ -35,27 +38,39 @@ export class QueueShard extends DurableObject<WorldEnv> {
   readonly #scheduler = new DurabilityScheduler({ context: this.ctx });
   // Feeds the load snapshots `push` returns to the routing client.
   readonly #routing = new DurabilityRouting();
-  readonly #fanout = new DurabilityFanout<Envelope>({
-    scheduler: this.#scheduler,
-    routing: this.#routing,
-    retries: {
-      // Holds, delay waits and handoffs take fanout attempts too, so `Deliverer` enforces the cap
-      // on deliveries itself and the fanout's own cap is out of reach.
-      maxAttempts: Number.MAX_SAFE_INTEGER,
-      delay: retryDelayMs,
-    },
-    // `flow`, plus the lanes the single `flow` shard delivered to before queue shards, so messages
-    // it still holds for them are delivered. New messages go to `flow` only.
-    targets: Object.fromEntries([FLOW_TARGET, ...LEGACY_LANES].map((target): [string, FanoutTarget<Envelope>] => [target, {
-      ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages) => this.#deliverer.deliver(messages),
-    }])),
-    dlq: (message) => deadLetter(this.env, message),
-  });
+  readonly #fanout = this.#lane();
+  /**
+   * Messages that replay no run (`replayOf`): steps, health checks and a long wait's timer hops. A
+   * lane of their own, because the fanout delivers one batch per lane at a time and a replay can
+   * hold its batch for long, as a spec 9 orchestrator waiting on these very steps does.
+   */
+  readonly #steps = this.#lane(STEPS_CHANNEL);
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
     migrateOnStart(ctx, migrations);
     ctx.blockConcurrencyWhile(() => this.#redeliverOrphans());
+  }
+
+  /** A fanout lane, whose batches of due messages `Deliverer` delivers. */
+  #lane(channel?: string): DurabilityFanout<Envelope> {
+    return new DurabilityFanout<Envelope>({
+      ...(channel === undefined ? {} : { channel }),
+      scheduler: this.#scheduler,
+      routing: this.#routing,
+      retries: {
+        // Holds, delay waits and handoffs take fanout attempts too, so `Deliverer` enforces the cap
+        // on deliveries itself and the fanout's own cap is out of reach.
+        maxAttempts: Number.MAX_SAFE_INTEGER,
+        delay: retryDelayMs,
+      },
+      // `flow`, plus the lanes the single `flow` shard delivered to before queue shards, so messages
+      // it still holds for them are delivered. New messages go to `flow` only.
+      targets: Object.fromEntries([FLOW_TARGET, ...LEGACY_LANES].map((target): [string, FanoutTarget<Envelope>] => [target, {
+        ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages) => this.#deliverer.deliver(messages),
+      }])),
+      dlq: (message) => deadLetter(this.env, message),
+    });
   }
 
   /** Starts the object, so a fresh instance after a reset redelivers what the reset cut off. */
@@ -72,31 +87,32 @@ export class QueueShard extends DurableObject<WorldEnv> {
   }
 
   /**
-   * Enqueues messages in one fanout transaction, each with its own outcome. A message whose
+   * Enqueues messages in one fanout transaction per lane, each with its own outcome. A message whose
    * deduplication key was accepted before returns that message's ID instead.
    */
   async enqueueMany(messages: EnqueueRequest[]): Promise<EnqueueResult[]> {
     const plans = messages.map((request) => this.#plan(request));
     const sends = plans.flatMap((plan) => ('message' in plan ? [plan] : []));
     const ids = new Map<Plan, string>();
-    let failure = 'Message was not enqueued';
-    if (sends.length) {
-      const result = await this.#fanout.enqueue(
-        sends.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })), { targets: [FLOW_TARGET] },
+    const failures = new Map<Plan, string>();
+    const lanes = groupBy(sends, ({ message }) => (replayOf(readPayload(message.encoded)) === undefined ? STEPS_CHANNEL : 'replays'));
+    await Promise.all([...lanes].map(async ([lane, group]) => {
+      const result = await (lane === STEPS_CHANNEL ? this.#steps : this.#fanout).enqueue(
+        group.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })), { targets: [FLOW_TARGET] },
       );
-      if (result.success) {
-        for (const [index, send] of sends.entries()) {
-          ids.set(send, result.value[index]);
-          if (send.key) this.#dedup.markAccepted(send.key);
-        }
-      } else {
-        failure = result.error.message;
+      if (!result.success) {
+        for (const send of group) failures.set(send, result.error.message);
+        return;
       }
-    }
+      for (const [index, send] of group.entries()) {
+        ids.set(send, result.value[index]);
+        if (send.key) this.#dedup.markAccepted(send.key);
+      }
+    }));
     return plans.map((plan) => {
       if ('done' in plan) return plan.done;
       const id = ids.get(plan);
-      return id === undefined ? { error: failure } : { id, fresh: plan.fresh };
+      return id === undefined ? { error: failures.get(plan) ?? 'Message was not enqueued' } : { id, fresh: plan.fresh };
     });
   }
 

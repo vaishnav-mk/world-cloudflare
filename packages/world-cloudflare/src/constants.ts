@@ -13,6 +13,8 @@ export const RUNNER_NAME = 'runner';
 
 /** Fanout target the queue shard delivers to. */
 export const FLOW_TARGET = 'flow';
+/** The queue shard's fanout channel for messages that replay no run, such as steps. */
+export const STEPS_CHANNEL = 'steps';
 export const FLOW_PATH = '/.well-known/workflow/v1/flow';
 export const FLOW_URL = `https://internal${FLOW_PATH}`;
 
@@ -150,7 +152,7 @@ export const FLOW_DELIVERY_BUDGET_MS = 2 * 60_000;
 export const FLOW_BACKGROUND_BUDGET_MS = FLOW_ATTEMPT_TIMEOUT_MS - 30_000;
 /**
  * Shard counts per epoch when `SHARD_EPOCHS` is unset. Queue shards: durability delivers one batch
- * per shard at a time, and a batch lasts as long as its slowest flow, so a long run holds up only
+ * per lane at a time, and a batch lasts as long as its slowest flow, so a long run holds up only
  * the runs on its own shard. Store shards: runs spread over warm objects instead of each paying to
  * create a new Durable Object on its first write.
  */

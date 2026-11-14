@@ -1,4 +1,5 @@
 import { orchestratorRunIdOf } from '@workflow/world';
+import { parse } from 'devalue';
 
 /** A message that replays its run, as the queue shard orders and coalesces it. */
 export type Replay = {
@@ -32,4 +33,13 @@ export function replayOf(payload: unknown): Replay | undefined {
     pure: Object.entries(fields).every(([field, value]) => value === undefined || REPLAY_ONLY_FIELDS.has(field)),
     start: fields.runInput !== undefined,
   };
+}
+
+/** The SDK payload a message carries, or undefined when it cannot be read. */
+export function readPayload(encoded: string): unknown {
+  try {
+    return parse(encoded);
+  } catch {
+    return undefined;
+  }
 }

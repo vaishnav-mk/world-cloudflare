@@ -66,6 +66,21 @@ describe('durability fanout', () => {
     await expect.poll(() => sink.received(), { timeout: 5_000 }).toContain(slow);
   });
 
+  it("delivers a step while its run's long replay holds the same shard", async () => {
+    const sink = env.SINK.getByName('sink');
+    const runId = `step-beside-${crypto.randomUUID()}`;
+    const slowQueue = `${getQueueTopicPrefix('workflow')}lane_slow` as ValidQueueName;
+    // A replay that holds its delivery, as a spec 9 orchestrator waiting on its steps does.
+    const slow = (await queue.queue(slowQueue, { runId })).messageId;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Without an idempotency key, a step goes to its run's shard.
+    const step = (await queue.queue(queueName, { runId, stepId: 'step-1' })).messageId;
+    expect(queueShardFor(runId, { runId, stepId: 'step-1' })).toBe(queueShardFor(runId, { runId }));
+    await expect.poll(() => sink.received(), { timeout: 1_000 }).toContain(step);
+    expect(await sink.received()).not.toContain(slow);
+    await expect.poll(() => sink.received(), { timeout: 5_000 }).toContain(slow);
+  });
+
   it('settles its in-flight record once the consumer returns', async () => {
     const id = (await queue.queue(queueName, { runId: 'settled' })).messageId;
     await expect.poll(() => env.SINK.getByName('sink').received()).toContain(id);

@@ -1,11 +1,10 @@
 import { isSingleOrchestratorMessage } from '@workflow/world';
-import { parse } from 'devalue';
 import type { DurabilityFanoutMessage } from 'durability';
 import { DEFAULT_QUEUE_MAX_ATTEMPTS, DELIVERY_COUNT_RETENTION_MS, MAX_QUEUE_RETRY_DELAY_MS, REPLAY_MARKS_MAX } from '../constants.js';
 import { DeliveryResult } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { isRecord } from '../lib/is-record.js';
-import { replayOf } from '../lib/messages.js';
+import { readPayload, replayOf } from '../lib/messages.js';
 import { objectOptions, runnerShardFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
 import type { Delivery, DeliveryOutcome, Envelope, WorldEnv } from '../types.js';
@@ -28,8 +27,8 @@ export function retryDelayMs(attempt: number): number {
 
 /**
  * A queue shard's deliveries: holds messages until their delay passes, then hands the due ones to
- * the runners. The fanout delivers one batch per shard at a time and a run's replays all reach its
- * shard, so holding a run's second replay in a batch keeps its replays to one at a time, whatever
+ * the runners. The fanout delivers one batch per lane at a time and a run's replays all reach its
+ * shard's replay lane, so holding a run's second replay in a batch keeps its replays to one at a time, whatever
  * its spec version. Two replays of a run at once would let the SDK's in-process step single-flight
  * make one request wait on a promise another request settles, which Workers reject. A pure replay
  * never delivered is settled without a delivery once a replay of its run that started after it was
@@ -164,15 +163,6 @@ export class Deliverer {
       const [oldest] = this.#replayed.keys();
       this.#replayed.delete(oldest);
     }
-  }
-}
-
-/** The SDK payload a message carries, or undefined when it cannot be read. */
-function readPayload(encoded: string): unknown {
-  try {
-    return parse(encoded);
-  } catch {
-    return undefined;
   }
 }
 

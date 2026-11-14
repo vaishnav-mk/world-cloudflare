@@ -139,6 +139,8 @@ Freezing the built-ins runs share ([native engine](native-engine.md#how-it-works
 
 A batch of up to 10 deliveries runs together, each with its own outcome, and a queue shard delivers one batch at a time. 1,000 parallel steps took 66 to 74 s (Workers, `c4cecd7`).
 
+A queue shard has two lanes, each delivering one batch at a time: replays, and everything else, such as steps. With one lane, a spec 9 orchestrator, which stays live for 30 s after its last pass while it waits on background steps, held up the steps on its own shard that it was waiting for: spec 9 `parallelSteps:1000` with QuickJS took 65 to 67 s, 60 s of it with its last steps queued behind two such waits. With two it took 3.6 to 4.9 s (local, `wrangler dev`).
+
 With `capabilities.invoke`, a spec 8 step's delivery wakes its run instead of reading the whole log and replaying it, and the run's queue shard and runner coalesce the wakes. `parallelSteps`, locally (`vitest.replays.config.ts`, two runs each; a full read is an `events.list` of the run from the start), on `df2be13`:
 
 | Engine | Steps | Run | Full log reads | Workflow deliveries |

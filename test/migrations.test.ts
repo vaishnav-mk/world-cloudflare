@@ -1,4 +1,5 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { stringify } from 'devalue';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { expect, it } from 'vitest';
@@ -33,7 +34,8 @@ it('upgrades a queue shard from durability 4.2 with its pending message intact',
   const keyOf = (state: DurableObjectState) => state.storage.sql.exec<{ name: string }>(
     `SELECT name FROM pragma_table_info('durability_fanout_deliveries') WHERE pk > 0 ORDER BY pk`,
   ).toArray().map(({ name }) => name);
-  await shard().enqueue(id, 'workflow_demo', '[]', 500);
+  // A replay, which durability 4.2 held in the default channel too.
+  await shard().enqueue(id, 'workflow_demo', stringify({ runId: 'migrated' }), 500);
   await runInDurableObject(shard(), (_shard, state) => {
     // Back to durability 4.2's schema the way a 4.2 deploy reverts newer migrations: run each stored
     // down script and forget it. That drops the fanout channel keys and the memo table.
