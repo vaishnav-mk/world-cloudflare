@@ -60,6 +60,18 @@ describe('v5 event storage in SQLite DO', () => {
     expect(calls).toEqual([TURN_BATCH_MAX, 1]);
   });
 
+  it('reports skipped slots once per batch of step creations', async () => {
+    const runId = crypto.randomUUID();
+    await newRun(runId);
+    await store.events.create(runId, { eventType: 'run_started' });
+    const results = await withRequestContext(createExecutionContext(), {}, () => Promise.all(['a', 'b', 'c'].map((correlationId) =>
+      store.events.create(runId, {
+        eventType: 'step_created', correlationId, eventData: { stepName: 'double', input: bytes('2') },
+      }, { eventCount: 1 }))));
+    // The first reports the run_started it skipped; the others read nothing.
+    expect(results.map((result) => result.events?.length)).toEqual([1, undefined, undefined]);
+  });
+
   it('publishes every due step of a run in one drain', async () => {
     const runId = crypto.randomUUID();
     await newRun(runId);

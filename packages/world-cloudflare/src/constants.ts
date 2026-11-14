@@ -171,8 +171,12 @@ export const DEFAULT_SHARD_EPOCHS: readonly ShardEpoch[] = [{ from: 0, store: 12
 export const CRON_WAKES_PER_TICK = 512;
 /** How often a flow request reads again which steps of a run are dispatched (`createQueue`). */
 export const DISPATCHED_STEPS_READ_MS = 1_000;
-/** A flow request's calls in the same turn that go out together, as one (`createQueue`, `createStorage`). */
+/**
+ * A flow request's calls in the same turn go out together (`gatherTurns`): this many to a call, and
+ * this many calls at once.
+ */
 export const TURN_BATCH_MAX = 500;
+export const TURN_CALLS_IN_FLIGHT = 2;
 /** Store calls in flight at once when a cross-run read, such as `runs.list`, asks every store. */
 export const FAN_OUT_CONCURRENCY = 32;
 /**

@@ -3,6 +3,7 @@ import { unwrapInvocationOutcome } from '@workflow/errors/invocation';
 import { stringify } from 'devalue';
 import { MessageId, ValidQueueName, type Queue, type QueueOptions, type QueuePayload } from '@workflow/world';
 import { currentRequest, type FlowRequest } from '../lib/request-context.js';
+import { gatherTurns } from '../lib/turns.js';
 import { MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { fnv1a32Hex, messageIdFor, sha256Hex } from '../lib/hash.js';
@@ -12,14 +13,12 @@ import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDis
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
-import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS, TURN_BATCH_MAX } from '../constants.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS } from '../constants.js';
 import { createQueueHandler } from './handler.js';
 import { holdMessage } from './hold.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'RUNNER' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
-type Published = Awaited<ReturnType<NonNullable<Queue['queueBatch']>>>[number];
-type Waiting = { message: QueuePayload; opts: QueueOptions; resolve: (result: Published | undefined) => void; reject: (error: unknown) => void };
 /** The steps of a run a flow request read as dispatched, and when it last asked. */
 type Dispatched = { steps: Set<string>; readAt: number; reading?: Promise<unknown> };
 
@@ -54,31 +53,9 @@ export function createQueue(env: QueueEnv): HoldingQueue {
     });
   };
 
-  // A flow request's single publishes in the same turn go out together, TURN_BATCH_MAX to a
-  // `queueBatch`: a replay that starts thousands of steps at once then makes a few calls to the
-  // run's store instead of one per step, which overloaded it.
-  const turns = new WeakMap<FlowRequest, Map<string, Waiting[]>>();
-  const publish = (queueName: string, message: QueuePayload, opts: QueueOptions): Promise<Published | undefined> => {
-    const request = currentRequest();
-    if (request === undefined) return queueBatch(queueName, [{ message, opts }]).then(([result]) => result);
-    const queues = turns.get(request) ?? new Map<string, Waiting[]>();
-    turns.set(request, queues);
-    const batch = queues.get(queueName) ?? [];
-    if (batch.length === 0) {
-      queues.set(queueName, batch);
-      setTimeout(() => {
-        queues.delete(queueName);
-        for (let start = 0; start < batch.length; start += TURN_BATCH_MAX) {
-          const chunk = batch.slice(start, start + TURN_BATCH_MAX);
-          queueBatch(queueName, chunk).then(
-            (results) => chunk.forEach(({ resolve }, index) => resolve(results[index])),
-            (error: unknown) => chunk.forEach(({ reject }) => reject(error)),
-          );
-        }
-      });
-    }
-    return new Promise((resolve, reject) => batch.push({ message, opts, resolve, reject }));
-  };
+  // A replay that starts thousands of steps publishes them all at once, which as a call each
+  // overloaded the run's store.
+  const publish = gatherTurns((queueName: string, messages: { message: QueuePayload; opts: QueueOptions }[]) => queueBatch(queueName, messages));
 
   // A replay of a spec 8 run publishes every step still pending again, one at a time, under the
   // step's dispatch key. A step whose message the queue already has needs nothing, so a flow request
@@ -132,7 +109,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
           return { messageId: MessageId.parse(await messageIdFor(`${queueName}:${key}`)) };
         }
       }
-      const result = await publish(queueName, message, rest);
+      const result = await publish(queueName, { message, opts: rest });
       if (result === undefined || result.error !== undefined) throw new Error(result?.error ?? 'Message was not enqueued');
       return hold === undefined
         ? { messageId: result.messageId }

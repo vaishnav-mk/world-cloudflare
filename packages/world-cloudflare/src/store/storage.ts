@@ -21,14 +21,14 @@ import type {
 } from '@workflow/world';
 import { stringify } from 'devalue';
 import { ulid } from 'ulid';
-import { FAN_OUT_CONCURRENCY, PAYLOAD_MAX_BYTES, TURN_BATCH_MAX } from '../constants.js';
+import { FAN_OUT_CONCURRENCY, PAYLOAD_MAX_BYTES } from '../constants.js';
 import { EventType, ResolveData } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { Semaphore } from '../lib/semaphore.js';
 import { isSingleOrchestrator } from '../lib/spec.js';
 import { createPayloads } from '../lib/payloads.js';
-import { currentRequest, type FlowRequest } from '../lib/request-context.js';
 import { toWorldError } from '../lib/transient.js';
+import { gatherTurns } from '../lib/turns.js';
 import type { EventOf, IndexAnswer, IndexPage, WorldEnv } from '../types.js';
 import { cancelMany } from './cancel-many.js';
 import { mergePages } from './pages.js';
@@ -39,8 +39,6 @@ type AnyRun = WorkflowRun | WorkflowRunWithoutData;
 type AnyStep = Step | StepWithoutData;
 type WithoutData = { resolveData: 'none' };
 type WithData = { resolveData?: 'all' };
-type Write = { request: AnyEventRequest; params?: CreateEventParams };
-type Gathered = { write: Write; resolve: (result: EventResult | Error | undefined) => void; reject: (error: unknown) => void };
 
 const encoder = new TextEncoder();
 const runKey = (run: AnyRun): [number, string] => [run.createdAt.getTime(), run.runId];
@@ -59,28 +57,15 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
   const answersUnknown = { answersUnknown: true };
   const { offloadEvent, resolveAll } = createPayloads(env.PAYLOADS);
 
-  // A flow request's `step_created` writes in the same turn go out together, TURN_BATCH_MAX to a
-  // call (`WorldStore.createEvents`): a replay that starts thousands of steps creates them all at
-  // once, and a call each overloaded the run's store and ran it out of memory.
-  const turns = new WeakMap<FlowRequest, Map<string, Gathered[]>>();
+  // A replay that starts thousands of steps creates them all at once, which as a call each
+  // overloaded the run's store and ran it out of memory (`WorldStore.createEvents`).
+  const createStep = gatherTurns(async (runId: string, writes: { request: AnyEventRequest; params?: CreateEventParams }[]) => {
+    // RPC stubs type Event-bearing results as never; this is `WorldStore.createEvents`' own type.
+    const results: (EventResult | Error)[] = await onRun(stores, runId, (store) => store.createEvents(runId, writes));
+    return results;
+  });
   async function gathered(runId: string, request: AnyEventRequest, params?: CreateEventParams): Promise<EventResult> {
-    const flow = currentRequest();
-    if (flow === undefined) return onRun(stores, runId, (store) => store.createEvent(runId, request, params));
-    const runs = turns.get(flow) ?? new Map<string, Gathered[]>();
-    turns.set(flow, runs);
-    const batch = runs.get(runId) ?? [];
-    if (batch.length === 0) {
-      runs.set(runId, batch);
-      setTimeout(() => {
-        runs.delete(runId);
-        for (let start = 0; start < batch.length; start += TURN_BATCH_MAX) {
-          const chunk = batch.slice(start, start + TURN_BATCH_MAX);
-          onRun(stores, runId, (store) => store.createEvents(runId, chunk.map(({ write }) => write)))
-            .then((results) => chunk.forEach(({ resolve }, index) => resolve(results[index])), (error: unknown) => chunk.forEach(({ reject }) => reject(error)));
-        }
-      });
-    }
-    const result = await new Promise<EventResult | Error | undefined>((resolve, reject) => batch.push({ write: { request, params }, resolve, reject }));
+    const result = await createStep(runId, { request, params });
     if (result === undefined) throw new Error('Incomplete create response');
     if (result instanceof Error) throw toWorldError(result);
     return result;

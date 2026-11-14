@@ -60,8 +60,12 @@ export async function createEvents(
   // A shard that does not hold the run refuses the whole call, so the caller asks the legacy store.
   store.own(runId);
   const results: (EventResult | Error)[] = [];
-  for (const { request, params } of events) {
-    results.push(await createEvent(store, runId, request, params).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error)))));
+  for (const [index, { request, params }] of events.entries()) {
+    // One skipped-slot report per call: a later write's skipped slots are mostly this batch's own,
+    // and a report each made a fan-out's results hold thousands of events.
+    const { eventCount: _eventCount, ...unreported } = params ?? {};
+    const written = createEvent(store, runId, request, index === 0 ? params : unreported);
+    results.push(await written.catch((error: unknown) => (error instanceof Error ? error : new Error(String(error)))));
   }
   return results;
 }

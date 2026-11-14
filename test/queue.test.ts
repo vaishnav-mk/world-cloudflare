@@ -3,7 +3,7 @@ import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import type { WorldEnv } from '@workflow/world-cloudflare';
-import { TURN_BATCH_MAX } from '../packages/world-cloudflare/src/constants.js';
+import { TURN_BATCH_MAX, TURN_CALLS_IN_FLIGHT } from '../packages/world-cloudflare/src/constants.js';
 import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
 import { queueShardFor, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
@@ -34,25 +34,31 @@ describe('durability fanout', () => {
     }
   });
 
-  it("gathers a flow request's publishes in one turn into a few calls to the run's store", async () => {
+  it("gathers a flow request's publishes in one turn into a few calls to the run's store, a couple at once", async () => {
     const calls: number[] = [];
+    let active = 0;
+    let peak = 0;
     const stores = { getByName: () => ({
       dispatch: async (entries: { request: { id: string } }[]) => {
         calls.push(entries.length);
+        peak = Math.max(peak, ++active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
         return entries.map(({ request }) => ({ id: request.id, fresh: true }));
       },
     }) } as unknown as WorldEnv['WORLD_STORE'];
     const gathering = createQueue({ ...env, WORLD_STORE: stores });
     const runId = `wrun_${'0'.repeat(26)}`;
     const step = (stepId: string) => gathering.queue(queueName, { runId, stepId, stepName: 'work' }, { idempotencyKey: stepId });
-    const count = TURN_BATCH_MAX + 1;
+    const count = 3 * TURN_BATCH_MAX + 1;
     const published = await withRequestContext(createExecutionContext(), {}, () =>
       Promise.all(Array.from({ length: count }, (_, index) => step(`step-${index}`))));
     expect(new Set(published.map(({ messageId }) => messageId)).size).toBe(count);
-    expect(calls).toEqual([TURN_BATCH_MAX, 1]);
+    expect(calls).toEqual([TURN_BATCH_MAX, TURN_BATCH_MAX, TURN_BATCH_MAX, 1]);
+    expect(peak).toBe(TURN_CALLS_IN_FLIGHT);
     // Outside a flow request, each publish is its own call.
     await Promise.all([step('alone-1'), step('alone-2')]);
-    expect(calls).toEqual([TURN_BATCH_MAX, 1, 1, 1]);
+    expect(calls).toEqual([TURN_BATCH_MAX, TURN_BATCH_MAX, TURN_BATCH_MAX, 1, 1, 1]);
   });
 
   it("answers a flow request's publish of a dispatched step itself, reading the run's dispatched steps once", async () => {
