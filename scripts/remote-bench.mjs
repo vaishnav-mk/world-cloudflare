@@ -17,7 +17,13 @@ const matrix = process.argv.length > 2
   : [['sequentialSteps', 2000], ['replayAfterSteps', 2000], ['replayAfterSteps', 10000]];
 
 async function call(path, init = {}) {
-  const response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(120_000) });
+  let response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(120_000) });
+  // A busy store answers 503 with retry-after; a read can wait it out. A write is not retried, as it may have landed.
+  for (let tries = 0; response.status === 503 && (init.method ?? 'GET') === 'GET' && tries < 120; tries++) {
+    await response.text();
+    await sleep(Number(response.headers.get('retry-after') ?? 1) * 1000);
+    response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(120_000) });
+  }
   if (!response.ok) throw new Error(`${path}: HTTP ${response.status} ${(await response.text()).slice(0, 200)}`);
   return response;
 }
