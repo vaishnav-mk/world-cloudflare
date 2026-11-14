@@ -18,6 +18,8 @@ export type WorldEnv = {
   /** JSON map from deployment ID to a retained executor script name. */
   EXECUTOR_ROUTES?: string;
   QUEUE_MAX_ATTEMPTS?: string;
+  /** Overrides `FLOW_BACKGROUND_BUDGET_MS`, so a test can cut background work short. */
+  FLOW_BACKGROUND_BUDGET_MS?: string;
   /** JSON list of `ShardEpoch`, oldest first. Append an epoch starting in the future to add shards. */
   SHARD_EPOCHS?: string;
   /** 32 random bytes as base64. When set, the SDK encrypts payloads and VM snapshots with per-run keys derived from it. */

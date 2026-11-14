@@ -46,7 +46,7 @@ export function createQueueConsumer(flow: FlowHandler) {
       const { EXECUTORS: executors, DEPLOYMENT_ID: current } = this.env;
       if (!executors) {
         if (deployment !== current) throw new Error(`Deployment ${deployment} is unavailable`);
-        return withRequestContext(this.ctx, () => flow(request), request);
+        return withRequestContext(this.ctx, this.env, () => flow(request), request);
       }
       const script = executorFor(this.env, deployment);
       if (!script) throw new Error(`Deployment ${deployment} is unavailable`);
