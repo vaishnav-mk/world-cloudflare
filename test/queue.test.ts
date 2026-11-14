@@ -218,6 +218,49 @@ describe('durability fanout', () => {
     expect(metas[1]).toMatchObject({ attempt: 1, deliveryCount: undefined });
   });
 
+  it('holds a message for its sender, who runs it as its first delivery, with the queue as backstop', async () => {
+    const sink = env.SINK.getByName('sink');
+    const metas: unknown[] = [];
+    const consumed = await queue.queue(queueName, { runId: crypto.randomUUID() }, { experimental_hold: { visibilityTimeoutSeconds: 1 } });
+    const held = consumed.experimental_hold;
+    if (held?.status !== 'held') throw new Error('expected a held message');
+    await held.consume(async (_message, meta) => { metas.push(meta); });
+    expect(metas).toMatchObject([{ attempt: 1, deliveryCount: 1, messageId: consumed.messageId }]);
+    await expect(held.consume(async () => {})).rejects.toThrow('once');
+    // A sender that never runs its message: the queue delivers it once the lease lapses.
+    const dropped = await queue.queue(queueName, { runId: crypto.randomUUID() }, { experimental_hold: { visibilityTimeoutSeconds: 1 } });
+    await expect.poll(() => sink.received(), { timeout: 5_000 }).toContain(dropped.messageId);
+    expect(await sink.received()).not.toContain(consumed.messageId);
+  });
+
+  it('delivers a released or handed-off held message at once, still under its ID', async () => {
+    const sink = env.SINK.getByName('sink');
+    const released = await queue.queue(queueName, { runId: crypto.randomUUID() }, { experimental_hold: true });
+    if (released.experimental_hold?.status !== 'held') throw new Error('expected a held message');
+    await released.experimental_hold.release();
+    // Well inside the 30 s lease.
+    await expect.poll(() => sink.received(), { timeout: 3_000 }).toContain(released.messageId);
+    const handoff = `${getQueueTopicPrefix('workflow')}held_handoff` as ValidQueueName;
+    const runId = `wrun_${crypto.randomUUID()}`;
+    const handedOff = await queue.queue(handoff, { runId, runSpecVersion: 9 }, { experimental_hold: true });
+    if (handedOff.experimental_hold?.status !== 'held') throw new Error('expected a held message');
+    await handedOff.experimental_hold.consume(async () => ({ timeoutSeconds: 0 }));
+    await expect.poll(async () => (await sink.logged()).filter((entry) => entry.runId === runId)
+      .map(({ id, deliveryCount, attempt }) => [id, deliveryCount, attempt]), { timeout: 3_000 })
+      .toEqual([[handedOff.messageId, 2, 1]]);
+  });
+
+  it('does not hold a message for another deployment, or a repeat of an accepted key', async () => {
+    const routed = createQueue({ ...env, EXECUTOR_ROUTES: '{"old-build":"executor-old"}' });
+    const other = await routed.queue(queueName, { runId: crypto.randomUUID() }, { deploymentId: 'old-build', experimental_hold: true });
+    expect(other.experimental_hold).toEqual({ status: 'not_held', reason: 'unsupported' });
+    const opts = { idempotencyKey: crypto.randomUUID(), experimental_hold: true } as const;
+    const first = await queue.queue(queueName, { runId: 'held-key' }, opts);
+    expect(first.experimental_hold?.status).toBe('held');
+    expect((await queue.queue(queueName, { runId: 'held-key' }, opts)).experimental_hold).toEqual({ status: 'not_held', reason: 'duplicate' });
+    await expect(queue.queue(queueName, { runId: 'x' }, { delaySeconds: 1, experimental_hold: true })).rejects.toThrow('delaySeconds');
+  });
+
   it('retains delayed delivery and rejects another deployment', async () => {
     await expect(queue.queue(queueName, { runId: 'run-2' }, { deploymentId: 'old-v0' })).rejects.toThrow('unavailable');
     const id = (await queue.queue(queueName, { runId: 'run-2' }, { delaySeconds: 1 })).messageId;

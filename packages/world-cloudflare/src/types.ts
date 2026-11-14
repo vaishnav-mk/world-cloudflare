@@ -1,4 +1,4 @@
-import type { AnyEventRequest, Hook } from '@workflow/world';
+import type { AnyEventRequest, Hook, MessageId, Queue, QueueOptions, QueuePayload, ValidQueueName } from '@workflow/world';
 import type { DeliveryResult, EventType, MessageKind, ResolveData } from './enums.js';
 import type { QueueShard } from './queue/queue-shard.js';
 import type { WorldStore } from './store/world-store.js';
@@ -96,3 +96,23 @@ export type ResolveDataMode = `${ResolveData.None | ResolveData.All}`;
 
 /** A validated event request of the given types. */
 export type EventOf<T extends EventType> = Extract<AnyEventRequest, { eventType: `${T}` }>;
+
+/**
+ * The queue's message hold (`queue()` with `experimental_hold`), as the SDK's queue contract will
+ * name it. `@workflow/world` 5.2.0 declares none of it, and its runtime never asks for a hold.
+ */
+export type QueueHandler = Parameters<Queue['createQueueHandler']>[1];
+export type QueueHoldOptions = { visibilityTimeoutSeconds?: number };
+export type HeldQueueMessage = {
+  readonly status: 'held';
+  readonly messageId: MessageId;
+  readonly leaseExpiresAt: Date;
+  consume(handler: QueueHandler): Promise<void>;
+  release(delaySeconds?: number): Promise<void>;
+};
+export type QueueHoldResult = HeldQueueMessage | { readonly status: 'not_held'; readonly reason: 'unsupported' | 'duplicate' };
+export type QueueResult = { messageId: MessageId | null; experimental_hold?: QueueHoldResult };
+/** The World's `Queue`, whose `queue()` also takes `experimental_hold`. */
+export type HoldingQueue = Omit<Queue, 'queue'> & {
+  queue(queueName: ValidQueueName, message: QueuePayload, opts?: QueueOptions & { experimental_hold?: true | QueueHoldOptions }): Promise<QueueResult>;
+};

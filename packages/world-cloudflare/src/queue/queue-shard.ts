@@ -15,7 +15,8 @@ import { unreachable } from '../lib/unreachable.js';
 import { onRun } from '../store/route.js';
 import type { Delivery, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
-import { DeliveryCounts } from './delivery-counts.js';
+import { DeliveryCounts, type Counts } from './delivery-counts.js';
+import { Holds } from './holds.js';
 import { InflightTable } from './inflight.js';
 
 type FanoutMessage = DurabilityFanoutMessage<Envelope>;
@@ -43,6 +44,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
   readonly #counts = new DeliveryCounts(this.ctx.storage.sql);
   /** When each run's latest successful replay started, for the newest `REPLAY_MARKS_MAX` runs. */
   readonly #replayed = new Map<string, number>();
+  readonly #holds = new Holds(this.ctx.storage.sql);
   readonly #scheduler = new DurabilityScheduler({ context: this.ctx });
   // Feeds the load snapshots `push` returns to the routing client.
   readonly #routing = new DurabilityRouting();
@@ -111,6 +113,43 @@ export class QueueShard extends DurableObject<WorldEnv> {
     });
   }
 
+  /**
+   * Enqueues a message held for its sender (`experimental_hold`), delayed by the hold's lease: the
+   * sender runs it and renews the lease, and the queue delivers it only if the lease lapses before
+   * the sender settles it. A repeat of an accepted key is not held.
+   */
+  async hold(request: EnqueueRequest): Promise<EnqueueResult> {
+    const [result] = await this.enqueueMany([request]);
+    if (result === undefined) return { error: 'Message was not enqueued' };
+    if ('fresh' in result && result.fresh) this.#holds.add({ ...request, id: result.id }, Date.now() + request.delayMs);
+    return result;
+  }
+
+  /** The sender starts running its held message: that is the message's first delivery. */
+  async beginHeld(id: string): Promise<Counts> {
+    return this.#counts.begin(id, Date.now());
+  }
+
+  /** Extends the lease of a message its sender still runs. Returns whether it is still held. */
+  async renewHold(id: string, leaseMs: number): Promise<boolean> {
+    return this.#holds.renew(id, Date.now() + leaseMs);
+  }
+
+  /**
+   * Settles a held message: done (`delayMs` null), or delivered again after `delayMs`, as a copy
+   * that keeps its ID, which a handoff leaves out of the attempt.
+   */
+  async settleHold(id: string, delayMs: number | null, handoff: boolean): Promise<void> {
+    const message = this.#holds.message(id);
+    if (message === undefined) return;
+    if (delayMs !== null) {
+      if (handoff) this.#counts.handoff(id);
+      const [result] = await this.enqueueMany([{ ...message, id: crypto.randomUUID(), delayMs, messageId: id }]);
+      if (result === undefined || 'error' in result) throw new Error(result?.error ?? 'Held message was not released');
+    }
+    this.#holds.settle(id);
+  }
+
   /** `enqueueMany` for durability's routing client, which reads the shard's load from the result. */
   async push(requests: EnqueueRequest[]): Promise<RoutedResult<EnqueueResult[]>> {
     const value = await this.enqueueMany(requests);
@@ -175,6 +214,14 @@ export class QueueShard extends DurableObject<WorldEnv> {
         await message.retry(0);
         continue;
       }
+      // A held message's queued original is only its sender's backstop.
+      const held = message.body.messageId === undefined ? this.#holds.find(message.id) : undefined;
+      if (held !== undefined && !held.done && held.leaseUntil > now) {
+        await message.retry(held.leaseUntil - now);
+        continue;
+      }
+      if (held !== undefined) this.#holds.remove(message.id);
+      if (held?.done) continue;
       const id = message.body.messageId ?? message.id;
       const before = this.#counts.get(id);
       const replayedAt = runId === undefined ? undefined : this.#replayed.get(runId);

@@ -94,6 +94,9 @@ export const MAX_QUEUE_RETRY_DELAY_MS = 300_000;
 export const MAX_WAKE_SECONDS = 82_800;
 /** The redelivery an unbounded `{ timeoutSeconds }` of a spec 9 message gets, as world-vercel's. */
 export const MAX_SPEC9_REDELIVERY_SECONDS = 900;
+/** A held message's lease (`experimental_hold`), in seconds: the default, and the longest. */
+export const DEFAULT_HOLD_LEASE_SECONDS = 30;
+export const MAX_HOLD_LEASE_SECONDS = 3_600;
 /** A message's delivery count outlives its last delivery by this long, past any late duplicate. */
 export const DELIVERY_COUNT_RETENTION_MS = 24 * 60 * 60_000;
 /**

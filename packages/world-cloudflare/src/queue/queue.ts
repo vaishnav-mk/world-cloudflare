@@ -1,23 +1,24 @@
 import { parse, stringify } from 'devalue';
 import {
-  isSingleOrchestratorMessage, MessageId, QueuePrefix, ValidQueueName,
+  MessageId, QueuePrefix, ValidQueueName,
   type Queue, type QueueOptions, type QueuePayload,
 } from '@workflow/world';
 import { MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
 import { onRun } from '../store/route.js';
-import type { EnqueueRequest, EnqueueResult, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
+import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 import { queueShardFor } from '../lib/shards.js';
-import { MAX_SPEC9_REDELIVERY_SECONDS, MAX_WAKE_SECONDS } from '../constants.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, MAX_HOLD_LEASE_SECONDS } from '../constants.js';
+import { holdMessage, wakeSeconds } from './hold.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
 
 /** The World's `Queue`, backed by the queue shard Durable Objects. */
-export function createQueue(env: QueueEnv): Queue {
+export function createQueue(env: QueueEnv): HoldingQueue {
   const push = shardPusher(env.QUEUE_SHARD);
 
   // A message that settles an outbox row goes through its run's store, which claims the slot,
@@ -52,10 +53,22 @@ export function createQueue(env: QueueEnv): Queue {
     // Only the queue consumer and private executor dispatch reach the flow route; no public route serves it.
     queueAuthMode: 'skip',
 
-    queue: async (queueName, message, opts) => {
-      const [result] = await queueBatch(queueName, [{ message, opts }]);
+    queue: async (queueName, message, opts = {}) => {
+      const { experimental_hold: hold, ...rest } = opts;
+      // Only this deployment's messages are held: another deployment must run its own.
+      if (hold !== undefined && (rest.deploymentId === undefined || rest.deploymentId === env.DEPLOYMENT_ID)) {
+        if (rest.delaySeconds) throw new Error('experimental_hold cannot be combined with delaySeconds');
+        const leaseSeconds = Math.min(MAX_HOLD_LEASE_SECONDS, Math.max(1, (hold === true ? undefined : hold.visibilityTimeoutSeconds)
+          ?? DEFAULT_HOLD_LEASE_SECONDS));
+        const ready = await prepare(env, queueName, message, { ...rest, delaySeconds: leaseSeconds });
+        if ('error' in ready) throw new Error(ready.error);
+        return holdMessage(() => env.QUEUE_SHARD.getByName(ready.shard), queueName, message, ready.request, leaseSeconds * 1000);
+      }
+      const [result] = await queueBatch(queueName, [{ message, opts: rest }]);
       if (result === undefined || result.error !== undefined) throw new Error(result?.error ?? 'Message was not enqueued');
-      return { messageId: result.messageId };
+      return hold === undefined
+        ? { messageId: result.messageId }
+        : { messageId: result.messageId, experimental_hold: { status: 'not_held', reason: 'unsupported' } };
     },
 
     queueBatch,
@@ -80,13 +93,8 @@ export function createQueue(env: QueueEnv): Queue {
           createdAt: new Date(Number(request.headers.get('x-vqs-created-at'))),
           invocationStartedAt: Number.isSafeInteger(startedAt) ? startedAt : Date.now(),
         });
-        if (typeof result === 'object' && result !== null && 'timeoutSeconds' in result) {
-          // JSON has no Infinity. An unbounded or negative wait is redelivered after the longest delay
-          // instead, never read as 0, which on a spec 9 run is a handoff that is not an attempt.
-          const seconds = Number(result.timeoutSeconds);
-          const longest = isSingleOrchestratorMessage(payload) ? MAX_SPEC9_REDELIVERY_SECONDS : MAX_WAKE_SECONDS;
-          return Response.json({ timeoutSeconds: Number.isFinite(seconds) && seconds >= 0 ? seconds : longest });
-        }
+        const seconds = wakeSeconds(result, payload);
+        if (seconds !== undefined) return Response.json({ timeoutSeconds: seconds });
         return Response.json({ ok: true });
       } catch (error) {
         console.error('Workflow delivery failed', error);
