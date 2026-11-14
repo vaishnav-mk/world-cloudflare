@@ -1,8 +1,8 @@
 # Native engine
 
-The SDK's `node` engine (`WORKFLOW_VM=node`, or `WORKFLOW_VM` unset) runs `"use workflow"` code natively in V8, where the `quickjs` engine interprets it in a WebAssembly build of QuickJS. On Node the engine uses `node:vm`; on Workers it runs on `vm.ts`, a `node:vm` that the World's build provides, so it needs no SDK changes. The Wrangler templates default to QuickJS. The engine is stamped on each run when it starts, so existing runs keep theirs when the variable changes. Earlier builds of this repo called it `isolate`; the published SDK fails a run stamped `isolate`, so let such runs finish on the executor that started them.
+The SDK's `node` engine (`WORKFLOW_VM=node`, or `WORKFLOW_VM` unset) runs `"use workflow"` code natively in V8, where the `quickjs` engine interprets it in a WebAssembly build of QuickJS. On Node the engine uses `node:vm`; on Workers it runs on `vm.ts`, a `node:vm` that the World's build provides, so it needs no SDK changes. The Wrangler templates default to QuickJS. The engine is stamped on each run when it starts, so existing runs keep theirs when the variable changes.
 
-[Limits](limits.md#engines) has the measurements against QuickJS.
+[Limits](limits.md#compared-with-vercel) has the measurements against QuickJS.
 
 ## Why a shim
 
@@ -14,7 +14,7 @@ The SDK replays workflow code from the event log, so each replay needs fresh glo
 - **`node:vm`.** The SDK calls `createContext()`, `runInContext('globalThis', context)`, `new Script(code)` and `script.runInContext(context)`, with no timeout or microtask options. `vm.ts` returns a fresh sandbox object for the context, on which the SDK installs its deterministic globals as it does on Node. Running the bundle's `Script` calls the function with the sandbox, so the bundle's top level runs again and module state starts clean; the SDK's lookup script reads the sandbox. Other code, such as a dynamic workflow, throws. As with `node:vm` without options, replays share the host's microtask queue, and the SDK bounds replays with its own wall-clock budget.
 - **What a run can write stays in the run.** The sandbox shares the host realm, so it cannot have its own `Array.prototype`: `[]` always makes the realm's arrays. Instead:
   - namespaces (`Math`, `JSON`, `Reflect`, `Intl`, `Atomics`, `WebAssembly`, `console`, `crypto`) and `Date` are copies per sandbox. The copies of `Date.prototype` and `Intl.DateTimeFormat` read the run's clock, so `new (new Date().constructor)()` and `Intl.DateTimeFormat().format()` replay identically;
-  - the built-ins runs share (constructors, prototypes, the host classes the SDK passes in, and hidden ones such as `%GeneratorFunction%`) are frozen for the whole isolate before its first replay on this engine, so a write to one throws. Frozen prototypes keep the usual overrides working: an object can still assign its own `constructor`, `toString`, `valueOf`, `name` or `message`.
+  - the built-ins runs share (constructors, prototypes, the host classes the SDK passes in, and hidden ones such as `%GeneratorFunction%`) are frozen for the whole isolate before its first replay on this engine, so a write to one throws. Frozen prototypes keep the usual overrides working: an object can still assign its own `constructor`, `toString`, `valueOf`, `name` or `message`. Freezing costs about 20 ms once per isolate and 60 µs per replay (local, in Node, `44c3515`).
 
   Reverting each run's writes after its replay would not do: replays of other runs interleave at every `await`, host code (the World, the SDK, steps) runs in between and would see the writes, and a suspended replay never reaches its end. Freezing holds under any interleaving.
 - **Everything else** is the SDK's node engine: its replay loop, retained sessions, suspension handling and batched writes.
@@ -25,7 +25,7 @@ The SDK replays workflow code from the event log, so each replay needs fresh glo
 - **Strict mode.** The bundle runs in strict mode, where `node:vm` ran it sloppy, so assigning an undeclared variable throws.
 - **Globals resolve once.** A bare global name is bound when the bundle runs, so writing `globalThis.x` and then reading `x` does not see the write. A host global missing from the shadow list stays visible, and the engine logs one warning listing them.
 - **Only the deployed bundle.** Dynamic workflow code needs QuickJS.
-- **No VM snapshots.** Each new invocation replays the whole log natively, which stays cheap but grows with the log.
+- **No VM snapshots.** Each new invocation replays the whole log natively, so replay grows with the log: 3.9 s after 10,000 steps, where QuickJS restores a snapshot in 185 ms (Workers, `adff891`).
 - **Not proven by the SDK's own determinism suites**, only by this repo's end-to-end tests and the stress suite below.
 
 ## Stress suite
@@ -34,9 +34,7 @@ The SDK replays workflow code from the event log, so each replay needs fresh glo
 
 Fixed: shared built-ins leaking to the host and other runs (now per-run copies or frozen), assignments to `crypto` reaching the host, `import()` of host modules, and the clock and random escapes (`new (new Date().constructor)()`, `Object.getPrototypeOf(Math).random()`, `Intl.DateTimeFormat().format()`). A wide `Promise.all` (200 steps) and the hook event-log differences were fixed in the SDK.
 
-Open:
-
-- **Slower sequential steps.** A step costs several times what it costs on QuickJS, both with one replay per invocation ([measurements](limits.md#engines)).
+Open: replay time grows with the log, because the engine has no VM snapshots ([limits](#limits)).
 
 Divergences that follow from the design, from QuickJS or from Workers:
 
