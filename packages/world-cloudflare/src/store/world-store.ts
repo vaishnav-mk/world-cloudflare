@@ -6,10 +6,9 @@ import type {
   WorkflowRunWithoutData,
 } from '@workflow/world';
 import migrations from '../../drizzle/store/migrations.js';
-import { FAN_OUT_CONCURRENCY, MIN_ALARM_DELAY_MS } from '../constants.js';
+import { MIN_ALARM_DELAY_MS } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { MessageKind } from '../enums.js';
-import { Semaphore } from '../lib/semaphore.js';
 import { holdsRuns, objectOptions } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type {
@@ -40,8 +39,6 @@ import * as writes from './writes.js';
  */
 export class WorldStore extends DurableObject<WorldEnv> {
   readonly #store: StoreContext;
-  /** An index shard's round of asking its missing stores to report, while one is in flight. */
-  #filling: Promise<void> | undefined;
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
@@ -149,34 +146,17 @@ export class WorldStore extends DurableObject<WorldEnv> {
 
   async listIndexedRuns(params: ListWorkflowRunsParams = {}): Promise<IndexPage<WorkflowRunWithoutData>> {
     const { runIndex } = this.#store;
-    return this.#answer(() => runIndex.listRuns(params));
+    return this.#store.answerFromIndex(() => runIndex.listRuns(params));
   }
 
   async findIndexedHook(hookId: string, resolveData?: ResolveDataMode): Promise<IndexAnswer<Hook | undefined>> {
     const { runIndex } = this.#store;
-    return this.#answer(() => runIndex.findHook(hookId, resolveData, new Date()));
+    return this.#store.answerFromIndex(() => runIndex.findHook(hookId, resolveData, new Date()));
   }
 
   async listIndexedHooks(params: ListHooksParams): Promise<IndexPage<Hook>> {
     const { runIndex } = this.#store;
-    return this.#answer(() => runIndex.listHooks(params, new Date()));
-  }
-
-  /**
-   * An index answer. While stores have yet to report, the caller asks every store instead, and this
-   * shard asks those stores to report, so it answers alone soon after, such as after a new epoch.
-   */
-  #answer<T>(read: () => T): IndexAnswer<T> {
-    const answer = this.#store.runIndex.answer(read);
-    if (!answer.complete && this.#filling === undefined) {
-      const calls = new Semaphore(FAN_OUT_CONCURRENCY);
-      const shard = this.#store.name;
-      this.#filling = Promise.all(this.#store.runIndex.missingSources().map((store) => calls.run(() =>
-        this.#store.peer(store).reportIndex(shard).catch((error: unknown) => console.error(`Could not ask ${store} to report`, error)))))
-        .then(() => { this.#filling = undefined; });
-      this.ctx.waitUntil(this.#filling);
-    }
-    return answer;
+    return this.#store.answerFromIndex(() => runIndex.listHooks(params, new Date()));
   }
 
   // Token shard (`token-shard.ts`, `force-claims.ts`), called by every store.

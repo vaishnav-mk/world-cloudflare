@@ -1,9 +1,9 @@
-import { EVENT_PAGE_READS, STORE_NAME } from '../constants.js';
+import { EVENT_PAGE_READS, FAN_OUT_CONCURRENCY, STORE_NAME } from '../constants.js';
 import { Semaphore } from '../lib/semaphore.js';
 import { runnerShardFor } from '../lib/shards.js';
 import { Waiters } from '../lib/waiters.js';
 import { shardPusher } from '../queue/push.js';
-import type { WorldEnv } from '../types.js';
+import type { IndexAnswer, WorldEnv } from '../types.js';
 import { Db } from './db.js';
 import { IndexOutbox } from './index-outbox.js';
 import { IndexFeed } from './indexing.js';
@@ -35,6 +35,8 @@ export class StoreContext {
   readonly pageReads = new Semaphore(EVENT_PAGE_READS);
   /** The token release push in flight, if any. */
   #pushing: Promise<void> | undefined;
+  /** An index shard's round of asking its missing stores to report, while one is in flight. */
+  #filling: Promise<void> | undefined;
   readonly #runners: WorldEnv['RUNNER'];
   /** The runners this instance has created or found, by name. */
   readonly #placed = new Map<string, Promise<void>>();
@@ -92,6 +94,23 @@ export class StoreContext {
     } catch (error) {
       console.error(`Failed to schedule ${purpose}`, error);
     }
+  }
+
+  /**
+   * An index shard's answer. While stores have yet to report, the caller asks every store instead,
+   * and this shard asks those stores to report, so it answers alone soon after, such as after a new
+   * epoch.
+   */
+  answerFromIndex<T>(read: () => T): IndexAnswer<T> {
+    const answer = this.runIndex.answer(read);
+    if (!answer.complete && this.#filling === undefined) {
+      const calls = new Semaphore(FAN_OUT_CONCURRENCY);
+      this.#filling = Promise.all(this.runIndex.missingSources().map((store) => calls.run(() =>
+        this.peer(store).reportIndex(this.name).catch((error: unknown) => console.error(`Could not ask ${store} to report`, error)))))
+        .then(() => { this.#filling = undefined; });
+      this.ctx.waitUntil(this.#filling);
+    }
+    return answer;
   }
 
   /** Sends owed token releases, one push at a time: a release owed during a push rides its loop. A failed one arms the alarm. */
