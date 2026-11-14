@@ -116,6 +116,14 @@ export class IndexOutbox {
     })) !== undefined;
   }
 
+  /** Whether a hook's row is due, as opposed to only runs' rows. */
+  hasDueHook(): boolean {
+    return findRow(this.#qb.fetchOne<'index_outbox', 'seq'>({
+      tableName: 'index_outbox', fields: ['seq'],
+      where: { conditions: ['next_at <= ?', 'hook_id != ?'], params: [Date.now(), RUN_ROW] },
+    })) !== undefined;
+  }
+
   nextDueAt(): number | null {
     return requireRow(this.#qb.raw<{ next_at: number | null }>({
       query: 'SELECT MIN(next_at) AS next_at FROM index_outbox', fetchType: FetchTypes.ONE,

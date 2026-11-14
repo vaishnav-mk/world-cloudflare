@@ -44,13 +44,17 @@ export class IndexFeed {
   }
 
   /**
-   * A write answers once its list rows reach their index shards, so a list right after it sees it,
-   * or after `INDEX_PUSH_WAIT_MS`, while a slow push goes on.
+   * Pushes owed list rows at once. A write that owes a hook's row answers once it reaches its index
+   * shard, or after `INDEX_PUSH_WAIT_MS` while a slow push goes on, because the SDK reads a hook
+   * (`hooks.get`) right after creating it. Runs' rows do not hold the write: the SDK never lists
+   * runs, so `POST /runs` pays no index round trip and a list sees a new run a moment later.
+   * `settle` waits for runs' rows too, for a run's last write, so its store can drop its alarm.
    */
-  async flush(): Promise<void> {
+  async flush(settle = false): Promise<void> {
     if (!this.#store.index.hasDue()) return;
     const pushed = this.push();
     this.#store.ctx.waitUntil(pushed);
+    if (!settle && !this.#store.index.hasDueHook()) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([pushed, new Promise((resolve) => { timer = setTimeout(resolve, INDEX_PUSH_WAIT_MS); })]);
     clearTimeout(timer);

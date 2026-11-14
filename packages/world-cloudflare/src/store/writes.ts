@@ -163,7 +163,7 @@ async function armFor(store: StoreContext, events: AnyEventRequest[]): Promise<v
  * retries it.
  */
 async function afterWrite(store: StoreContext, frees: boolean): Promise<void> {
-  const indexed = store.feed.flush();
+  const indexed = store.feed.flush(frees);
   if (store.releases.nextDueAt() !== null) {
     // A write that frees a token answers once the token's shard has it, so the token is free
     // when the write returns. A failed release stays owed for the alarm and fails nothing here.

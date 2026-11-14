@@ -108,7 +108,7 @@ A queue shard runs no workflow code: it hands each due message to a `Runner`, wh
 
 ## Listing
 
-A run's list row, the run without its payloads, lives on index shard `hash(runId) % index` of its epoch, and each hook's on `hash(hookId) % index`. A store pushes the latest row of every run and hook change right after the write, from an outbox, and the write answers once the push lands or after 1 s.
+A run's list row, the run without its payloads, lives on index shard `hash(runId) % index` of its epoch, and each hook's on `hash(hookId) % index`. A store pushes the latest row of every run and hook change right after the write, from an outbox. A write that changes a hook, or finishes a run, answers once the push lands or after 1 s, because the SDK reads a hook right after creating it. Other run writes, including `run_created`, do not wait, so a run appears in lists a moment after `start()` returns.
 
 `runs.list` and `hooks.list` without a run ID ask every index shard, 32 at a time, and merge their pages by `createdAt`, then ID; filters apply on the index shards. With `resolveData: 'all'`, the page's runs then come whole from their stores. `hooks.get` asks one index shard per epoch, and `runs.getMany` one store per shard its IDs hash to.
 

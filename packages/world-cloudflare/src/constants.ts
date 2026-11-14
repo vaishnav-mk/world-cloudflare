@@ -171,7 +171,7 @@ export const INDEX_PUSH_BATCH = 200;
 /** Runs a store's backfill owes the index per alarm. */
 export const INDEX_BACKFILL_BATCH = 200;
 /**
- * How long a write waits for its list rows to reach the index shards before it answers. A slower
+ * How long a write that owes a hook's row, or finishes a run, waits for the index shards before it answers. A slower
  * push goes on in the background, and a failed one stays owed for the alarm.
  */
 export const INDEX_PUSH_WAIT_MS = 1_000;
