@@ -25,9 +25,12 @@ function pageLimit(limit = DEFAULT_PAGE_LIMIT): number {
 
 /**
  * Runs, steps or hooks, or an index shard's rows of them, newest first by default. The cursor is the
- * encoded `[createdAt, id]` of the last row.
+ * encoded `[createdAt, id]` of the last visible row. When visibility lives in encoded data, scan
+ * until the limit plus one visible rows are found, so shard pages can be merged without gaps.
  */
-export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter): PaginatedResponse<T> {
+export function listRecords<T>(
+  db: Db, table: RecordTable, filter: RecordFilter, visible?: (record: T) => boolean,
+): PaginatedResponse<T> {
   const { limit: requestedLimit, sortOrder, cursor: rawCursor } = filter.pagination ?? {};
   const limit = pageLimit(requestedLimit);
   const descending = sortOrder !== SortOrder.Asc;
@@ -50,17 +53,26 @@ export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter)
     where.push(statuses.length ? `status IN (${statuses.map(() => '?').join(',')})` : '0');
     values.push(...statuses);
   }
-  const cursor = parseRecordCursor(rawCursor);
-  if (cursor) {
-    where.push(`(created_at, id) ${descending ? '<' : '>'} (?, ?)`);
-    values.push(...cursor);
+  let cursor = parseRecordCursor(rawCursor);
+  const rows: { id: string; created_at: number; data: T }[] = [];
+  while (rows.length <= limit) {
+    const batch = db.records(table,
+      cursor === null ? where : [...where, `(created_at, id) ${descending ? '<' : '>'} (?, ?)`],
+      cursor === null ? values : [...values, ...cursor], descending, limit + 1);
+    for (const row of batch) {
+      const data = decode<T>(row.data);
+      if (visible === undefined || visible(data)) rows.push({ ...row, data });
+      if (rows.length > limit) break;
+    }
+    const last = batch.at(-1);
+    if (batch.length < limit + 1 || last === undefined) break;
+    cursor = [last.created_at, last.id];
   }
-  const rows = db.records(table, where, values, descending, limit + 1);
   const page = rows.slice(0, limit);
   const last = page.at(-1);
   const hasMore = rows.length > limit;
   return {
-    data: page.map((row) => decode<T>(row.data)),
+    data: page.map((row) => row.data),
     cursor: hasMore && last ? encode([last.created_at, last.id]) : null,
     hasMore,
   };

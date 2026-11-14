@@ -85,9 +85,9 @@ export class RunIndex {
     return held === undefined ? undefined : hookView(held.hook, resolveData);
   }
 
-  /** A page of hooks of every run, as a store lists its own: the cursor counts expired hooks too. */
+  /** A page of live hooks of every run, as a store lists its own. */
   listHooks({ pagination, resolveData }: ListHooksParams, now: Date): PaginatedResponse<Hook> {
-    const page = listRecords<HeldToken>(this.#db, 'index_hooks', { pagination });
-    return { ...page, data: page.data.filter((held) => isLive(held, now)).map(({ hook }) => hookView(hook, resolveData)) };
+    const page = listRecords<HeldToken>(this.#db, 'index_hooks', { pagination }, (held) => isLive(held, now));
+    return { ...page, data: page.data.map(({ hook }) => hookView(hook, resolveData)) };
   }
 }

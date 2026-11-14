@@ -67,10 +67,9 @@ export function findHook({ db, isLegacy }: StoreContext, hookId: string, resolve
 
 export function listHooks(store: StoreContext, params: ListHooksParams): PaginatedResponse<Hook> {
   if (params.runId !== undefined) store.own(params.runId);
-  const page = listRecords<Hook>(store.db, 'hooks', params);
   const now = new Date();
-  const live = page.data.filter((hook) => !store.db.isExpiredHook(hook, now));
-  return { ...page, data: live.map((hook) => hookView(hook, params.resolveData)) };
+  const page = listRecords<Hook>(store.db, 'hooks', params, (hook) => !store.db.isExpiredHook(hook, now));
+  return { ...page, data: page.data.map((hook) => hookView(hook, params.resolveData)) };
 }
 
 export function getEvent(store: StoreContext, runId: string, eventId: string, resolveData?: ResolveDataMode): Event {
