@@ -1,9 +1,8 @@
 import * as errors from '@workflow/errors';
 import type { World, WorkflowRun } from '@workflow/world';
+import { isRecord } from '../lib/is-record.js';
 import { mintSpecVersion } from '../lib/spec.js';
-import {
-  decodeResult, encode, isRecord, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcError,
-} from './protocol.js';
+import { decodeResult, encode, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcError } from './protocol.js';
 
 /**
  * A World for Node that forwards every call to a deployed Cloudflare World. Point the SDK's tools

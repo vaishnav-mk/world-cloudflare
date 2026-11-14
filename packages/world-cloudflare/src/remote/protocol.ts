@@ -1,4 +1,5 @@
 import { parse, stringify } from 'devalue';
+import { isRecord } from '../lib/is-record.js';
 
 /**
  * Wire protocol for driving a deployed World from Node, as the SDK's web UI does. Requests and
@@ -63,8 +64,4 @@ export function decodeRequest(body: string): RpcRequest {
 export function decodeResult(body: string): RpcResult {
   // SAFETY: results come from our own endpoint, which only writes RpcResult values.
   return parse(body) as RpcResult;
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
