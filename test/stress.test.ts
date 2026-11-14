@@ -307,10 +307,8 @@ describe('hooks, sleeps, streams and child runs', () => {
   });
 
   const resumeOnce = async (runId: string) => { await resumeHook(await hookToken(runId), 9); };
-  // Divergence: leaving `for await` over a hook disposes it on QuickJS (hook_disposed) but not on isolate.
-  it.fails('leaving a for await over a hook disposes it', () => expectParity('hookBreak', 0, resumeOnce));
-  // Divergence: an AbortController that is never aborted writes hook_created and hook_disposed on isolate only.
-  it.fails('an unused AbortController', () => expectParity('unusedAbortController'));
+  it('leaving a for await over a hook disposes it', () => expectParity('hookBreak', 0, resumeOnce));
+  it('an unused AbortController', () => expectParity('unusedAbortController'));
 });
 
 describe('forbidden and host APIs', () => {
@@ -361,8 +359,7 @@ describe('global surface', () => {
     'globalThis write then bare read': 'globals resolve once', 'top-level function on globalThis': 'module scope',
     // Bug in QuickJS: URL has no searchParams.
     'URL#searchParams': 'missing on QuickJS',
-    // QuickJS lacks the RegExp v flag.
-    'RegExp v flag': 'missing on QuickJS',
+    'RegExp v flag': undefined,
     // Isolate's Date is a wrapper around the host Date, and its Math an object inheriting from the host's.
     'Date.prototype.constructor': 'wrapped Date', 'Object.keys(Math)': 'wrapped Math',
     'JSON.stringify(1n)': undefined, 'structuredClone(Map)': undefined, Headers: undefined, TextEncoder: undefined,
@@ -389,17 +386,14 @@ describe('global surface', () => {
   }
 });
 
-// Last, because the isolate run it starts may never finish.
 describe('scale', () => {
   it('QuickJS: Promise.all over 200 steps', async () => {
     const [runId] = await startOn('quickjs', 'parallelSteps', [200]);
     expect(await settle(runId)).toEqual({ status: 'completed', value: 200 });
   });
 
-  // Bug: on isolate, step deliveries wait out earlier cascades with setImmediate turns; ~120 or more
-  // steps in one Promise.all exceed Workers' 10,000 active timeouts, deliveries throw
-  // QuotaExceededError, and the run often hangs with a step never started (1,000 ran workerd out of heap).
-  it.fails('isolate: Promise.all over 200 steps', async () => {
+  // Step deliveries must not exhaust Workers' 10,000 active timeouts or reject unhandled.
+  it('isolate: Promise.all over 200 steps', async () => {
     // Muted: the failed deliveries log tens of thousands of errors, which overflow the test pool's socket.
     using errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     // Some also reject unhandled. A listener stops vitest failing the file on them; it stays installed
