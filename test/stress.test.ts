@@ -2,7 +2,9 @@ import { toJson } from '@workflow/world-cloudflare';
 import { getRun, resumeHook, start } from 'workflow/api';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { world } from '../src/world.js';
-import { workflows } from '../src/workflows.js';
+import { stressWorkflows, workflows as appWorkflows } from '../src/workflows.js';
+
+const workflows = { ...appWorkflows, ...stressWorkflows };
 
 // Runs under vitest.isolate.config.ts. Each parity test starts the same workflow on QuickJS and on
 // the isolate engine (a run keeps the engine `start()` stamped from WORKFLOW_VM) and compares the
