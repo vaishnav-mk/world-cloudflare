@@ -17,8 +17,8 @@ const DEFAULT_MATRIX = [
   ...[4 * MiB, 8 * MiB, 20 * MiB, 32 * MiB, 50 * MiB, 64 * MiB].map((bytes) => ['stepOutput', bytes]),
   ...[8 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['stepInput', bytes]),
   ...[8 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['runOutput', bytes]),
-  // `getWritable()` sends bytes as base64, so 16 MiB of them pass the 16 MiB chunk limit.
-  ...[8 * MiB, 10 * MiB, 12 * MiB, 16 * MiB].map((bytes) => ['streamChunk', bytes]),
+  // `getWritable()` sends bytes as base64, so 24 MiB of them fit the 32 MiB chunk limit.
+  ...[8 * MiB, 10 * MiB, 16 * MiB, 24 * MiB].map((bytes) => ['streamChunk', bytes]),
   ...[100, 500, 1000].map((count) => ['sequentialSteps', count]),
   ...[50, 200, 500].map((count) => ['parallelSteps', count]),
   ...[100, 1000, 3000].map((mega) => ['cpuStep', mega]),

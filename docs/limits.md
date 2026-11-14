@@ -16,7 +16,7 @@ Vercel's column is its documented limits.
 | Events per run | 25,000 | 90,003 in one run; the World sets no cap | Workers, `a72251d` |
 | Replay | 240 s budget | A QuickJS snapshot restore took 81 ms at 30,000 events; pauses between invocations stayed at 4 to 8 s | Workers, `a72251d` |
 | One payload | 50 MB | 16 MiB step output with either engine; 20 MiB ran out of memory. Larger payloads are rejected, and larger data goes in a [byte stream](#streams) | Workers, `3f15876` |
-| One stream chunk | 10 MB | 16 MiB (`STREAM_CHUNK_MAX_BYTES`); 32 MiB chunks worked and 64 MiB ran out of memory | Workers, `e888166` |
+| One stream chunk | 10 MB | 32 MiB (`STREAM_CHUNK_MAX_BYTES`): 1 GiB in 32 MiB chunks, every byte checked, at 12 MiB/s with QuickJS and 20 MiB/s native; 64 MiB chunks ran out of memory | Workers, `845c1ec` |
 | One stream | Not documented | 1 GiB in 8 MiB chunks on Workers; 4 GiB in 64 MiB chunks locally, every byte checked. A reading step on SDK 5.5.0 holds about 40 MiB per GiB it reads ([below](#streams)) | Workers, `e888166`; local, `25028b4`, `819e11b` |
 | Run creations | 1,000 per second | 321 per second, 82 per second end to end ([below](#run-creation)) | Workers, `3fdbf00` |
 | 1,000 parallel steps | Not documented | 66 to 74 s | Workers, `c4cecd7` |

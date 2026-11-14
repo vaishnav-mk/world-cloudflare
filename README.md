@@ -114,7 +114,7 @@ To browse runs in the SDK's web UI, set `WORLD_RPC_TOKEN` on the Worker (`wrangl
 Measured on Workers; [limits](docs/limits.md) has every number with the build it was measured on.
 
 - **Long runs.** 30,000 sequential steps (90,003 events) in one run, in 23 minutes. The World sets no event cap.
-- **Payloads.** 16 MiB step outputs; the World rejects serialized payloads over 18 MiB. Larger data goes in byte streams, in chunks of up to 16 MiB: 1 GiB streams worked on Workers, 4 GiB locally ([streams](docs/limits.md#streams)).
+- **Payloads.** 16 MiB step outputs; the World rejects serialized payloads over 18 MiB. Larger data goes in byte streams, in chunks of up to 32 MiB: 1 GiB streams worked on Workers, 4 GiB locally ([streams](docs/limits.md#streams)).
 - **Throughput.** 321 runs created per second, 82 per second end to end, with 512 store and 1,024 queue shards ([run creation](docs/limits.md#run-creation)). 1,000 parallel steps in 66 to 74 s.
 - **CPU.** A step that exceeds the CPU limit is retried until the queue gives up. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
 - **Not done.** Finished runs and R2 payloads are kept forever, the encryption secret cannot be rotated, and steps run at least once, so give their side effects idempotency keys. [Contract parity](docs/contract-parity.md) lists what else is missing.

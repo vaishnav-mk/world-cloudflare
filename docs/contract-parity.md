@@ -119,7 +119,7 @@ The run's store admits `start({ experimental_hook })`: it claims the token on it
 
 | Item | Before | After | Tests | Notes |
 | --- | --- | --- | --- | --- |
-| `write`, `writeMulti`, `close`, `get`, `list`, `getChunks`, `getInfo` | Built | Built | contract, streams, e2e | Chunks over 1 MiB in R2, up to 16 MiB each. A reader of a step's stream whose writer is gone ends with a `StreamError` ([streams](limits.md#streams)) |
+| `write`, `writeMulti`, `close`, `get`, `list`, `getChunks`, `getInfo` | Built | Built | contract, streams, e2e | Chunks over 1 MiB in R2, up to 32 MiB each. A reader of a step's stream whose writer is gone ends with a `StreamError` ([streams](limits.md#streams)) |
 | `createWriteSession`, `streamFlushIntervalMs` | Missing | Missing | | Optional. Each write is one RPC to the run's `RunStreams`, and the runtime falls back to the stateless methods |
 
 ## World methods
