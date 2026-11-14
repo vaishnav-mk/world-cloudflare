@@ -19,11 +19,20 @@ export function transientAsWorldError<T extends object>(stub: T): T {
   });
 }
 
-/** The error to throw for a Durable Object failure: a retryable 503 when the platform marks it transient. */
+/**
+ * The error to throw for a Durable Object failure: a retryable 503 when the platform marks it
+ * transient, or when the call chain ran out of subrequest depth, which a later delivery that
+ * starts a fresh chain does not.
+ */
 export function toWorldError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   // SAFETY: Durable Object errors carry these optional flags; any other Error has neither.
   const { retryable, overloaded } = error as DurableObjectError;
-  if (retryable !== true && overloaded !== true) return error;
+  if (retryable !== true && overloaded !== true && !isDepthExhausted(error)) return error;
   return new WorkflowWorldError(error.message, { status: 503, cause: error });
+}
+
+/** Whether a call failed because its chain of calls between Workers and objects grew too deep. */
+export function isDepthExhausted(error: unknown): boolean {
+  return String(error).includes('Subrequest depth limit exceeded');
 }
