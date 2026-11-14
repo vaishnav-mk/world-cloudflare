@@ -165,6 +165,53 @@ describe('large stream chunks', () => {
   });
 });
 
+describe('stream memory', () => {
+  it('holds at most two chunks writing and two pieces reading many more chunks than fit in memory', async () => {
+    const runId = crypto.randomUUID();
+    // 512 MiB, four times the 128 MB isolate limit.
+    const count = 32;
+    let tracked: WeakRef<ArrayBufferLike>[] = [];
+    let most = 0;
+    // Counts the buffers still held after a full collection; vitest.config.ts starts workerd with `--expose-gc`.
+    const settle = async () => {
+      if (gc === undefined) throw new Error('gc() needs --expose-gc');
+      await scheduler.wait(1);
+      gc();
+      tracked = tracked.filter((buffer) => buffer.deref() !== undefined);
+      most = Math.max(most, tracked.length);
+    };
+
+    for (let index = 0; index < count; index++) {
+      const chunk = new Uint8Array(STREAM_CHUNK_MAX_BYTES).fill(index);
+      tracked.push(new WeakRef(chunk.buffer));
+      await streams.streams.write(runId, 'memory', chunk);
+      await settle();
+    }
+    await streams.streams.close(runId, 'memory');
+    // The chunk this loop is writing, and at times one the runtime has yet to let go of.
+    expect(most).toBeLessThanOrEqual(2);
+
+    tracked = [];
+    most = 0;
+    const startedAt = Date.now();
+    const reader = (await streams.streams.get(runId, 'memory')).getReader();
+    let bytes = 0;
+    for (let read = await reader.read(); !read.done; read = await reader.read()) {
+      const index = Math.floor(bytes / STREAM_CHUNK_MAX_BYTES);
+      expect([read.value.byteLength, read.value[0], read.value.at(-1)]).toEqual([STREAM_READ_PIECE_BYTES, index, index]);
+      tracked.push(new WeakRef(read.value.buffer));
+      bytes += read.value.byteLength;
+      if (bytes % (64 * MiB) === 0) await settle();
+    }
+    const seconds = (Date.now() - startedAt) / 1000;
+    expect(bytes).toBe(count * STREAM_CHUNK_MAX_BYTES);
+    // The piece the loop holds and the one the stream has ready.
+    expect(most).toBeLessThanOrEqual(2);
+    // A sanity floor: 4 KiB reads made 610 MiB/s locally and 1 MiB pieces 3,200, collections aside.
+    expect(bytes / MiB / seconds).toBeGreaterThan(100);
+  }, 120_000);
+});
+
 describe('abandoned streams', () => {
   it('ends a reader once the request writing the stream ends with that work cut off', async () => {
     const runId = crypto.randomUUID();
