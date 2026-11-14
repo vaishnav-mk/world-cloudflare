@@ -7,19 +7,21 @@ import { stressWorkflows, workflows as appWorkflows } from '../src/workflows.js'
 const workflows = { ...appWorkflows, ...stressWorkflows };
 
 // Runs under vitest.isolate.config.ts. Each parity test starts the same workflow on QuickJS and on
-// the isolate engine (a run keeps the engine `start()` stamped from WORKFLOW_VM) and compares the
+// the isolate engine, the SDK's node engine on vm.ts (a run keeps the engine `start()` stamped from
+// WORKFLOW_VM) and compares the
 // outcome and a normalized event log. `it.fails` marks a known engine bug or divergence: flip it to
 // `it` once fixed.
 
 type Engine = 'quickjs' | 'isolate';
 type Name = keyof typeof workflows;
 const ENGINES: Engine[] = ['quickjs', 'isolate'];
+const WORKFLOW_VM = { quickjs: 'quickjs', isolate: 'node' } as const;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Starts runs on one engine. Never overlap two calls: `start()` reads WORKFLOW_VM. */
 async function startOn(engine: Engine, name: Name, values: number[]): Promise<string[]> {
   const previous = process.env.WORKFLOW_VM;
-  process.env.WORKFLOW_VM = engine;
+  process.env.WORKFLOW_VM = WORKFLOW_VM[engine];
   try {
     const workflow = workflows[name] as (value: number) => Promise<unknown>;
     return await Promise.all(values.map(async (value) => (await start(workflow, [value])).runId));
@@ -147,24 +149,19 @@ describe('determinism', () => {
     expect(await drift('quickjs')).toEqual([]);
   });
 
-  // Bug: Date.prototype.constructor is the host's real Date, so `new date.constructor()` reads the wall clock.
-  it.fails('isolate: new (new Date().constructor)() is replay-stable', async () => {
+  it('isolate: new (new Date().constructor)() is replay-stable', async () => {
     expect((await drift('isolate')).filter((key) => key.endsWith('.dateConstructor'))).toEqual([]);
   });
 
-  // Bug: the sandbox Math inherits from the host's Math, whose random() is unseeded.
-  it.fails('isolate: Object.getPrototypeOf(Math).random() is replay-stable', async () => {
+  it('isolate: Object.getPrototypeOf(Math).random() is replay-stable', async () => {
     expect((await drift('isolate')).filter((key) => key.endsWith('.mathPrototype'))).toEqual([]);
   });
 
-  // Bug: Intl formats "now" from the host clock, not the sandbox's Date.
-  it.fails('isolate: Intl.DateTimeFormat().format() is replay-stable', async () => {
+  it('isolate: Intl.DateTimeFormat().format() is replay-stable', async () => {
     expect((await drift('isolate')).filter((key) => key.endsWith('.intlNow'))).toEqual([]);
   });
 
-  // Bug: the wall clock behind Date.prototype.constructor makes a cold replay branch differently; the
-  // run fails with a replay divergence (CorruptedEventLogError) on isolate and completes on QuickJS.
-  it.fails('branching on new (new Date().constructor)() replays', () => expectParity('clockBranch'));
+  it('branching on new (new Date().constructor)() replays', () => expectParity('clockBranch'));
 });
 
 describe('leaks through shared built-ins', () => {
@@ -177,31 +174,38 @@ describe('leaks through shared built-ins', () => {
   ];
   const MARK = '__stressLeak';
   const own = (object: object) => String(Object.getOwnPropertyDescriptor(object, MARK)?.value);
-  const seen = new Map<Engine, { host: string[]; otherRuns: string[] }>();
+  const seen = new Map<Engine, { host: string[]; otherRuns: string[]; outcomes: string[] }>();
+  // Divergence: the isolate engine freezes the built-ins runs share, so marking one throws and fails the
+  // run before its hook. The namespaces (JSON, Reflect, console, crypto, Math), Date and globalThis are
+  // each run's own, and take the mark as on QuickJS.
+  const frozenOnIsolate = new Set(['Array.prototype', 'Object.prototype', 'Promise', 'Promise.prototype', 'Uint8Array.prototype', 'TextEncoder.prototype']);
+  const expectedOutcome = (engine: Engine, name: string) => (engine === 'isolate' && frozenOnIsolate.has(name) ? 'failed' : 'done');
 
   // Per engine: every target marked by a run waiting on its hook, while the host and other runs look.
   beforeAll(async () => {
     for (const engine of ENGINES) {
       const leakers = await startOn(engine, 'leakMark', targets.map((_, index) => index));
       try {
-        const tokens = await Promise.all(leakers.map(hookToken));
+        const tokens = await Promise.all(leakers.map((runId, index) =>
+          (expectedOutcome(engine, targets[index][0]) === 'done' ? hookToken(runId) : undefined)));
         const host = targets.map(([, object]) => own(object));
         const observers = await startOn(engine, 'leakObserve', targets.map((_, index) => index));
         const otherRuns = (await Promise.all(observers.map((runId) => settle(runId)))).map(({ value }) => String(value));
-        seen.set(engine, { host, otherRuns });
-        await Promise.all(tokens.map((token) => resumeHook(token, 0)));
-        expect((await Promise.all(leakers.map((runId) => settle(runId)))).map(({ value }) => value)).toEqual(targets.map(() => 'done'));
+        await Promise.all(tokens.map((token) => token !== undefined && resumeHook(token, 0)));
+        const outcomes = (await Promise.all(leakers.map((runId) => settle(runId)))).map(({ status, value }) => String(value ?? status));
+        seen.set(engine, { host, otherRuns, outcomes });
       } finally {
         for (const [, object] of targets) delete (object as Record<string, unknown>)[MARK];
       }
     }
   }, 60_000);
 
-  // Bug for the first ten targets on the isolate engine: the sandbox hands workflow code the host's own objects.
-  const leaksOnIsolate = new Set(targets.slice(0, 10).map(([name]) => name));
   for (const engine of ENGINES) {
+    it(`${engine}: marking each built-in ${engine === 'isolate' ? 'fails the run where it is shared' : 'completes'}`, () => {
+      expect(seen.get(engine)?.outcomes).toEqual(targets.map(([name]) => expectedOutcome(engine, name)));
+    });
     for (const [index, [name]] of targets.entries()) {
-      (engine === 'isolate' && leaksOnIsolate.has(name) ? it.fails : it)(`${engine}: a mark on ${name} stays in its run`, () => {
+      it(`${engine}: a mark on ${name} stays in its run`, () => {
         const { host, otherRuns } = seen.get(engine) ?? { host: [], otherRuns: [] };
         expect({ host: host[index], otherRun: otherRuns[index] }).toEqual({ host: 'undefined', otherRun: 'undefined' });
       });
@@ -223,8 +227,7 @@ describe('leaks through shared built-ins', () => {
   }
 
   for (const engine of ENGINES) {
-    // Bug on isolate: workflow code assigning JSON.stringify replaces it for the World's own serialization.
-    (engine === 'isolate' ? it.fails : it)(`${engine}: a workflow's JSON.stringify patch does not reach World code`, async () => {
+    it(`${engine}: a workflow's JSON.stringify patch does not reach World code`, async () => {
       const stringify = JSON.stringify;
       const calls = await whilePatched(engine, 'leakJsonStringify', () => {
         toJson({ a: 1 });
@@ -236,8 +239,7 @@ describe('leaks through shared built-ins', () => {
       expect(calls).toEqual({ patched: false, counted: undefined });
     });
 
-    // Bug on isolate: the sandbox crypto is a Proxy with no set trap, so assignments land on the host's crypto.
-    (engine === 'isolate' ? it.fails : it)(`${engine}: assigning crypto.randomUUID stays in the run`, async () => {
+    it(`${engine}: assigning crypto.randomUUID stays in the run`, async () => {
       const uuid = await whilePatched(engine, 'leakCryptoAssign', () => crypto.randomUUID(),
         () => { delete (crypto as unknown as Record<string, unknown>).randomUUID; });
       expect(uuid).not.toBe('00000000-0000-4000-8000-000000000000');
@@ -298,7 +300,7 @@ describe('hooks, sleeps, streams and child runs', () => {
       const { childRunId, ...value } = result.value as { childRunId: string };
       expect(value).toEqual({ payloads: [1, 2, 3], childResult: 5 });
       // A child takes the starting Worker's WORKFLOW_VM, not its parent's engine.
-      expect((await world.runs.get(childRunId)).executionContext).toMatchObject({ workflowVm: 'isolate' });
+      expect((await world.runs.get(childRunId)).executionContext).toMatchObject({ workflowVm: 'node' });
       const stream = getRun(ids[engine]).getReadable<Uint8Array>({ namespace: 'stress' });
       expect(await new Response(stream).text()).toBe('1\n2\n3\n');
       result.value = value;
@@ -340,8 +342,8 @@ describe('global surface', () => {
     // Workers forbid code generation; QuickJS evaluates strings. The probe takes Function from a function, because
     // vitest-pool-workers proxies the global Function to allow `new Function`, which production rejects too.
     'indirect eval()': 'EvalError on isolate', 'Function constructor': 'EvalError on isolate',
-    // Bug: isolate's import() reaches the host's modules, such as cloudflare:workers (env bindings) and real timers.
-    'import(cloudflare:workers)': 'host modules', 'import(node:timers)': 'host modules',
+    // Both reject import(): QuickJS finds no module, and the isolate build lowers import() to a throwing call.
+    'import(cloudflare:workers)': undefined, 'import(node:timers)': undefined,
     // The SDK hides WeakRef and FinalizationRegistry on isolate (as on node:vm) but not on QuickJS.
     'typeof WeakRef': 'hidden on isolate', 'typeof FinalizationRegistry': 'hidden on isolate',
     // QuickJS has no WebAssembly or Atomics.
@@ -359,9 +361,9 @@ describe('global surface', () => {
     'globalThis write then bare read': 'globals resolve once', 'top-level function on globalThis': 'module scope',
     // Bug in QuickJS: URL has no searchParams.
     'URL#searchParams': 'missing on QuickJS',
-    'RegExp v flag': undefined,
-    // Isolate's Date is a wrapper around the host Date, and its Math an object inheriting from the host's.
-    'Date.prototype.constructor': 'wrapped Date', 'Object.keys(Math)': 'wrapped Math',
+    // The QuickJS in the published SDK (quickjs-wasi 3.4.0) has no `v` flag.
+    'RegExp v flag': 'missing on QuickJS',
+    'Date.prototype.constructor': undefined, 'Object.keys(Math)': undefined,
     'JSON.stringify(1n)': undefined, 'structuredClone(Map)': undefined, Headers: undefined, TextEncoder: undefined,
     AbortController: undefined,
   };

@@ -89,14 +89,19 @@ class WorkersBuilder extends BaseBuilder {
     const code = workflows.interimBundleText;
     if (code === undefined) throw new Error('@workflow/builders returned no workflow bundle');
 
-    // The route `createCombinedBundle` writes, plus the same bundle compiled as a function for vm.ts.
+    // vm.ts runs the same bundle as a function. Its import() calls must not load the Worker's modules
+    // (cloudflare:workers, node:timers): esbuild lowers each to `__toESM(require(...))`, without
+    // comments in between, and that require goes to vm.ts instead.
+    const lowered = await esbuild.transform(code, { format: 'cjs', supported: { 'dynamic-import': false }, minifyWhitespace: true, logLevel: 'warning' });
+    const factory = lowered.code.replace(/(__toESM\d*\()require\(/g, '$1__workflowImport(');
+    // The route `createCombinedBundle` writes, plus that function, registered with vm.ts.
     await writeFile(routeSource, `import { workflowEntrypoint } from 'workflow/runtime';
 import { registerWorkflowBundle } from ${JSON.stringify(VM_SHIM)};
 
 const workflowRouteModuleBodyStartedAt = Date.now();
 const workflowCode = ${JSON.stringify(code)};
-registerWorkflowBundle(workflowCode, ${JSON.stringify(SHADOWED_GLOBALS)}, function (globalThis, ${SHADOWED_GLOBALS.join(', ')}) {
-${code}
+registerWorkflowBundle(workflowCode, ${JSON.stringify(SHADOWED_GLOBALS)}, function (globalThis, __workflowImport, ${SHADOWED_GLOBALS.join(', ')}) {
+${factory}
 });
 export const POST = workflowEntrypoint(workflowCode${createWorkflowEntrypointOptionsCode({ routeModuleBodyStartedAt: 'workflowRouteModuleBodyStartedAt' })});
 `);
