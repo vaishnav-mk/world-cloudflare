@@ -22,6 +22,19 @@ async function newRun(id: string) {
 }
 
 describe('v5 event storage in SQLite DO', () => {
+  it('publishes every due step of a run in one drain', async () => {
+    const runId = crypto.randomUUID();
+    await newRun(runId);
+    await store.events.create(runId, { eventType: 'run_started' });
+    // More than the 50 a drain used to publish, one at a time.
+    await Promise.all(Array.from({ length: 60 }, (_, index) => store.events.create(runId, {
+      eventType: 'step_created', correlationId: `drained-${index}`, eventData: { stepName: 'double', input: bytes('2') },
+    })));
+    expect(await owed(runId)).toBe(60);
+    await env.WORLD_STORE.getByName(storeShardFor(runId)).drainOutbox();
+    expect(await owed(runId)).toBe(0);
+  });
+
   it('recovers a committed hook event when no SDK queue publish follows', async () => {
     const runId = crypto.randomUUID();
     await newRun(runId);
@@ -347,7 +360,11 @@ describe('v5 event storage in SQLite DO', () => {
       }
       return false;
     }, { timeout: 10_000 }).toBe(true);
-    expect(parse(dead!.body.encoded)).toEqual({ runId, stepId: 'poison-step', stepName: 'double' });
+    // With the run's identity, so the step starts without reading the run.
+    expect(parse(dead!.body.encoded)).toEqual({
+      runId, stepId: 'poison-step', stepName: 'double',
+      runContext: { deploymentId: 'test-v1', specVersion: expect.any(Number), startedAt: expect.any(Number), rootRunId: runId },
+    });
     expect(dead!.body.queueName).toBe(`${getQueueTopicPrefix('workflow')}poison`);
     expect(dead!.body.targetDeployment).toBe('test-v1');
     expect(await stub.pendingStepDispatchSlot(runId, 'poison-step', 'double')).toBe(slot);

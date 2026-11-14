@@ -10,7 +10,7 @@ import { FAN_OUT_CONCURRENCY, MIN_ALARM_DELAY_MS } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { MessageKind } from '../enums.js';
 import { Semaphore } from '../lib/semaphore.js';
-import { holdsRuns, objectOptions, queueShardFor } from '../lib/shards.js';
+import { holdsRuns, objectOptions } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type {
   EnqueueResult, HeldToken, IndexAnswer, IndexBatch, IndexPage, OutboxClaim, QueueDispatch, ResolveDataMode, TokenRelease, WorldEnv,
@@ -281,8 +281,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
    */
   async drainOutbox(): Promise<number> {
     const store = this.#store;
-    const drained = await dispatch.drainOutbox(store,
-      (runId, payload, key) => this.env.QUEUE_SHARD.getByName(queueShardFor(runId, payload, key), objectOptions()));
+    const drained = await dispatch.drainOutbox(store);
     await store.pushReleases();
     for (const token of store.takeovers.due(Date.now())) {
       await forceClaims.finishTakeover(store, token).catch((error: unknown) => console.error('Token takeover failed', { token, error }));

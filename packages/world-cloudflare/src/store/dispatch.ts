@@ -1,10 +1,10 @@
-import { isTerminalWorkflowRunStatus, type Step } from '@workflow/world';
+import { isTerminalWorkflowRunStatus, ROOT_RUN_ID_ATTRIBUTE, SPEC_VERSION_LEGACY, type Step, type WorkflowRun } from '@workflow/world';
 import { stringify } from 'devalue';
 import { MAX_PUBLISH_BACKOFF_MS, OUTBOX_DRAIN_BATCH, REDRIVE_DELAY_MS, WAIT_RETRY_DELAY_MS } from '../constants.js';
 import { DispatchAction, EventType, MessageKind, RunStatus, StepStatus, WaitStatus } from '../enums.js';
 import { fnv1a32Hex, messageIdFor, sha256Hex } from '../lib/hash.js';
+import { queueShardFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
-import type { QueueShard } from '../queue/queue-shard.js';
 import type { DispatchKind, EnqueueResult, OutboxClaim, QueueDispatch } from '../types.js';
 import type { StoreContext } from './context.js';
 import type { Db } from './db.js';
@@ -18,7 +18,6 @@ import type { OutboxRow } from './rows.js';
  */
 
 type Message = { key: string; body: unknown };
-type ShardFor = (runId: string, payload: unknown, key: string) => DurableObjectStub<QueueShard>;
 
 type Plan =
   | { action: DispatchAction.Settle }
@@ -140,10 +139,14 @@ async function reopen(store: StoreContext, runId: string, at: number, kind: Disp
   return reopened;
 }
 
-/** Publishes due outbox rows. Returns how many rows were due. */
-export async function drainOutbox(store: StoreContext, shardFor: ShardFor): Promise<number> {
+/**
+ * Publishes due outbox rows together, one push per queue shard: a replay that created thousands of
+ * steps and ended before it published them leaves that many due. Returns how many rows were due.
+ */
+export async function drainOutbox(store: StoreContext): Promise<number> {
   const { db, outbox } = store;
   const due = outbox.due(Date.now(), OUTBOX_DRAIN_BATCH);
+  const sends: Send[] = [];
   for (const row of due) {
     const plan = planFor(db, outbox, row);
     switch (plan.action) {
@@ -155,10 +158,11 @@ export async function drainOutbox(store: StoreContext, shardFor: ShardFor): Prom
         break;
       case DispatchAction.Publish:
         if (row.kind === EventType.RunCreated) await store.placeRunner(row.run_id);
-        await publish(outbox, shardFor, row, plan.message, plan.stillOwed);
+        sends.push({ row, message: plan.message, stillOwed: plan.stillOwed });
         break;
     }
   }
+  await publish(store, sends);
   return due.length;
 }
 
@@ -177,10 +181,10 @@ function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
       return { action: DispatchAction.Publish, message: wakeMessage(row, 'hook-wake', run?.specVersion), stillOwed: () => true };
     case EventType.StepCreated: {
       const step = db.findStep(row.run_id, row.correlation_id);
-      if (step?.status !== StepStatus.Pending || runStatus !== RunStatus.Running) return SETTLE;
+      if (step?.status !== StepStatus.Pending || run?.status !== RunStatus.Running) return SETTLE;
       return {
         action: DispatchAction.Publish,
-        message: stepMessage(row, step),
+        message: stepMessage(row, step, run),
         stillOwed: () => pendingStepSlot(db, outbox, row.run_id, step.stepId, step.stepName) === row.slot,
       };
     }
@@ -199,30 +203,49 @@ function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
   }
 }
 
-async function publish(
-  outbox: Outbox, shardFor: ShardFor, row: OutboxRow, message: Message, stillOwed: () => boolean,
-): Promise<void> {
-  // A dead-lettered key is spent forever, so each redrive needs a new one.
-  const key = row.redrive ? `${message.key}:redrive-${row.redrive}` : message.key;
-  const body = stringify(message.body);
-  const [id, digest] = await Promise.all([messageIdFor(key), sha256Hex(body)]);
-  if (!stillOwed()) return;
-  try {
-    // The shard the SDK's own publish of this message reaches, which holds its key's deduplication.
-    await shardFor(row.run_id, message.body, key).enqueue(id, row.queue_name, body, 0, row.deployment_id, key, digest);
-    outbox.publishRow(row);
-  } catch (error) {
-    console.error('Workflow dispatch recovery failed', { runId: row.run_id, slot: row.slot, error });
+type Send = { row: OutboxRow; message: Message; stillOwed: () => boolean };
+
+async function publish(store: StoreContext, sends: Send[]): Promise<void> {
+  const prepared = await Promise.all(sends.map(async ({ row, message, stillOwed }) => {
+    // A dead-lettered key is spent forever, so each redrive needs a new one.
+    const key = row.redrive ? `${message.key}:redrive-${row.redrive}` : message.key;
+    const encoded = stringify(message.body);
+    const [id, digest] = await Promise.all([messageIdFor(key), sha256Hex(encoded)]);
+    return {
+      row, stillOwed,
+      // The shard the SDK's own publish of this message reaches, which holds its key's deduplication.
+      shard: queueShardFor(row.run_id, message.body, key),
+      request: { id, queueName: row.queue_name, encoded, delayMs: 0, targetDeployment: row.deployment_id, deduplicationKey: key, payloadDigest: digest },
+    };
+  }));
+  const owed = prepared.filter(({ stillOwed }) => stillOwed());
+  const results = await store.pushQueue(owed).catch((error: unknown) => owed.map((): EnqueueResult => ({ error: String(error) })));
+  for (const [index, { row }] of owed.entries()) {
+    const result = results[index];
+    if ('id' in result) {
+      store.outbox.publishRow(row);
+      continue;
+    }
+    console.error('Workflow dispatch recovery failed', { runId: row.run_id, slot: row.slot, error: result.error });
     const delay = Math.min(MAX_PUBLISH_BACKOFF_MS, (row.attempts + 1) ** 2 * 1_000);
-    outbox.recordFailure(row, Date.now() + delay);
+    store.outbox.recordFailure(row, Date.now() + delay);
   }
 }
 
-/** Matches the SDK's own step key, so an SDK publish and ours deduplicate. */
-function stepMessage(row: OutboxRow, step: Step): Message {
+/**
+ * Matches the SDK's own step key, so an SDK publish and ours deduplicate, and carries the run's
+ * identity as the SDK's does, so the step starts without reading the run.
+ */
+function stepMessage(row: OutboxRow, step: Step, run: WorkflowRun): Message {
+  const runContext = {
+    deploymentId: run.deploymentId,
+    specVersion: run.specVersion ?? SPEC_VERSION_LEGACY,
+    ...(run.startedAt === undefined ? {} : { startedAt: run.startedAt.getTime() }),
+    rootRunId: run.attributes?.[ROOT_RUN_ID_ATTRIBUTE] ?? run.runId,
+  };
   return {
     key: `${row.queue_name}:${step.stepId}:${fnv1a32Hex(step.stepName)}`,
-    body: { runId: row.run_id, stepId: step.stepId, stepName: step.stepName },
+    body: { runId: row.run_id, stepId: step.stepId, stepName: step.stepName, runContext },
   };
 }
 

@@ -119,7 +119,7 @@ export const RELEASE_KINDS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /** Dispatch outbox recovery. */
-export const OUTBOX_DRAIN_BATCH = 50;
+export const OUTBOX_DRAIN_BATCH = 1_000;
 export const DISPATCH_RECOVERY_DELAY_MS = 5_000;
 export const REDRIVE_DELAY_MS = 10_000;
 export const WAIT_RETRY_DELAY_MS = 1_000;
