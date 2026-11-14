@@ -380,6 +380,28 @@ describe('durable hook ownership', () => {
     expect(await free(token)).toBe(true);
     expect((await world.events.list({ runId })).data.filter((event) => event.eventType === 'hook_created')).toHaveLength(1);
   });
+  it('can take a start Hook whose accepted run creation has not committed yet', async () => {
+    const candidate = newRunId();
+    const thief = await newRun();
+    const token = awayFrom(candidate, thief);
+    await runInDurableObject(env.WORLD_STORE.getByName(storeShardFor(candidate)), async (store) => {
+      const restore = intercept(store, 'claimAcceptedHook', async (peer, args) => {
+        const answer = await peer.claimAcceptedHook(args[0] as HookClaimOperation);
+        await world.events.create(thief, hookCreated(token, true));
+        return answer;
+      });
+      try {
+        await store.createEvent(candidate, { eventType: 'run_created', specVersion: 8, eventData: {
+          deploymentId: 'test-v1', workflowName: 'precommit-start', input: bytes, startHook: { token },
+        } });
+      } finally { restore(); }
+    });
+    expect(await world.hooks.getByToken(token)).toMatchObject({ runId: thief });
+    expect((await world.hooks.list({ runId: candidate })).data).toEqual([]);
+    expect((await world.events.list({ runId: candidate })).data.map((event) => event.eventType))
+      .toEqual(['run_created', 'hook_disposed']);
+  });
+
   for (const grant of [false, true]) it(`cancels an expired start candidate ${grant ? 'after grant' : 'before delayed grant'}`, async () => {
     const runId = newRunId();
     const token = awayFrom(runId);
