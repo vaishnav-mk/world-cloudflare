@@ -36,6 +36,28 @@ export function parseEpochs(raw: string | undefined): readonly ShardEpoch[] {
   return value as ShardEpoch[];
 }
 
+const LOCATION_HINTS: ReadonlySet<string> = new Set<DurableObjectLocationHint>([
+  'wnam', 'enam', 'sam', 'weur', 'eeur', 'apac', 'apac-ne', 'apac-se', 'oc', 'afr', 'me',
+]);
+let hint: { locationHint?: DurableObjectLocationHint } | undefined;
+
+/**
+ * The options for every `getByName` of the World's own objects: the `LOCATION_HINT` region, so a
+ * new object is created there instead of near its first caller. Objects that exist keep their place.
+ */
+export function objectOptions(): { locationHint?: DurableObjectLocationHint } {
+  hint ??= parseLocationHint((env as Partial<WorldEnv>).LOCATION_HINT);
+  return hint;
+}
+
+/** Parses `LOCATION_HINT`: unset, or one of the Durable Object location hints. */
+export function parseLocationHint(raw: string | undefined): { locationHint?: DurableObjectLocationHint } {
+  if (raw === undefined || raw === '') return {};
+  if (!LOCATION_HINTS.has(raw)) throw new Error(`LOCATION_HINT must be one of ${[...LOCATION_HINTS].join(', ')}`);
+  // SAFETY: checked against the hints above.
+  return { locationHint: raw as DurableObjectLocationHint };
+}
+
 /** The epoch a run was created in. An ID that is not a run ULID belongs to the first epoch. */
 function epochOf(runId: string): { epoch: ShardEpoch; tag: string } {
   const list = epochs();

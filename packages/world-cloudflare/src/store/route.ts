@@ -1,6 +1,6 @@
 import { WorkflowRunNotFoundError } from '@workflow/errors';
 import { FAN_OUT_CONCURRENCY, STORE_NAME } from '../constants.js';
-import { storeShardFor, storeShardNames, tokenShardFor } from '../lib/shards.js';
+import { objectOptions, storeShardFor, storeShardNames, tokenShardFor } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
@@ -12,17 +12,17 @@ const legacyRuns = new Set<string>();
 
 /** The legacy store: runs created before store shards, with their hooks. */
 export function legacyStore(namespace: Namespace): Store {
-  return transientAsWorldError(namespace.getByName(STORE_NAME));
+  return transientAsWorldError(namespace.getByName(STORE_NAME, objectOptions()));
 }
 
 /** A run's store shard. A new run's `run_created` goes straight to it. */
 export function storeShard(namespace: Namespace, runId: string): Store {
-  return transientAsWorldError(namespace.getByName(storeShardFor(runId)));
+  return transientAsWorldError(namespace.getByName(storeShardFor(runId), objectOptions()));
 }
 
 /** The store shard that registers a hook token. */
 export function tokenShard(namespace: Namespace, token: string): Store {
-  return transientAsWorldError(namespace.getByName(tokenShardFor(token)));
+  return transientAsWorldError(namespace.getByName(tokenShardFor(token), objectOptions()));
 }
 
 /**
@@ -51,7 +51,7 @@ export async function onStores<T>(namespace: Namespace, names: readonly string[]
   let next = 0;
   const worker = async () => {
     for (let index = next++; index < names.length; index = next++) {
-      results[index] = await call(transientAsWorldError(namespace.getByName(names[index])));
+      results[index] = await call(transientAsWorldError(namespace.getByName(names[index], objectOptions())));
     }
   };
   await Promise.all(Array.from({ length: FAN_OUT_CONCURRENCY }, worker));

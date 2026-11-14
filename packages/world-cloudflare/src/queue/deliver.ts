@@ -6,7 +6,7 @@ import { DeliveryResult } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { isRecord } from '../lib/is-record.js';
 import { replayOf } from '../lib/messages.js';
-import { runnerShardFor } from '../lib/shards.js';
+import { objectOptions, runnerShardFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
 import type { Delivery, DeliveryOutcome, Envelope, WorldEnv } from '../types.js';
 import type { DeliveryCounts } from './delivery-counts.js';
@@ -141,10 +141,10 @@ export class Deliverer {
     await Promise.all([
       ...due.map(async ({ delivery, runner, run }, index) => {
         if (run === undefined) return;
-        outcomes[index] = await this.#env.RUNNER.getByName(runner).replay(run, delivery).catch(failed);
+        outcomes[index] = await this.#env.RUNNER.getByName(runner, objectOptions()).replay(run, delivery).catch(failed);
       }),
       ...[...batches].map(async ([runner, batch]) => {
-        const results = await this.#env.RUNNER.getByName(runner).consume(batch.map(({ delivery }) => delivery))
+        const results = await this.#env.RUNNER.getByName(runner, objectOptions()).consume(batch.map(({ delivery }) => delivery))
           .then((settled) => {
             if (settled.length !== batch.length) throw new Error('Incomplete queue delivery response');
             return settled;

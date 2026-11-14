@@ -30,6 +30,8 @@ export type WorldEnv = {
   FLOW_BACKGROUND_BUDGET_MS?: string;
   /** JSON list of `ShardEpoch`, oldest first. Append an epoch starting in the future to add shards. */
   SHARD_EPOCHS?: string;
+  /** A Durable Object location hint, such as `weur`, that every object the World creates gets. */
+  LOCATION_HINT?: string;
   /** 32 random bytes as base64. When set, the SDK encrypts payloads and VM snapshots with per-run keys derived from it. */
   WORKFLOW_ENCRYPTION_SECRET?: string;
 };

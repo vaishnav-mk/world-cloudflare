@@ -78,8 +78,13 @@ The Wrangler config, as in the repo's [`wrangler.jsonc`](../../wrangler.jsonc), 
 | `QUEUE_MAX_ATTEMPTS` | Deliveries before a message is dead-lettered, 64 by default |
 | `FLOW_BACKGROUND_BUDGET_MS` | How long after its delivery starts a flow request waits for its background work, 13.5 minutes by default |
 | `EXECUTOR_ROUTES` | JSON map from deployment ID to retained executor script name |
+| `LOCATION_HINT` | Optional [location hint](https://developers.cloudflare.com/durable-objects/reference/data-location/#provide-a-location-hint), such as `weur`, for every Durable Object the World creates ([below](#object-location)) |
 
-Every Worker that runs World code, retained executors included, needs the same bindings, `SHARD_EPOCHS` and `WORKFLOW_ENCRYPTION_SECRET`.
+Every Worker that runs World code, retained executors included, needs the same bindings, `SHARD_EPOCHS`, `LOCATION_HINT` and `WORKFLOW_ENCRYPTION_SECRET`.
+
+### Object location
+
+A Durable Object is created near its first caller, so objects first reached from different places, such as load tests from two regions, can end up far apart, and every call between them pays the distance: a run whose store shard and runner were apart took about 170 ms per event write on Workers, where 8 to 27 ms is usual. `LOCATION_HINT` keeps them in one region: the World passes it on every `getByName` of its stores, index and token shards, queue shards, runners and `RunStreams`. It only places objects created after it is set; an object keeps the place it was created in, so set it before the first run, or add a [shard epoch](#shards-and-epochs) so new runs use new objects.
 
 ## Shards and epochs
 

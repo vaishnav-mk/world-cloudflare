@@ -9,7 +9,7 @@ import migrations from '../../drizzle/store/migrations.js';
 import { MIN_ALARM_DELAY_MS } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { MessageKind } from '../enums.js';
-import { holdsRuns, queueShardFor } from '../lib/shards.js';
+import { holdsRuns, objectOptions, queueShardFor } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type {
   EnqueueResult, HeldToken, IndexAnswer, IndexBatch, IndexPage, OutboxClaim, QueueDispatch, ResolveDataMode, TokenRelease, WorldEnv,
@@ -44,7 +44,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
     super(ctx, env);
     // Reads `this.env` at call time, so a test can swap the bindings of a live object.
     this.#store = new StoreContext(ctx, env.QUEUE_SHARD, (name) =>
-      (name === ctx.id.name ? this : transientAsWorldError(this.env.WORLD_STORE.getByName(name))));
+      (name === ctx.id.name ? this : transientAsWorldError(this.env.WORLD_STORE.getByName(name, objectOptions()))));
     migrateOnStart(ctx, migrations);
     if (holdsRuns(this.#store.name)) ctx.blockConcurrencyWhile(() => this.#store.feed.resume());
   }
@@ -257,7 +257,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   async drainOutbox(): Promise<number> {
     const store = this.#store;
     const drained = await dispatch.drainOutbox(store.db, store.outbox,
-      (runId, payload, key) => this.env.QUEUE_SHARD.getByName(queueShardFor(runId, payload, key)));
+      (runId, payload, key) => this.env.QUEUE_SHARD.getByName(queueShardFor(runId, payload, key), objectOptions()));
     await store.pushReleases();
     for (const token of store.takeovers.due(Date.now())) {
       await forceClaims.finishTakeover(store, token).catch((error: unknown) => console.error('Token takeover failed', { token, error }));

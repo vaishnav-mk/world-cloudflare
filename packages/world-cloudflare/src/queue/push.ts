@@ -1,4 +1,5 @@
 import { DurabilityRouting } from 'durability/routing';
+import { objectOptions } from '../lib/shards.js';
 import { toWorldError } from '../lib/transient.js';
 import type { EnqueueRequest, EnqueueResult, WorldEnv } from '../types.js';
 import { QueueShard } from './queue-shard.js';
@@ -14,7 +15,7 @@ export function shardPusher(namespace: WorldEnv['QUEUE_SHARD']) {
     target: QueueShard,
     namespace: () => namespace,
     invoke: (stub, { requests }: Push) => stub.push(requests),
-    sharding: ({ shard }) => shard,
+    sharding: ({ shard }) => ({ shard, ...objectOptions() }),
   });
   return async function push(entries: { request: EnqueueRequest; shard: string }[]): Promise<EnqueueResult[]> {
     const byShard = new Map<string, number[]>();

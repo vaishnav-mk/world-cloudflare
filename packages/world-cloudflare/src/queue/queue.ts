@@ -10,7 +10,7 @@ import { onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
-import { queueShardFor, runnerShardFor } from '../lib/shards.js';
+import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
 import { DEFAULT_HOLD_LEASE_SECONDS, MAX_HOLD_LEASE_SECONDS } from '../constants.js';
 import { createQueueHandler } from './handler.js';
 import { holdMessage } from './hold.js';
@@ -63,7 +63,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
           ?? DEFAULT_HOLD_LEASE_SECONDS));
         const ready = await prepare(env, queueName, message, { ...rest, delaySeconds: leaseSeconds });
         if ('error' in ready) throw new Error(ready.error);
-        return holdMessage(() => env.QUEUE_SHARD.getByName(ready.shard), queueName, message, ready.request, leaseSeconds * 1000);
+        return holdMessage(() => env.QUEUE_SHARD.getByName(ready.shard, objectOptions()), queueName, message, ready.request, leaseSeconds * 1000);
       }
       const target = rest.deploymentId;
       if (target !== undefined && !reachable(env, target)) {
@@ -83,7 +83,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
      * delivery in progress, if any. The outcome carries the handler's errors with their class.
      */
     invoke: async (runId, payload, { idempotencyKey = crypto.randomUUID(), timeoutMs } = {}) => {
-      const outcome = transientAsWorldError(env.RUNNER.getByName(runnerShardFor(runId))).invoke(runId, payload, idempotencyKey);
+      const outcome = transientAsWorldError(env.RUNNER.getByName(runnerShardFor(runId), objectOptions())).invoke(runId, payload, idempotencyKey);
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timedOut = new Promise<never>((_, reject) => {
         if (timeoutMs === undefined) return;

@@ -6,6 +6,7 @@ import {
 } from '../constants.js';
 import { createPayloads, isPayloadRef, tooLarge } from '../lib/payloads.js';
 import { currentRequest, type FlowRequest } from '../lib/request-context.js';
+import { objectOptions } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
@@ -33,7 +34,7 @@ function toChunk(chunk: string | Uint8Array): Uint8Array {
  * is piped from its object body.
  */
 export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>): Streamer {
-  const streamsOf = (runId: string) => transientAsWorldError(env.RUN_STREAMS.getByName(runId));
+  const streamsOf = (runId: string) => transientAsWorldError(env.RUN_STREAMS.getByName(runId, objectOptions()));
   const payloads = createPayloads(env.PAYLOADS);
   /** The step streams each flow request writes and has not closed, by run. */
   const writing = new WeakMap<FlowRequest, Map<string, Set<string>>>();
