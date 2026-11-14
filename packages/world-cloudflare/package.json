@@ -6,6 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./build": "./src/build.ts",
+    "./stubs/*": "./src/stubs/*.ts",
     "./remote": {
       "types": "./src/remote/client.ts",
       "default": "./dist/remote/client.js"
@@ -16,11 +18,13 @@
     "db:generate": "drizzle-kit generate --config drizzle/store.config.ts && drizzle-kit generate --config drizzle/queue.config.ts && drizzle-kit generate --config drizzle/streams.config.ts"
   },
   "dependencies": {
+    "@workflow/builders": "5.1.0",
     "@workflow/errors": "5.1.1",
     "@workflow/world": "5.2.0",
     "devalue": "6.0.3",
     "drizzle-orm": "0.45.4",
     "durability": "5.2.1",
+    "esbuild": "0.28.2",
     "ulid": "3.0.2",
     "workers-qb": "1.16.0"
   },
