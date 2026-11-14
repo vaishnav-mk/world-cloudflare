@@ -14,13 +14,13 @@ Vercel's column is its documented limits. This World's column was measured on Wo
 | Replay after 10,000 steps | 240 s budget | 185 ms with QuickJS, 3.9 s native | `adff891` |
 | One payload | 50 MB | 16 MiB step output | `3f15876` |
 | One stream chunk | 10 MB | 32 MiB | `adff891` |
-| Parallel steps in one run | Not documented | 1,000 in about 7 s, 5,000 in about 68 s | `1d9d968` |
+| Parallel steps in one run | Not documented | 10,000 in 69 s with QuickJS; 2,000 in 22 s native | `3e5bab2` |
 
 - Over 100,000 runs, creation averaged 4,220 per second, with p50 latency 93 ms, p95 237 ms and no errors. On `adff891`, 20,000-run bursts ran at 3,376 to 4,225 per second with QuickJS, the node engine and spec 9, and every run completed with the right result.
 - The 30,000-step run used QuickJS and took 3,896 s. The SDK takes its event ceiling from the World's `run_started` result, and this World returns none.
 - Replay is the time from a sleep's end to the next step in a run of 10,000 steps (30,008 events). QuickJS restores a VM snapshot, which the SDK saves every 1,000 events; the node engine has none and replays the whole log.
 - One payload is the one row below Vercel. The limit is the 128 MB isolate's memory ([payloads](#payloads)). Larger data goes in byte streams, which carry 1 GiB and more ([streams](#streams)).
-- Parallel steps were measured with QuickJS on a copy of the deployment, with the changes in `1d9d968`: at the first fan-out the run's store writes a turn's `step_created` events and publishes in batches, so its memory stays near 60 MiB for 5,000 steps (locally) instead of growing past the 128 MB isolate. Before them, 1,000 steps took 22 s and 5,000 took 683 s (`845c1ec`).
+- Parallel steps: with QuickJS, 1,000 took 13 s, 5,000 took 41 s and 10,000 took 69 s; at 20,000 the run's store ran out of memory and three steps failed after their retries. At the first fan-out the store writes a turn's `step_created` events and publishes in batches, which keeps its memory near 60 MiB for 5,000 steps (locally) instead of growing past the 128 MB isolate; before that, 5,000 steps took 683 s and 10,000 never started (`845c1ec`). The node engine finished 1,000 in 14 s and 2,000 in 22 s; its last replay needs memory that grows with the square of the step count, which is in core, so 3,000 and more run it out of memory.
 - The chunk cap is `STREAM_CHUNK_MAX_BYTES`. 1 GiB in 32 MiB chunks completed with every byte checked, at 12 MiB/s with QuickJS and 18 to 20 MiB/s native.
 
 ## How to measure

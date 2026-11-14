@@ -113,7 +113,7 @@ To browse runs in the SDK's web UI, set `WORLD_RPC_TOKEN` on the Worker (`wrangl
 
 Measured on Workers, with the objects and the load in one region. [Limits](docs/limits.md) compares them with Vercel's and gives the build of each.
 
-- 4,220 runs created per second, over 100,000 runs. 1,000 parallel steps in one run in 7 to 26 s.
+- 4,220 runs created per second, over 100,000 runs. 10,000 parallel steps in one run in 69 s with QuickJS.
 - 30,000 sequential steps (90,003 events) in one run; the World sets no event cap. Replay after 10,000 steps took 185 ms with QuickJS and 3.9 s native.
 - 16 MiB step outputs, below Vercel's 50 MB; the World rejects serialized payloads over 18 MiB. Larger data goes in byte streams, in chunks of up to 32 MiB: 1 GiB streams worked, every byte checked ([streams](docs/limits.md#streams)).
 - A step that exceeds the CPU limit is retried until the queue gives up. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
