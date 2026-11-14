@@ -19,7 +19,7 @@ export function createWorld(env: WorldEnv = platformEnv): World {
     capabilities: {
       // Hooks keep `tokenRetentionUntil` past their run's end; see `Db.isExpiredHook`.
       hookRetention: { active: true },
-      // The run's store claims the token, then creates the run with its start Hook; see `WorldStore.#admit`.
+      // The run's store claims the token, then creates the run with its start Hook; see `admit` in `store/token-claims.ts`.
       atomicStartHook: { active: true },
       // A unique `(run_id, resume_id)` index, and the store returns the committed event to a retry.
       hookResumeDedup: true,

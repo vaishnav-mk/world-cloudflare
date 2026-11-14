@@ -11,10 +11,11 @@ import { createWorld } from '../world.js';
 /**
  * A runner (`runnerShardFor`): where workflow code runs. Flow code a queue shard invoked itself
  * competed with the shard for CPU (run creation was 3 times faster with flows switched off), so
- * queue shards hand every delivery to a runner, which calls the `CONSUMER` entrypoint with it. A run's workflow deliveries and invocations all reach
- * its one runner, which runs the deliveries one at a time and the invocations beside them: the
- * single active runner per run `capabilities.invoke` asks for. It keeps nothing durable: a
- * delivery cut off by a reset fails on its queue shard, which delivers it again.
+ * queue shards hand every delivery to a runner, which calls the `CONSUMER` entrypoint with it. A
+ * run's workflow deliveries and invocations all reach its one runner, which runs the deliveries one
+ * at a time and the invocations beside them: the single active runner per run `capabilities.invoke`
+ * asks for. It keeps nothing durable: a delivery cut off by a reset fails on its queue shard, which
+ * delivers it again.
  */
 export class Runner extends DurableObject<WorldEnv> {
   /** Each run's latest workflow delivery in this instance; the next waits for it. */

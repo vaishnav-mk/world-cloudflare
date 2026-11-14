@@ -10,7 +10,6 @@ export type Store = ReturnType<Namespace['getByName']>;
 /** Runs the legacy store holds, created before store shards. A run never moves, and there are finitely many. */
 const legacyRuns = new Set<string>();
 
-
 /** The legacy store: runs created before store shards, with their hooks. */
 export function legacyStore(namespace: Namespace): Store {
   return transientAsWorldError(namespace.getByName(STORE_NAME));

@@ -182,7 +182,6 @@ export class Db {
     this.#qb.insert({ tableName: 'start_hook_refusals', data: { run_id: runId, token, conflicting_run_id: conflictingRunId } }).execute();
   }
 
-  /** A run's hook IDs. */
   hookIdsOf(runId: string): string[] {
     return allRows(this.#qb.fetchAll<'hooks', 'id'>({
       tableName: 'hooks', fields: ['id'], where: { conditions: 'run_id = ?', params: [runId] },
