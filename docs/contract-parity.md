@@ -143,6 +143,12 @@ The run's store admits `start({ experimental_hook })`: it claims the token on it
 
 `@workflow/world-testing` starts the World in a Node server, which cannot host a World bound to Durable Objects. Instead `test/conformance.test.ts` runs the SDK's `in-band-fence-conformance` (13 tests) and `atomic-start-hook-conformance` suites, imported by path from `@workflow/world`, and `test/world-testing.test.ts` ports the world-testing scenarios with their workflows (`workflows/world-testing.ts`) to the QuickJS, node engine and spec 9 lanes. Left out: flow-invocation counts, which read world-local's queue, and the lineage workflows, whose body-level `start()` does not load in the workerd test bundle.
 
+## Retained release check
+
+A real-Workers probe left an approval run waiting on release A, then deployed B with the workflow returning 1,000 more. Both received input 35 and resume value 7. The old run kept deployment A and returned 42; the new run kept B and returned 1,042. The main store used receiver-first claim-protocol installation before switching writers. Final deployment restored the original workflow; A stayed retained and the temporary B executor was removed after its run completed.
+
+This checks one unencrypted QuickJS/spec-8 workflow with an `enam` placement hint and published SDK 5.5.0. It does not establish arbitrary workflow changes, encryption/key upgrades, all regions or mixed-version protocol rollback safety. Separate Workers smoke covered forced unused tokens, live takeover notification and remote SDK spec-9 atomic start Hooks.
+
 ## Operations
 
 | Item | Done | Notes |
@@ -163,6 +169,7 @@ The run's store admits `start({ experimental_hook })`: it claims the token on it
 
 ## Upgrading
 
+- **Hook claim protocol.** Existing installations need the [receiver-first upgrade](hook-ownership.md#compatibility-and-rollout) before enabling intent-producing writers. Old direct acquisition calls can return retryable 503 during that stage. Receipts and disposal tombstones must survive later releases.
 - **Spec 9 is opt-in.** Nothing changes for new runs until `WORKFLOW_SPEC_VERSION=9` is set on the Worker and every retained executor. Existing runs keep their spec version.
 - **Schema changes are additive** and each Durable Object applies them on start. An existing run has no in-band count, so an in-band write to one is a 400; the spec 8 runtime never sends one.
 - **List index.** Each store backfills the index on its first wake after the upgrade, and lists and `hooks.get` ask every store until all have. A store that took writes on a version without the index after it backfilled (a rollback) leaves those changes out: delete its `index-backfill` storage key and its `index_sources` rows to backfill it again.
