@@ -167,11 +167,12 @@ export async function drainOutbox(store: StoreContext): Promise<number> {
         outbox.postpone(row, Date.now() + WAIT_RETRY_DELAY_MS);
         break;
       case DispatchAction.Publish:
-        if (row.kind === EventType.RunCreated) await store.placeRunner(row.run_id);
         sends.push({ row, message: plan.message, stillOwed: plan.stillOwed });
         break;
     }
   }
+  // A start is its run's first delivery, so its runner is created near this store first.
+  await Promise.all(sends.flatMap(({ row }) => (row.kind === EventType.RunCreated ? [store.placeRunner(row.run_id)] : [])));
   await publish(store, sends);
   return due.length;
 }
