@@ -44,6 +44,13 @@ export async function forceClaimer(value: number) {
   return value + await hook;
 }
 
+/** Started with the start Hook `start-<value>`, which it opens and waits on. */
+export async function startHooked(value: number) {
+  'use workflow';
+  using hook = createHook<number>({ token: `start-${value}` });
+  return value + await hook;
+}
+
 export async function retryOnce(value: number) {
   'use workflow';
   return recover(value);

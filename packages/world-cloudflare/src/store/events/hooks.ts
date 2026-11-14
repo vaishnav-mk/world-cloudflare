@@ -1,5 +1,5 @@
-import { EntityConflictError, HookForceClaimedError, HookNotFoundError } from '@workflow/errors';
-import type { Hook, WorkflowRun } from '@workflow/world';
+import { EntityConflictError, HookForceClaimedError, HookNotFoundError, WorkflowWorldError } from '@workflow/errors';
+import { isStartHookId, startHookId, type Hook, type StartHook, type WorkflowRun } from '@workflow/world';
 import { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import { unreachable } from '../../lib/unreachable.js';
 import type { EventOf } from '../../types.js';
@@ -44,6 +44,9 @@ function requireRunHook(tx: Tx, data: EventOf<EventType.HookReceived | EventType
  */
 function createHook(tx: Tx, run: WorkflowRun, data: EventOf<EventType.HookCreated>): Change {
   const { token } = data.eventData;
+  if (isStartHookId(tx.runId, data.correlationId)) {
+    throw new WorkflowWorldError(`${data.correlationId} is the run's start Hook, which run_created creates`, { status: 400 });
+  }
   if (tx.db.findHook(data.correlationId)) throw new EntityConflictError(`Hook ${data.correlationId} already exists`);
   const conflict = (holderRunId: string, refused: boolean): Change => ({ kind: ChangeKind.HookConflict, run, conflict: {
     eventType: EventType.HookConflict, correlationId: data.correlationId, specVersion: tx.specVersion,
@@ -61,6 +64,25 @@ function createHook(tx: Tx, run: WorkflowRun, data: EventOf<EventType.HookCreate
     default:
       return unreachable(tx.tokens);
   }
+}
+
+/**
+ * A run's start Hook (`start({ experimental_hook })`), made with the run: `startHookId(runId)`,
+ * never a webhook, with the request's token, metadata and retention.
+ */
+export function startHookOf(
+  runId: string, run: Pick<WorkflowRun, 'deploymentId' | 'workflowName' | 'encryptionPublicKey'>, startHook: StartHook,
+  specVersion: number, now: Date,
+): Hook {
+  return {
+    ...OWNER,
+    runId, hookId: startHookId(runId), token: startHook.token, metadata: startHook.metadata, isWebhook: false, isSystem: false,
+    tokenRetentionUntil: startHook.tokenRetentionUntil, specVersion, createdAt: now,
+    resumeContext: {
+      deploymentId: run.deploymentId, workflowName: run.workflowName, runSpecVersion: specVersion,
+      encryptionPublicKey: run.encryptionPublicKey,
+    },
+  };
 }
 
 /** The hook a `hook_created` makes for `run`. */

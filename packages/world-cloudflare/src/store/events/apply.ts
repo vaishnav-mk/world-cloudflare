@@ -5,7 +5,7 @@ import {
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type WorkflowRun,
 } from '@workflow/world';
 import { ulid } from 'ulid';
-import { ChangeKind, EventType } from '../../enums.js';
+import { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import { isSingleOrchestrator, mintSpecVersion } from '../../lib/spec.js';
 import type { Db } from '../db.js';
 import type { Outbox } from '../outbox.js';
@@ -37,6 +37,11 @@ export function applyEvent(
   const replayed = replayedResume(db, runId, data, params);
   if (replayed) return replayed;
 
+  // An admitted start Hook candidate's repeated run_created gets its run, as admission promises.
+  if (data.eventType === EventType.RunCreated && existing?.startHook !== undefined && data.eventData.startHook !== undefined) {
+    return { run: existing, allocated: 0 };
+  }
+
   const tx: Tx = { db, outbox, releases, tokens, runId, now: new Date(), specVersion };
   const created = createRun(tx, data, existing);
   const run = created?.run ?? existing;
@@ -54,6 +59,11 @@ export function applyEvent(
   if (change.kind === ChangeKind.LazyStepStart) appendEvent(db, runId, change.implied, tx.now);
   const event = appendEvent(db, runId, { ...journalOf(data, change), specVersion }, tx.now, params);
   persist(tx, data, event, change);
+  // An admitted start Hook is made with its run; no hook_created stands for it.
+  if (created !== undefined && tokens.kind === TokenClaim.Granted) {
+    db.deleteHookByToken(tokens.hook.token);
+    db.insertHook(tokens.hook);
+  }
   // A lazy step start also writes its implied step_created. A lazy run start's implied run_created is
   // the creation, which the fence counted before this write.
   const allocated = change.kind === ChangeKind.LazyStepStart ? 2 : 1;

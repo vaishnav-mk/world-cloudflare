@@ -30,6 +30,9 @@ export const EVENT_PAGE_READS = 2;
 /** Events returned with `sinceCursor` on `events.create`. */
 export const SINCE_CURSOR_LIMIT = 1000;
 
+/** The longest retention a start Hook may ask for, as world-local's default limit. */
+export const MAX_START_HOOK_RETENTION_MS = 30 * 24 * 60 * 60_000;
+
 /** Runs `runs.cancelMany` cancels at once, as core's own fallback does. */
 export const CANCEL_MANY_CONCURRENCY = 20;
 

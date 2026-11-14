@@ -169,6 +169,16 @@ export class Db {
     }).execute();
   }
 
+  /** The run a refused start Hook candidate was refused for, and the token it asked for. */
+  findStartHookRefusal(runId: string): { token: string; conflictingRunId: string } | undefined {
+    const row = findRow(this.#qb.fetchOne({ tableName: 'start_hook_refusals', where: { conditions: 'run_id = ?', params: [runId] } }));
+    return row === undefined ? undefined : { token: row.token, conflictingRunId: row.conflicting_run_id };
+  }
+
+  insertStartHookRefusal(runId: string, token: string, conflictingRunId: string): void {
+    this.#qb.insert({ tableName: 'start_hook_refusals', data: { run_id: runId, token, conflicting_run_id: conflictingRunId } }).execute();
+  }
+
   /** Every hook whose token passes `keep`. Only the matches are decoded. */
   hooksWithTokens(keep: (token: string) => boolean): Hook[] {
     return allRows(this.#qb.fetchAll<'hooks', 'token' | 'data'>({ tableName: 'hooks', fields: ['token', 'data'] }))

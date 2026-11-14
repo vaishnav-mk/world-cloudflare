@@ -136,6 +136,16 @@ export const tokenTakeovers = sqliteTable('token_takeovers', {
   next_at: integer('next_at').notNull(),
 });
 
+/**
+ * Start Hook candidates refused because another run held the token: the decision is immutable, so
+ * every later copy of the candidate is refused naming the same run. An accepted candidate is its run.
+ */
+export const startHookRefusals = sqliteTable('start_hook_refusals', {
+  run_id: text('run_id').primaryKey(),
+  token: text('token').notNull(),
+  conflicting_run_id: text('conflicting_run_id').notNull(),
+});
+
 // The directory's run index used these two. Nothing writes them now; they stay because schema changes are additive.
 
 /** A run store's pending push of its run row to the directory, at the slot that changed it. */
@@ -164,4 +174,5 @@ export type StoreSchema = {
   token_releases: typeof tokenReleases.$inferSelect;
   forced_disposals: typeof forcedDisposals.$inferSelect;
   token_takeovers: typeof tokenTakeovers.$inferSelect;
+  start_hook_refusals: typeof startHookRefusals.$inferSelect;
 };

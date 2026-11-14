@@ -1,5 +1,8 @@
 import { env, SELF } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
+import { HookConflictError } from '@workflow/errors';
+import { resumeHook, start } from 'workflow/api';
+import { workflows } from '../src/workflows.js';
 import { MAX_BODY_BYTES } from '../src/http.js';
 import { world } from '../src/world.js';
 
@@ -159,6 +162,19 @@ it("takes a hook token over from another run, which reads the takeover and the r
   expect(resumed.status).toBe(200);
   await expect.poll(() => statusOf(claimer), { interval: 100, timeout: 15_000 }).toBe('completed');
   expect(await (await SELF.fetch(`https://local/runs/${claimer}/result`, { headers })).json()).toEqual({ value: value + 1 });
+});
+
+it('admits one start per start Hook token, and resumes the Hook before the run opens it', async () => {
+  const value = Math.floor(Math.random() * 1e9);
+  const token = `start-${value}`;
+  const run = await start(workflows.startHooked, [value], { experimental_hook: { token } });
+  // The owner holds the token until it ends, so a second start with it is refused.
+  const duplicate = await start(workflows.startHooked, [value], { experimental_hook: { token } }).catch((error: unknown) => error);
+  expect(HookConflictError.is(duplicate)).toBe(true);
+  expect(duplicate).toMatchObject({ conflictingRunId: run.runId });
+  // Resumable as soon as start() returns, whether or not the workflow has opened the Hook yet.
+  await resumeHook(token, 1);
+  expect(await run.returnValue).toBe(value + 1);
 });
 
 it('starts a v5 run, executes a real step, returns its result, and replays the subscription', async () => {

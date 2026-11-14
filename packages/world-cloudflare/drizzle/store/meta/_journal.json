@@ -29,6 +29,13 @@
       "when": 1794611953252,
       "tag": "0003_spec9_force_claims",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794614344153,
+      "tag": "0004_start_hooks",
+      "breakpoints": true
     }
   ]
 }

@@ -1,8 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
-import { EntityConflictError, HookForceClaimedError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
+import {
+  EntityConflictError, HookConflictError, HookForceClaimedError, WorkflowRunNotFoundError, WorkflowWorldError,
+} from '@workflow/errors';
 import {
   CreateEventSchema, isTerminalWorkflowRunStatus, slotToEventId, SPEC_VERSION_LEGACY, SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM,
-  type HookClaimedFrom,
+  START_HOOK_ADMISSION_REJECTED_CODE, START_HOOK_CANDIDATE_MAX_AGE_MS, ulidToDate,
+  type HookClaimedFrom, type StartHook, type StartHookRejectionReason,
   type AnyEventRequest, type BatchEventItemResult, type BatchEventRequest, type CreateEventBatchParams,
   type CreateEventParams, type Event, type EventBatchResult, type EventListResponse, type EventResult, type GetWorkflowRunParams, type Hook,
   type ListEventsByCorrelationIdParams, type ListEventsParams, type ListHooksParams, type ListWorkflowRunStepsParams,
@@ -11,7 +14,8 @@ import {
 } from '@workflow/world';
 import migrations from '../../drizzle/store/migrations.js';
 import {
-  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_PAGE_READS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS,
+  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_PAGE_READS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_START_HOOK_RETENTION_MS,
+  MAX_TERMINAL_WAIT_MS,
   MIN_ALARM_DELAY_MS, REDRIVE_DELAY_MS, RELEASE_KINDS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
@@ -31,7 +35,7 @@ import { Db } from './db.js';
 import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './dispatch.js';
 import { advanceFence, applyEvent, checkFence } from './events/apply.js';
 import { checkBatch } from './events/batch.js';
-import { newHook } from './events/hooks.js';
+import { newHook, startHookOf } from './events/hooks.js';
 import { appendEvent, skippedEvents } from './events/journal.js';
 import type { TokenAnswer, Tokens } from './events/types.js';
 import { Outbox } from './outbox.js';
@@ -341,15 +345,68 @@ export class WorldStore extends DurableObject<WorldEnv> {
     switch (data.eventType) {
       case EventType.HookCreated:
         return this.#claimToken(runId, data);
-      case EventType.RunStarted:
+      case EventType.RunCreated:
+        return data.eventData.startHook === undefined ? { kind: TokenClaim.None } : this.#admit(runId, data, data.eventData.startHook);
+      case EventType.RunStarted: {
         // A lazy start creates a run it cannot find, so a shard first rules out a legacy run.
         if (!this.#isLegacy && this.#db.findRun(runId) === undefined && await this.#store(STORE_NAME).holdsRun(runId)) {
           throw new WorkflowRunNotFoundError(runId);
         }
-        return { kind: TokenClaim.None };
+        const startHook = data.eventData?.startHook;
+        return startHook === undefined ? { kind: TokenClaim.None } : this.#admit(runId, data, startHook);
+      }
       default:
         return { kind: TokenClaim.None };
     }
+  }
+
+  /**
+   * Admits a start Hook candidate (`start({ experimental_hook })`), on its `run_created` or the
+   * queued `run_started` that may create it: claims the token on its shard, and the write then
+   * creates the run with its start Hook. A refusal is recorded, so every later copy of the candidate
+   * is refused naming the same run; an admitted candidate is its run. Answers None for a candidate
+   * already admitted, whose write replays.
+   */
+  async #admit(runId: string, data: EventOf<EventType.RunCreated | EventType.RunStarted>, startHook: StartHook): Promise<Tokens> {
+    const rejected = (message: string, reason: StartHookRejectionReason) =>
+      new WorkflowWorldError(message, { status: 400, code: START_HOOK_ADMISSION_REJECTED_CODE, reason });
+    const createdAt = runId.startsWith('wrun_') ? ulidToDate(runId.slice('wrun_'.length)) : null;
+    if (createdAt === null) throw rejected(`A start Hook candidate needs a wrun_<ulid> run ID, not ${runId}`, 'invalid');
+    const run = this.#db.findRun(runId);
+    // Past the bound a candidate can never be created, so nothing waits on its decision either.
+    if (Date.now() - createdAt.getTime() > START_HOOK_CANDIDATE_MAX_AGE_MS && (run === undefined || data.eventType === EventType.RunCreated)) {
+      throw rejected(`Start Hook candidate ${runId} is too old to be created`, 'expired');
+    }
+    const until = startHook.tokenRetentionUntil;
+    if (until !== undefined && until.getTime() - Date.now() > MAX_START_HOOK_RETENTION_MS) {
+      throw rejected('The start Hook retention is beyond the World limit', 'invalid');
+    }
+    const refused = this.#db.findStartHookRefusal(runId);
+    const decidedToken = run?.startHook?.token ?? refused?.token;
+    if (decidedToken !== undefined && decidedToken !== startHook.token) {
+      throw rejected(`Start Hook candidate ${runId} was decided under another token`, 'token_mismatch');
+    }
+    if (refused !== undefined) throw new HookConflictError(startHook.token, refused.conflictingRunId);
+    if (run !== undefined) {
+      if (run.startHook === undefined) throw rejected(`Run ${runId} was created without a start Hook`, 'ordinary_run');
+      return { kind: TokenClaim.None };
+    }
+    const { deploymentId, workflowName, encryptionPublicKey } = data.eventData ?? {};
+    if (deploymentId === undefined || workflowName === undefined) throw new WorkflowRunNotFoundError(runId);
+    const hook = startHookOf(runId, { deploymentId, workflowName, encryptionPublicKey }, startHook,
+      data.specVersion ?? mintSpecVersion(), new Date());
+    await this.#push();
+    const holderRunId = await this.#store(tokenShardFor(hook.token)).claimHookToken(hook);
+    if (holderRunId === null) return { kind: TokenClaim.Granted, hook };
+    // Another copy of this candidate may have been decided meanwhile; the first decision stands.
+    const decided = this.ctx.storage.transactionSync(() => {
+      const admitted = this.#db.findRun(runId)?.startHook !== undefined;
+      const prior = this.#db.findStartHookRefusal(runId);
+      if (!admitted && prior === undefined) this.#db.insertStartHookRefusal(runId, hook.token, holderRunId);
+      return admitted ? undefined : prior?.conflictingRunId ?? holderRunId;
+    });
+    if (decided === undefined) return { kind: TokenClaim.None };
+    throw new HookConflictError(hook.token, decided);
   }
 
   /** The old directory's copy of a sharded run was only an index entry: it takes no writes. */
@@ -386,7 +443,10 @@ export class WorldStore extends DurableObject<WorldEnv> {
    */
   async #afterWrite(freesTokens: boolean): Promise<void> {
     if (this.#releases.nextDueAt() !== null) {
-      this.ctx.waitUntil(this.#push());
+      // A write that frees a token answers once the token's shard has it, so the token is free
+      // when the write returns. A failed release stays owed for the alarm and fails nothing here.
+      if (freesTokens) await this.#push();
+      else this.ctx.waitUntil(this.#push());
       return;
     }
     // A finished run usually owes nothing now, so its store need not wake for the recovery alarm.

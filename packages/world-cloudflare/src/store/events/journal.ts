@@ -9,6 +9,7 @@ import { mintSpecVersion } from '../../lib/spec.js';
 import type { Db } from '../db.js';
 import { listEvents } from '../pages.js';
 import { toEvent, type EventRow } from '../rows.js';
+import { journaledStartHook } from './runs.js';
 import type { Change, HookConflictEvent } from './types.js';
 
 /** Appends at the run's next dense slot. The event's payload field is stored as a BLOB. */
@@ -45,8 +46,10 @@ export function journalOf(data: AnyEventRequest, change: Change): AnyEventReques
   switch (data.eventType) {
     case EventType.RunCreated: {
       // Dynamic workflow source lives only on the run.
-      const { dynamicWorkflowCode: _code, dynamicWorkflowCodeRef: _ref, ...eventData } = data.eventData;
-      return { ...data, eventData };
+      const { dynamicWorkflowCode: _code, dynamicWorkflowCodeRef: _ref, startHook, ...eventData } = data.eventData;
+      if (startHook === undefined || change.run.startHook === undefined) return { ...data, eventData };
+      // Replay binds the workflow's `createHook({ token })` to the start Hook from this.
+      return { ...data, eventData: { ...eventData, startHook: journaledStartHook(change.run.runId, startHook) } };
     }
     case EventType.RunStarted:
       // A lazy start's run fields are journaled in the implied run_created.

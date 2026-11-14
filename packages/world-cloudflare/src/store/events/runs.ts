@@ -1,9 +1,9 @@
 import { EntityConflictError, RunExpiredError } from '@workflow/errors';
 import {
-  applyAttributeChanges, isTerminalWorkflowRunStatus, validateAttributeChanges, validateAttributeEventDataSize,
-  type AnyEventRequest, type EventResult, type WorkflowRun,
+  applyAttributeChanges, isTerminalWorkflowRunStatus, startHookId, validateAttributeChanges, validateAttributeEventDataSize,
+  type AnyEventRequest, type EventResult, type StartHook, type WorkflowRun,
 } from '@workflow/world';
-import { EventType, RunStatus, StepStatus } from '../../enums.js';
+import { EventType, RunStatus, StepStatus, TokenClaim } from '../../enums.js';
 import { isSingleOrchestrator } from '../../lib/spec.js';
 import { unreachable } from '../../lib/unreachable.js';
 import type { EventOf } from '../../types.js';
@@ -11,10 +11,15 @@ import type { Db } from '../db.js';
 import type { RunUpdateEvent, Tx } from './types.js';
 
 type NewRunFields = Pick<WorkflowRun, 'deploymentId' | 'workflowName' | 'input'> & Partial<Pick<WorkflowRun,
-  'executionContext' | 'dynamicWorkflowCode' | 'encryptionPublicKey' | 'attributes'>> & {
+  'executionContext' | 'dynamicWorkflowCode' | 'encryptionPublicKey' | 'attributes' | 'startHook'>> & {
   dynamicWorkflowCodeRef?: unknown;
   allowReservedAttributes?: boolean;
 };
+
+/** What the log keeps of a start Hook: its token, ID and retention, without the metadata only the hook needs. */
+export function journaledStartHook(runId: string, { token, tokenRetentionUntil }: StartHook): StartHook {
+  return { token, hookId: startHookId(runId), ...(tokenRetentionUntil === undefined ? {} : { tokenRetentionUntil }) };
+}
 
 /**
  * The run an event creates, if any. `run_created` creates one; so does a lazy `run_started` that
@@ -35,10 +40,12 @@ export function createRun(
         executionContext: fields.executionContext, attributes: fields.attributes,
         allowReservedAttributes: fields.allowReservedAttributes, encryptionPublicKey: fields.encryptionPublicKey,
       };
+      const { startHook } = fields;
       const run = newRun(tx, {
-        ...eventData, dynamicWorkflowCode: fields.dynamicWorkflowCode, dynamicWorkflowCodeRef: fields.dynamicWorkflowCodeRef,
+        ...eventData, dynamicWorkflowCode: fields.dynamicWorkflowCode, dynamicWorkflowCodeRef: fields.dynamicWorkflowCodeRef, startHook,
       });
-      return { run, implied: { eventType: EventType.RunCreated, specVersion: tx.specVersion, eventData } };
+      const journaled = startHook === undefined ? eventData : { ...eventData, startHook: journaledStartHook(tx.runId, startHook) };
+      return { run, implied: { eventType: EventType.RunCreated, specVersion: tx.specVersion, eventData: journaled } };
     }
     default:
       return undefined;
@@ -47,6 +54,7 @@ export function createRun(
 
 function newRun(tx: Tx, fields: NewRunFields): WorkflowRun {
   if (fields.dynamicWorkflowCodeRef) throw new Error('Dynamic workflow code refs are not supported');
+  if (fields.startHook !== undefined && tx.tokens.kind !== TokenClaim.Granted) throw new Error('A start Hook needs its token claimed first');
   const changes = Object.entries(fields.attributes ?? {}).map(([key, value]) => ({ key, value }));
   validateAttributeChanges(changes, { allowReservedAttributes: fields.allowReservedAttributes === true });
   return {
@@ -54,6 +62,8 @@ function newRun(tx: Tx, fields: NewRunFields): WorkflowRun {
     deploymentId: fields.deploymentId, workflowName: fields.workflowName, input: fields.input,
     executionContext: fields.executionContext, dynamicWorkflowCode: fields.dynamicWorkflowCode,
     attributes: fields.attributes ?? {}, encryptionPublicKey: fields.encryptionPublicKey,
+    // The admitted start Hook's request, echoed with its ID: how `start()` knows it was admitted.
+    ...(fields.startHook === undefined ? {} : { startHook: { ...fields.startHook, hookId: startHookId(tx.runId) } }),
     specVersion: tx.specVersion, createdAt: tx.now, updatedAt: tx.now,
   };
 }
