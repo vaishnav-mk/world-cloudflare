@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
 import { stringify } from 'devalue';
+import { DEFAULT_HOLD_LEASE_SECONDS } from '../packages/world-cloudflare/src/constants.js';
 import { DeliveryCounts } from '../packages/world-cloudflare/src/queue/delivery-counts.js';
 import { Holds } from '../packages/world-cloudflare/src/queue/holds.js';
 
@@ -23,6 +24,23 @@ it('keeps a held original live if its fresh continuation cannot enqueue', async 
   });
   await expect.poll(() => env.SINK.getByName('sink').received()).toHaveLength(1);
   expect(await env.SINK.getByName('sink').received()).not.toContain(original.id);
+});
+
+it.each([
+  { leaseMs: undefined, remaining: 1 },
+  { leaseMs: 1000, remaining: 1 },
+  { leaseMs: undefined, remaining: 120_000 },
+])('renews a live hold before consumption, lease=$leaseMs remaining=$remaining', async ({ leaseMs, remaining }) => {
+  const shard = env.QUEUE_SHARD.getByName(`near-expiry-${crypto.randomUUID()}`);
+  await runInDurableObject(shard, async (object, state) => {
+    const now = Date.now();
+    using clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const holds = new Holds(state.storage.sql);
+    holds.add({ id: 'held', queueName: 'workflow-test', encoded: '[]', delayMs: 0 }, now + remaining);
+    expect(await object.beginHeld('held', leaseMs)).toEqual({ deliveries: 1, handoffs: 0 });
+    expect(holds.find('held')?.leaseUntil).toBe(now + Math.max(remaining, leaseMs ?? DEFAULT_HOLD_LEASE_SECONDS * 1000));
+    expect(clock).toHaveBeenCalled();
+  });
 });
 
 it.each(['missing', 'done', 'expired'])('refuses a %s hold without counting a delivery', async (status) => {

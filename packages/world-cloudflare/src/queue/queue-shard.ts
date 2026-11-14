@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { DurabilityFanout, DurabilityScheduler, type FanoutTarget } from 'durability';
 import { DurabilityRouting, type EnqueueResult as RoutedResult } from 'durability/routing';
 import migrations from '../../drizzle/queue/migrations.js';
-import { FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, STEPS_CHANNEL } from '../constants.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, STEPS_CHANNEL } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus } from '../enums.js';
 import { groupBy } from '../lib/group.js';
@@ -139,11 +139,10 @@ export class QueueShard extends DurableObject<WorldEnv> {
     return result;
   }
 
-  /** The sender starts running its held message: that is the message's first delivery. */
-  async beginHeld(id: string): Promise<Counts> {
+  /** Renews the live hold before starting inline consumption, which is its first delivery. */
+  async beginHeld(id: string, leaseMs = DEFAULT_HOLD_LEASE_SECONDS * 1000): Promise<Counts> {
     const now = Date.now();
-    const held = this.#holds.find(id);
-    if (held === undefined || held.done || held.leaseUntil <= now) throw new Error('Held message has no live lease');
+    if (!this.#holds.renew(id, now + leaseMs)) throw new Error('Held message has no live lease');
     return this.#counts.begin(id, now);
   }
 

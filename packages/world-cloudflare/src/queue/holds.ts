@@ -40,7 +40,7 @@ export class Holds {
   renew(id: string, leaseUntil: number): boolean {
     const held = this.find(id);
     if (held === undefined || held.done || held.leaseUntil <= Date.now()) return false;
-    this.#qb.update({ tableName: 'holds', data: { lease_until: leaseUntil }, where: { conditions: 'id = ?', params: [id] } }).execute();
+    this.#qb.update({ tableName: 'holds', data: { lease_until: Math.max(held.leaseUntil, leaseUntil) }, where: { conditions: 'id = ?', params: [id] } }).execute();
     return true;
   }
 

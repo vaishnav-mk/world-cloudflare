@@ -34,7 +34,7 @@ export async function holdMessage(
         shard().renewHold(messageId, leaseMs).catch((error: unknown) => console.error('Hold renewal failed', error));
       }, leaseMs / 2);
       try {
-        const { deliveries, handoffs } = await shard().beginHeld(messageId);
+        const { deliveries, handoffs } = await shard().beginHeld(messageId, leaseMs);
         let outcome: unknown;
         try {
           outcome = await handler(payload, {
