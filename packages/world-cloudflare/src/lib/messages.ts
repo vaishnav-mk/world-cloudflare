@@ -1,16 +1,4 @@
-/**
- * What the World reads from an SDK queue payload. Payloads are plain objects whose fields, except a
- * run's `runId`, are all optional, and newer SDKs add fields, so these check each field they use.
- */
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object';
-}
-
-/** A step execution message: it runs one step of its run. */
-export function isStepMessage(payload: unknown): boolean {
-  return isRecord(payload) && typeof payload.stepId === 'string';
-}
+import { orchestratorRunIdOf } from '@workflow/world';
 
 /** A message that replays its run, as the queue shard orders and coalesces it. */
 export type Replay = {
@@ -28,19 +16,20 @@ export type Replay = {
 const REPLAY_ONLY_FIELDS: ReadonlySet<string> = new Set(['runId', 'runSpecVersion', 'traceCarrier', 'requestedAt', 'hookResumeTiming']);
 
 /**
- * The replay a message asks for, or `undefined` for a step message, a health check, a message with
- * no run, and a long wait's intermediate timer hop (`waitContinuation.resumeAtMs`), which only sends
- * the next hop. A field outside `REPLAY_ONLY_FIELDS`, such as a start's `runInput`, a timer's
- * `waitContinuation`, a legacy resume's `hookInput`, `completeWaits` or a retry counter, carries
- * something the handler must see, so its message is not pure and is delivered itself.
+ * The replay a message asks for: the SDK's orchestrator messages (`orchestratorRunIdOf`), of any
+ * spec version, which leaves out steps, health checks and a long wait's intermediate timer hops. A
+ * field outside `REPLAY_ONLY_FIELDS`, such as a start's `runInput`, a timer's `waitContinuation`, a
+ * legacy resume's `hookInput`, `completeWaits` or a retry counter, carries something the handler
+ * must see, so its message is not pure and is delivered itself.
  */
 export function replayOf(payload: unknown): Replay | undefined {
-  if (!isRecord(payload) || payload.__healthCheck === true || isStepMessage(payload)) return undefined;
-  if (isRecord(payload.waitContinuation) && Number.isFinite(payload.waitContinuation.resumeAtMs)) return undefined;
-  if (typeof payload.runId !== 'string') return undefined;
+  const runId = orchestratorRunIdOf(payload);
+  if (runId === undefined) return undefined;
+  // SAFETY: `orchestratorRunIdOf` finds a run only in a payload object.
+  const fields = payload as Record<string, unknown>;
   return {
-    runId: payload.runId,
-    pure: Object.entries(payload).every(([field, value]) => value === undefined || REPLAY_ONLY_FIELDS.has(field)),
-    start: payload.runInput !== undefined,
+    runId,
+    pure: Object.entries(fields).every(([field, value]) => value === undefined || REPLAY_ONLY_FIELDS.has(field)),
+    start: fields.runInput !== undefined,
   };
 }

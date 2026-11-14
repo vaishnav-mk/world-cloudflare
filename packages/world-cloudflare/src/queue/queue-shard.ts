@@ -9,7 +9,7 @@ import {
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, DeliveryResult, MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
-import { isRecord, replayOf, type Replay } from '../lib/messages.js';
+import { replayOf, type Replay } from '../lib/messages.js';
 import { unreachable } from '../lib/unreachable.js';
 import { onRun } from '../store/route.js';
 import type { Delivery, DeliveryOutcome, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
@@ -298,6 +298,10 @@ function readDeadLetter(payload: unknown): DeadLetter | undefined {
       : undefined;
   }
   return { kind: MessageKind.HookWake, runId };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object';
 }
 
 function toDelivery({ id, attempt, enqueuedAt, body }: FanoutMessage): Delivery {

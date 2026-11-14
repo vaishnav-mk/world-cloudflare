@@ -27,25 +27,25 @@ describe('shard epochs', () => {
     expect(storeShardFor(current)).toBe(storeShardFor(current));
   });
 
-  it("routes a run's replays by the run and its steps by key", () => {
+  it("routes a run's workflow messages by the run and its other messages by key", () => {
     const runId = runIdAt(Date.now());
     const run = queueShardFor(runId, { runId });
-    const replays = [
-      { runId, runInput: { input: new Uint8Array(1), deploymentId: 'd', workflowName: 'w', specVersion: 3 } },
-      { runId, hookResumeTiming: { resumeRequestedAtMs: 1, queuePublishRequestedAtMs: 1 } },
-      { runId, waitContinuation: { correlationId: 'wait_1', attempt: 0 } },
-      { runId, waitContinuation: { correlationId: 'wait_1', attempt: 0, resumeAtMs: 9, hopAtMs: 5 } },
+    const workflow = [
+      { runId, runInput: { input: new Uint8Array(1), deploymentId: 'd', workflowName: 'w', specVersion: 8 } },
+      { runId, runSpecVersion: 8, hookResumeTiming: { resumeRequestedAtMs: 1, queuePublishRequestedAtMs: 1 } },
+      { runId, runSpecVersion: 9, waitContinuation: { correlationId: 'wait_1', attempt: 0 } },
+      { runId, runSpecVersion: 9, completeWaits: ['wait_1'] },
     ];
-    for (const [index, payload] of replays.entries()) expect(queueShardFor(runId, payload, `q:key-${index}`)).toBe(run);
-    const steps = Array.from({ length: 32 }, (_, index) => {
-      const payload = { runId, stepId: `step_${index}`, stepName: 'double' };
-      const key = `q:step_${index}:a0eb0f08`;
-      // Every repeat of a step's key reaches the same shard, whatever else its payload carries.
+    for (const [index, payload] of workflow.entries()) expect(queueShardFor(runId, payload, `q:key-${index}`)).toBe(run);
+    // Steps, and a long wait's intermediate timer hops, spread by key; every repeat of a key reaches one shard.
+    const others = Array.from({ length: 32 }, (_, index) => index % 2
+      ? { payload: { runId, stepId: `step_${index}`, stepName: 'double' }, key: `q:step_${index}:a0eb0f08` }
+      : { payload: { runId, waitContinuation: { correlationId: `wait_${index}`, attempt: 0, resumeAtMs: 9, hopAtMs: 5 } }, key: `q:wait:${index}` });
+    const shards = others.map(({ payload, key }) => {
       expect(queueShardFor(runId, { ...payload, requestedAt: new Date() }, key)).toBe(queueShardFor(runId, payload, key));
       return queueShardFor(runId, payload, key);
     });
-    expect(new Set(steps).size).toBeGreaterThan(1);
-    for (const shard of steps) expect(shard).toMatch(new RegExp(`^flow-e${SECOND}-[0-7]$`));
+    expect(new Set(shards).size).toBeGreaterThan(1);
   });
 
   it('keeps hook tokens on the first epoch', () => {
