@@ -3,8 +3,8 @@ import { DOQB, FetchTypes, Raw } from 'workers-qb';
 import { MAX_PUBLISH_BACKOFF_MS } from '../constants.js';
 import { groupBy } from '../lib/group.js';
 import { allRows, requireRow } from '../lib/qb.js';
-import type { TokenRelease } from '../types.js';
 import { tokenShardFor } from '../lib/shards.js';
+import type { TokenRelease } from '../types.js';
 import type { StoreSchema } from './tables.js';
 
 /** The method a store calls on a token's shard. */
