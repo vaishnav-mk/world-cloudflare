@@ -26,8 +26,8 @@ export type RunnerStubs = {
  * Backoff after a failed delivery, by attempt: quadratic up to five minutes, so the default 64
  * attempts keep a failing message alive for hours, past the SDK's one-hour step redelivery span.
  */
-export function retryDelayMs(attempt: number): number {
-  return Math.min(MAX_QUEUE_RETRY_DELAY_MS, attempt ** 2 * 1000);
+export function retryDelayMs(attempt: number, maxMs = MAX_QUEUE_RETRY_DELAY_MS): number {
+  return Math.min(maxMs, attempt ** 2 * 1000);
 }
 
 /**

@@ -5,6 +5,7 @@ import { DispatchAction, EventType, MessageKind, RunStatus, StepStatus, WaitStat
 import { fnv1a32Hex, messageIdFor, sha256Hex } from '../lib/hash.js';
 import { queueShardFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
+import { retryDelayMs } from '../queue/deliver.js';
 import type { DispatchKind, EnqueueResult, OutboxClaim, QueueDispatch } from '../types.js';
 import type { StoreContext } from './context.js';
 import type { Db } from './db.js';
@@ -236,8 +237,7 @@ async function publish(store: StoreContext, sends: Send[]): Promise<void> {
       continue;
     }
     console.error('Workflow dispatch recovery failed', { runId: row.run_id, slot: row.slot, error: result.error });
-    const delay = Math.min(MAX_PUBLISH_BACKOFF_MS, (row.attempts + 1) ** 2 * 1_000);
-    store.outbox.recordFailure(row, Date.now() + delay);
+    store.outbox.recordFailure(row, Date.now() + retryDelayMs(row.attempts + 1, MAX_PUBLISH_BACKOFF_MS));
   }
 }
 

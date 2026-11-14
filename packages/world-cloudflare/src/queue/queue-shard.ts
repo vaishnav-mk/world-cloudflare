@@ -92,7 +92,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
         // Holds, delay waits and handoffs take fanout attempts too, so `Deliverer` enforces the cap
         // on deliveries itself and the fanout's own cap is out of reach.
         maxAttempts: Number.MAX_SAFE_INTEGER,
-        delay: retryDelayMs,
+        delay: (attempt) => retryDelayMs(attempt),
       },
       // `flow`, plus the lanes the single `flow` shard delivered to before queue shards, so messages
       // it still holds for them are delivered. New messages go to `flow` only.
