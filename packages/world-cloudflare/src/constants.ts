@@ -51,6 +51,13 @@ export const STREAM_READ_BATCH = 100;
  */
 export const STREAM_PAGE_MAX_BYTES = 4 * 1_048_576;
 export const MAX_TERMINAL_WAIT_MS = 30_000;
+/**
+ * The largest stream chunk the World accepts. The writing step's isolate holds a few chunks at once
+ * (the one being stored, the next its stream fills), so on Workers 64 MiB chunks ran out of the
+ * 128 MB isolate memory with both engines. Locally, live memory peaked near 60 MiB with 16 MiB
+ * chunks and near 90 MiB with 32 MiB ones. A larger chunk fails its step instead.
+ */
+export const STREAM_CHUNK_MAX_BYTES = 16 * 1_048_576;
 
 /**
  * Payloads and stream chunks above this size go to R2, and the Durable Objects keep a ref instead.

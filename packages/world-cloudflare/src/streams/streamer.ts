@@ -1,11 +1,18 @@
 import type { GetChunksOptions, Streamer } from '@workflow/world';
-import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, STREAM_PAGE_MAX_BYTES } from '../constants.js';
-import { createPayloads, isPayloadRef } from '../lib/payloads.js';
+import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES } from '../constants.js';
+import { createPayloads, isPayloadRef, tooLarge } from '../lib/payloads.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
 const encoder = new TextEncoder();
-const toBytes = (chunk: string | Uint8Array) => typeof chunk === 'string' ? encoder.encode(chunk) : chunk;
+/** A chunk as bytes, checked against `STREAM_CHUNK_MAX_BYTES` before the World copies it anywhere. */
+function toChunk(chunk: string | Uint8Array): Uint8Array {
+  const bytes = typeof chunk === 'string' ? encoder.encode(chunk) : chunk;
+  if (bytes.byteLength > STREAM_CHUNK_MAX_BYTES) {
+    throw tooLarge(`A ${bytes.byteLength}-byte stream chunk is over the ${STREAM_CHUNK_MAX_BYTES}-byte chunk limit`);
+  }
+  return bytes;
+}
 
 /**
  * The World's `Streamer`. Each run's streams live in that run's `RunStreams` object. Large chunks
@@ -18,10 +25,11 @@ export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>):
   return {
     streams: {
       write: async (runId, name, chunk) => {
-        await streamsOf(runId).write(name, await payloads.offload(runId, toBytes(chunk)));
+        await streamsOf(runId).write(name, await payloads.offload(runId, toChunk(chunk)));
       },
       writeMulti: async (runId, name, chunks) => {
-        await streamsOf(runId).writeMulti(name, await Promise.all(chunks.map((chunk) => payloads.offload(runId, toBytes(chunk)))));
+        const checked = chunks.map(toChunk);
+        await streamsOf(runId).writeMulti(name, await Promise.all(checked.map((bytes) => payloads.offload(runId, bytes))));
       },
       close: (runId, name) => streamsOf(runId).close(name),
       list: (runId) => streamsOf(runId).list(),

@@ -2,7 +2,7 @@ import { env, SELF } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
 import { HookConflictError } from '@workflow/errors';
 import { resumeHook, start } from 'workflow/api';
-import { PAYLOAD_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
+import { PAYLOAD_MAX_BYTES, STREAM_CHUNK_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
 import { workflows } from '../src/workflows.js';
 import { MAX_BODY_BYTES } from '../src/http.js';
 import { world } from '../src/world.js';
@@ -312,20 +312,30 @@ it('fails a step whose output is over the payload limit on its first attempt', a
   expect(await payloadObjects(runId)).toHaveLength(0);
 }, 60_000);
 
-it('streams a 12 MiB chunk', async () => {
-  const runId = await startRun('streamChunk', 12 * MiB);
+it('streams an 8 MiB chunk', async () => {
+  const runId = await startRun('streamChunk', 8 * MiB);
   const stream = await SELF.fetch(`https://local/runs/${runId}/streams/limits`, { headers });
-  expect((await stream.arrayBuffer()).byteLength).toBe(12 * MiB);
-  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 12 * MiB });
+  expect((await stream.arrayBuffer()).byteLength).toBe(8 * MiB);
+  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 8 * MiB });
 }, 60_000);
 
-it('passes a 256 MiB byte stream in 64 MiB chunks from one step to the next', async () => {
-  const runId = await startRun('streamBytes', [256, 64]);
+it('fails a step that writes a chunk over the chunk limit on its first attempt', async () => {
+  // `getWritable()` serializes bytes as base64, so the chunk it writes is about a third larger.
+  const runId = await startRun('streamChunk', STREAM_CHUNK_MAX_BYTES);
+  await expect.poll(() => runStatus(runId), { interval: 250, timeout: 30_000 }).toBe('failed');
+  expect(await runError(runId)).toContain(`-byte stream chunk is over the ${STREAM_CHUNK_MAX_BYTES}-byte chunk limit`);
+  expect((await runEvents(runId)).match(/event: step_started/g)).toHaveLength(1);
+  expect(await payloadObjects(runId)).toHaveLength(0);
+}, 60_000);
+
+it('passes a 256 MiB byte stream in chunks at the chunk limit from one step to the next', async () => {
+  const chunk = STREAM_CHUNK_MAX_BYTES / MiB;
+  const runId = await startRun('streamBytes', [256, chunk]);
   const result = await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json() as { value: unknown };
   // The reading step checked every byte against the pattern the writing step made.
   expect(result.value).toMatchObject({ bytes: 256 * MiB, firstMismatch: -1 });
   // Each chunk is an R2 object, and the steps' payloads carry only the stream's name.
-  expect((await payloadObjects(runId)).map(({ size }) => size)).toEqual([64 * MiB, 64 * MiB, 64 * MiB, 64 * MiB]);
+  expect((await payloadObjects(runId)).map(({ size }) => size)).toEqual(Array.from({ length: 256 / chunk }, () => chunk * MiB));
 }, 120_000);
 
 it('resumes a hook with a 12 MB payload', async () => {

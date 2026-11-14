@@ -8,6 +8,15 @@ const decoder = new TextDecoder();
 /** Payloads this call wrote to R2, by key, so its result can reuse them instead of reading R2 back. */
 type Written = Map<string, Uint8Array>;
 
+/**
+ * The error for a payload or stream chunk over its limit, marked `fatal` because a retry meets the
+ * same limit: the SDK then fails the step that wrote it, or the run committing a suspension,
+ * instead of retrying.
+ */
+export function tooLarge(message: string): WorkflowWorldError & { fatal: true } {
+  return Object.assign(new WorkflowWorldError(message, { status: 413, code: 'PAYLOAD_TOO_LARGE' }), { fatal: true as const });
+}
+
 /** Whether `bytes` are a ref to a payload in R2 rather than the payload itself. */
 export function isPayloadRef(bytes: Uint8Array): boolean {
   return bytes.byteLength >= PAYLOAD_REF_PREFIX.byteLength && PAYLOAD_REF_PREFIX.every((byte, index) => bytes[index] === byte);
@@ -77,10 +86,7 @@ export function createPayloads(bucket: R2Bucket) {
     const fields = await Promise.all(Object.entries(request.eventData).map(async ([key, value]: [string, unknown]) => {
       if (!(value instanceof Uint8Array)) return [key, value];
       if (value.byteLength > PAYLOAD_MAX_BYTES) {
-        const message = `A ${value.byteLength}-byte ${key} is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`;
-        // `fatal`, because a retry meets the same limit: the SDK then fails the step that wrote it, or
-        // the run committing a suspension, instead of redelivering it.
-        throw Object.assign(new WorkflowWorldError(message, { status: 413, code: 'PAYLOAD_TOO_LARGE' }), { fatal: true });
+        throw tooLarge(`A ${value.byteLength}-byte ${key} is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`);
       }
       return [key, await offload(runId, value, written)];
     }));

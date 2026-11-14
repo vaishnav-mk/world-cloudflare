@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { PAYLOAD_INLINE_MAX_BYTES, STREAM_PAGE_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
+import { PAYLOAD_INLINE_MAX_BYTES, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
 import { createStreamer } from '../packages/world-cloudflare/src/streams/streamer.js';
 
 const streams = createStreamer(env);
@@ -126,6 +126,16 @@ describe('large stream chunks', () => {
     expect((await reader.read()).value?.byteLength).toBeLessThan(chunk.byteLength);
     await reader.cancel();
     expect(same(concat(await pieces(await streams.streams.get(runId, 'cancelled'))), chunk)).toBe(true);
+  });
+
+  it('rejects a chunk over the chunk limit before storing anything', async () => {
+    const runId = crypto.randomUUID();
+    await expect(streams.streams.write(runId, 'huge', new Uint8Array(STREAM_CHUNK_MAX_BYTES + 1)))
+      .rejects.toMatchObject({ status: 413, fatal: true });
+    await expect(streams.streams.writeMulti!(runId, 'huge', ['small', new Uint8Array(STREAM_CHUNK_MAX_BYTES + 1)]))
+      .rejects.toMatchObject({ status: 413 });
+    expect(await streams.streams.getInfo(runId, 'huge')).toEqual({ tailIndex: -1, done: false });
+    expect(await objects(runId)).toHaveLength(0);
   });
 
   it('sends a small view of a large buffer without the rest of the buffer', async () => {
