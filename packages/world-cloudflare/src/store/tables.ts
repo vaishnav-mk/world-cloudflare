@@ -146,6 +146,46 @@ export const startHookRefusals = sqliteTable('start_hook_refusals', {
   conflicting_run_id: text('conflicting_run_id').notNull(),
 });
 
+/**
+ * List rows a store owes the index shards: a run's (`hook_id` '') or one of its hooks'. A push sends
+ * the current state of each, so a row owed again before its push needs no second one.
+ */
+export const indexOutbox = sqliteTable('index_outbox', {
+  run_id: text('run_id').notNull(),
+  hook_id: text('hook_id').notNull(),
+  /** Bumped by each owe, so a push settles only the owes it carried. */
+  seq: integer('seq').notNull().default(0),
+  attempts: integer('attempts').notNull().default(0),
+  next_at: integer('next_at').notNull(),
+}, (table) => [primaryKey({ columns: [table.run_id, table.hook_id] }), index('index_outbox_due').on(table.next_at)]);
+
+/** On an index shard: the list rows of the runs that hash to it, each the run without its payloads. */
+export const indexRuns = sqliteTable('index_runs', {
+  id: text('id').primaryKey(),
+  data: text('data').notNull(),
+  created_at: integer('created_at').notNull(),
+  status: text('status').notNull(),
+  workflow_name: text('workflow_name').notNull(),
+}, (table) => [
+  index('index_runs_created').on(table.created_at, table.id),
+  index('index_runs_workflow').on(table.workflow_name, table.created_at, table.id),
+  index('index_runs_status').on(table.status, table.created_at, table.id),
+]);
+
+/** On an index shard: the hooks whose IDs hash to it, with whether their run has finished (an encoded `HeldToken`). */
+export const indexHooks = sqliteTable('index_hooks', {
+  id: text('id').notNull(),
+  run_id: text('run_id').notNull(),
+  data: text('data').notNull(),
+  created_at: integer('created_at').notNull(),
+}, (table) => [primaryKey({ columns: [table.id, table.run_id] }), index('index_hooks_created').on(table.created_at, table.id)]);
+
+/** On an index shard: the stores that have pushed it every run and hook they held before the index. */
+export const indexSources = sqliteTable('index_sources', {
+  store: text('store').primaryKey(),
+  indexed_at: integer('indexed_at').notNull(),
+});
+
 // The directory's run index used these two. Nothing writes them now; they stay because schema changes are additive.
 
 /** A run store's pending push of its run row to the directory, at the slot that changed it. */
@@ -175,4 +215,8 @@ export type StoreSchema = {
   forced_disposals: typeof forcedDisposals.$inferSelect;
   token_takeovers: typeof tokenTakeovers.$inferSelect;
   start_hook_refusals: typeof startHookRefusals.$inferSelect;
+  index_outbox: typeof indexOutbox.$inferSelect;
+  index_runs: typeof indexRuns.$inferSelect;
+  index_hooks: typeof indexHooks.$inferSelect;
+  index_sources: typeof indexSources.$inferSelect;
 };

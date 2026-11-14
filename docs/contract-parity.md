@@ -44,7 +44,7 @@ What is still missing is optional and outside the runtime's path: `describeRun`,
 | --- | --- | --- | --- | --- |
 | `runs.get`, `steps.get`, `steps.list` | Built | Built | contract, storage | |
 | `runs.getMany` | Built | Built | storage, sharding | One call per store shard, then the legacy store |
-| `runs.list` | Built | Built | contract, sharding | Every store, merged by `createdAt` then ID |
+| `runs.list` | Built | Built | contract, sharding, index | The index shards, merged by `createdAt` then ID; every store while the index backfills |
 | `runs.waitForTerminalStatus` | Built | Built | storage | `AbortSignal` cannot cross RPC and is ignored, as the contract allows |
 | `runs.cancelMany` | Built | Built | contract | |
 | `runs.experimentalSetAttributes` | N/A | N/A | storage | The contract's stopgap until `attr_set`, which this World stores; the runtime feature-detects it |
@@ -61,7 +61,7 @@ What is still missing is optional and outside the runtime's path: `describeRun`,
 | `events.list` | Built | Built | contract | `signal` cannot cross RPC and is ignored |
 | `events.list` `snapshot` | Missing | Built | conformance | On every page of a spec 9 run, read with the page |
 | `events.subscribe` | Missing | Built | contract, spec9-e2e lane | A long poll per page on the run's store, woken by each commit; reports a finished run through `onError` |
-| `hooks.get`, `hooks.getByToken`, `hooks.list` | Built | Built | contract, sharding | |
+| `hooks.get`, `hooks.getByToken`, `hooks.list` | Built | Built | contract, sharding, index | `hooks.get` and a global `hooks.list` read the index shards |
 | `Hook.claimedFrom` | Missing | Built | force-claim | |
 | `Hook.resumeCapabilities` | N/A | N/A | | Vercel's per-lookup attestation; this World declares `hookResumeDedup` statically |
 | `experimental_snapshots` | Built | Built | snapshots, e2e | |
@@ -182,6 +182,7 @@ A candidate whose token claim succeeded but whose run never committed, because b
 - **Schema.** Store migrations `0003` and `0004` add `runs.seq_in_band`, `forced_disposals`, `token_takeovers` and `start_hook_refusals`; queue migrations `0002` and `0003` add `delivery_counts` and `holds`. All additive. Existing runs have no in-band count, so an in-band write to one is a 400; the spec 8 runtime never sends one.
 - **Queue accounting.** In-flight messages start counting deliveries from 0 when the new code reaches their shard, so each gets up to `QUEUE_MAX_ATTEMPTS` more deliveries. The fanout's own attempt cap no longer dead-letters; the shard does. The longer backoff applies to every failing message.
 - **Routing.** Every run's workflow messages, keyed timers included, already go to the run's queue shard on `main`; this branch adds delivery counts and spec 9 handoffs to that shard's serialization rather than a second one.
+- **List index.** Store migration `0005` adds the index outbox and the index shards' tables, all additive. Each store backfills the index on its first wake after the deploy, and lists and `hooks.get` ask every store until all have; the first such list wakes every store. A store that took writes on a version without the index after it backfilled (a rollback) leaves those changes out: delete its `index-backfill` storage key and its `index_sources` rows to backfill it again.
 - **Token release.** A write that frees a token now waits for the token's shard to apply the release, so it is free when the write returns. That adds one RPC to a run's last write when it held hooks.
 - **Inline budget.** `getRuntimeDeadline` raises the runtime's inline budget from 2 to 5 minutes per delivery on spec 8 runs too. A CPU-bound workflow near the 300 s CPU limit can set `WORKFLOW_V2_TIMEOUT_MS` to keep the old budget.
 - **`CONSUMER`.** Retained executors call `latestDeploymentId` on the main Worker's consumer, so deploy the main Worker first.

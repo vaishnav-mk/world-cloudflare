@@ -2,12 +2,13 @@ import { EntityConflictError, InBandSupersededError, WorkflowRunNotFoundError, W
 import {
   getQueueTopicPrefix, getRunQueueNamespace, IN_BAND_SEQ_AT_RUN_CREATION, isTerminalWorkflowRunStatus,
   requireEventSlot, ValidQueueName,
-  type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type WorkflowRun,
+  type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type Hook, type WorkflowRun,
 } from '@workflow/world';
 import { ulid } from 'ulid';
 import { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import { isSingleOrchestrator, mintSpecVersion } from '../../lib/spec.js';
 import type { Db } from '../db.js';
+import type { IndexOutbox } from '../index-outbox.js';
 import type { Outbox } from '../outbox.js';
 import { toEvent } from '../rows.js';
 import type { TokenOutbox } from '../token-outbox.js';
@@ -20,12 +21,12 @@ import { changeWait } from './waits.js';
 
 /**
  * Validates and writes one event, parsed with `CreateEventSchema`, with every state change it
- * causes: the run, step, hook or wait, and any queue message or token release it owes. Call it
- * inside `transactionSync`, so all of it commits together.
+ * causes: the run, step, hook or wait, and any queue message, token release or list row it owes.
+ * Call it inside `transactionSync`, so all of it commits together.
  */
 export function applyEvent(
-  db: Db, outbox: Outbox, releases: TokenOutbox, tokens: Tokens, requestedRunId: string | null, data: AnyEventRequest,
-  params: CreateEventParams = {},
+  db: Db, outbox: Outbox, releases: TokenOutbox, index: IndexOutbox, tokens: Tokens, requestedRunId: string | null,
+  data: AnyEventRequest, params: CreateEventParams = {},
 ): EventResult {
   checkParams(data, params);
   const runId = requestedRunId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
@@ -42,7 +43,7 @@ export function applyEvent(
     return { run: existing, allocated: 0 };
   }
 
-  const tx: Tx = { db, outbox, releases, tokens, runId, now: new Date(), specVersion };
+  const tx: Tx = { db, outbox, releases, index, tokens, runId, now: new Date(), specVersion };
   const created = createRun(tx, data, existing);
   const run = created?.run ?? existing;
   if (run === undefined) throw new WorkflowRunNotFoundError(runId);
@@ -60,10 +61,9 @@ export function applyEvent(
   const event = appendEvent(db, runId, { ...journalOf(data, change), specVersion }, tx.now, params);
   persist(tx, data, event, change);
   // An admitted start Hook is made with its run; no hook_created stands for it.
-  if (created !== undefined && tokens.kind === TokenClaim.Granted) {
-    db.deleteHookByToken(tokens.hook.token);
-    db.insertHook(tokens.hook);
-  }
+  if (created !== undefined && tokens.kind === TokenClaim.Granted) insertHook(tx, tokens.hook);
+  // Only run events change the run; the others pass it on as it was.
+  if (created !== undefined || change.run !== run) index.oweRun(runId);
   // A lazy step start also writes its implied step_created. A lazy run start's implied run_created is
   // the creation, which the fence counted before this write.
   const allocated = change.kind === ChangeKind.LazyStepStart ? 2 : 1;
@@ -188,14 +188,13 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): v
         }, now);
         break;
       }
-      // The token's shard granted the token, so a hook here that still has it belongs to a finished run past its retention.
-      db.deleteHookByToken(change.hook.token);
-      db.insertHook(change.hook);
+      insertHook(tx, change.hook);
       break;
     }
     case ChangeKind.HookDisposed:
       db.deleteRunHook(runId, change.hook.hookId);
       releases.owe(change.hook, true);
+      tx.index.oweHook(runId, change.hook.hookId);
       break;
     case ChangeKind.Wait:
     case ChangeKind.WaitAppend:
@@ -205,8 +204,19 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change): v
   if (isTerminalWorkflowRunStatus(change.run.status)) {
     outbox.settleRun(runId);
     db.deleteWaits(runId);
-    for (const hook of db.releaseHooks(runId, now)) releases.owe(hook, false);
+    for (const hook of db.releaseHooks(runId, now)) {
+      releases.owe(hook, false);
+      tx.index.oweHook(runId, hook.hookId);
+    }
   }
+}
+
+/** Stores a hook whose token its shard granted, and owes the index its row. */
+function insertHook({ db, index, runId }: Tx, hook: Hook): void {
+  // A hook here that still has the token belongs to a finished run past its retention.
+  for (const gone of db.deleteHookByToken(hook.token)) index.oweHook(gone.run_id, gone.id);
+  db.insertHook(hook);
+  index.oweHook(runId, hook.hookId);
 }
 
 /** Records the queue message an event owes, or settles messages it makes unnecessary. */

@@ -31,7 +31,8 @@ What limits it:
 - **Flow CPU.** With flows switched off, creation reached 358 per second. Flows started by a queue shard competed with it for CPU. They now run on runners ([runners](../packages/world-cloudflare/README.md#runners)); not re-measured on Workers.
 - **Distance.** Each Durable Object call from the test colo took about 150 ms, because shards live where they were first called.
 - **The test.** One machine and one colo may cap it before the World does.
-- **Lists.** `runs.list` and a global `hooks.list` ask every store, so their cost grows with the shard count, and a large `limit` with `resolveData: 'all'` costs memory. `hooks.get` asks every store too.
+- **Lists.** `runs.list` and a global `hooks.list` ask every index shard (16 per epoch by default), and `hooks.get` one per epoch. With `resolveData: 'all'` a list also reads its page's runs from their stores, up to one call per run, so a large `limit` costs calls and memory. Until every store has backfilled the index after the upgrade, they ask every store as before.
+- **Index writes.** Each run change (creation, start, end, `attr_set`) and hook change also writes the run's or hook's row to an index shard before the write answers: one more call, waited for up to 1 s. Every new run's rows go to the latest epoch's index shards, so raise `index` with the load.
 - **Token release.** A disposal or a finished run releases its tokens on their shards before the write returns, which adds a call to a run's last write when it held hooks.
 - **The legacy store.** It still serves runs created before store shards, each token shard's first answer (once), and a shard that cannot find a lazily started run.
 

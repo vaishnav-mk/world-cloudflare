@@ -2,6 +2,7 @@ import type { AnyEventRequest, Hook, Step, Wait, WorkflowRun } from '@workflow/w
 import type { ChangeKind, EventType, TokenClaim } from '../../enums.js';
 import type { EventOf } from '../../types.js';
 import type { Db } from '../db.js';
+import type { IndexOutbox } from '../index-outbox.js';
 import type { Outbox } from '../outbox.js';
 import type { TokenOutbox } from '../token-outbox.js';
 
@@ -41,6 +42,7 @@ export type Tx = {
   db: Db;
   outbox: Outbox;
   releases: TokenOutbox;
+  index: IndexOutbox;
   tokens: Tokens;
   runId: string;
   now: Date;

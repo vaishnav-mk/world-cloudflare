@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { orchestratorRunIdOf } from '@workflow/world';
 import { decodeTime } from 'ulid';
-import { CRON_WAKES_PER_TICK, DEFAULT_SHARD_EPOCHS, QUEUE_SHARD_NAME, RUNNER_NAME } from '../constants.js';
+import { CRON_WAKES_PER_TICK, DEFAULT_INDEX_SHARDS, DEFAULT_SHARD_EPOCHS, QUEUE_SHARD_NAME, RUNNER_NAME, STORE_NAME } from '../constants.js';
 import type { ShardEpoch, WorldEnv } from '../types.js';
 import { fnv1a32Hex } from './hash.js';
 
@@ -17,7 +17,7 @@ function epochs(): readonly ShardEpoch[] {
   return parsed;
 }
 
-/** Parses `SHARD_EPOCHS`, a JSON list of `{ from, store, queue }` ordered by `from`, the first at 0. */
+/** Parses `SHARD_EPOCHS`, a JSON list of `{ from, store, queue, index? }` ordered by `from`, the first at 0. */
 export function parseEpochs(raw: string | undefined): readonly ShardEpoch[] {
   if (raw === undefined || raw === '') return DEFAULT_SHARD_EPOCHS;
   const value: unknown = JSON.parse(raw);
@@ -25,9 +25,9 @@ export function parseEpochs(raw: string | undefined): readonly ShardEpoch[] {
   if (!Array.isArray(value) || value.length === 0) throw new Error('SHARD_EPOCHS must be a non-empty JSON list');
   let previous = -1;
   for (const epoch of value as Record<string, unknown>[]) {
-    const { from, store, queue } = epoch;
-    if (!Number.isSafeInteger(from) || (from as number) <= previous || !count(store) || !count(queue)) {
-      throw new Error('SHARD_EPOCHS entries need ascending integer `from` and positive `store` and `queue` counts');
+    const { from, store, queue, index } = epoch;
+    if (!Number.isSafeInteger(from) || (from as number) <= previous || !count(store) || !count(queue) || !(index === undefined || count(index))) {
+      throw new Error('SHARD_EPOCHS entries need ascending integer `from`, positive `store` and `queue` counts, and an optional positive `index`');
     }
     previous = from as number;
   }
@@ -102,6 +102,53 @@ export function runnerShardFor(runId: string, key = runId): string {
 /** Every store shard in every epoch. */
 export function storeShardNames(): string[] {
   return epochs().flatMap((epoch) => Array.from({ length: epoch.store }, (_, index) => `store-${tagOf(epoch)}${index}`));
+}
+
+/** The epoch whose shards are named `<prefix>-<tag><n>`, as `storeShardNames` and `indexShardNames` name them. */
+function epochNamed(name: string, prefix: string): ShardEpoch {
+  const epoch = epochs().find((each) => {
+    const start = `${prefix}-${tagOf(each)}`;
+    return name.startsWith(start) && /^\d+$/.test(name.slice(start.length));
+  });
+  if (epoch === undefined) throw new Error(`${name} is not a ${prefix} shard`);
+  return epoch;
+}
+
+const indexCount = (epoch: ShardEpoch) => epoch.index ?? DEFAULT_INDEX_SHARDS;
+const indexShardsIn = (epoch: ShardEpoch) => Array.from({ length: indexCount(epoch) }, (_, index) => `index-${tagOf(epoch)}${index}`);
+
+/**
+ * The index shard that holds a run's list row (`key` is the run ID) or one of its hooks' (`key` is
+ * the hook ID): `hash(key) % index` within the run's epoch.
+ */
+export function indexShardFor(runId: string, key = runId): string {
+  const { epoch, tag } = epochOf(runId);
+  return `index-${tag}${bucket(key, indexCount(epoch))}`;
+}
+
+/** The index shards, one per epoch, that may hold hook `hookId`'s row: a hook ID does not name its run. */
+export function hookIndexShards(hookId: string): string[] {
+  return epochs().map((epoch) => `index-${tagOf(epoch)}${bucket(hookId, indexCount(epoch))}`);
+}
+
+/** Every index shard in every epoch. */
+export function indexShardNames(): string[] {
+  return epochs().flatMap(indexShardsIn);
+}
+
+/** The index shards a store's runs and hooks go to: its epoch's, or every epoch's for the legacy store. */
+export function indexShardsOf(store: string): string[] {
+  return store === STORE_NAME ? indexShardNames() : indexShardsIn(epochNamed(store, 'store'));
+}
+
+/** How many stores feed index shard `name`: its epoch's store shards, and the legacy store. */
+export function indexSourceCount(name: string): number {
+  return epochNamed(name, 'index').store + 1;
+}
+
+/** Whether `name` is a store that holds runs: a store shard or the legacy store, not an index shard. */
+export function holdsRuns(name: string): boolean {
+  return name === STORE_NAME || name.startsWith('store-');
 }
 
 /** Every queue shard in every epoch, plus the single `flow` shard that served messages queued before sharding. */

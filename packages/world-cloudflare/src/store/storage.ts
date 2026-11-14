@@ -20,16 +20,17 @@ import type {
 } from '@workflow/world';
 import { stringify } from 'devalue';
 import { ulid } from 'ulid';
-import { PAYLOAD_MAX_BYTES } from '../constants.js';
-import { EventType } from '../enums.js';
+import { FAN_OUT_CONCURRENCY, PAYLOAD_MAX_BYTES } from '../constants.js';
+import { EventType, ResolveData } from '../enums.js';
 import { groupBy } from '../lib/group.js';
+import { Semaphore } from '../lib/semaphore.js';
 import { isSingleOrchestrator } from '../lib/spec.js';
 import { createPayloads } from '../lib/payloads.js';
-import type { EventOf, WorldEnv } from '../types.js';
+import type { EventOf, IndexAnswer, IndexPage, WorldEnv } from '../types.js';
 import { cancelMany } from './cancel-many.js';
 import { mergePages } from './pages.js';
-import { storeShardFor } from '../lib/shards.js';
-import { legacyStore, onEveryStore, onRun, storeShard, tokenShard } from './route.js';
+import { hookIndexShards, indexShardNames, storeShardFor } from '../lib/shards.js';
+import { legacyStore, onEveryStore, onRun, onStores, storeShard, tokenShard, type Store } from './route.js';
 
 type AnyRun = WorkflowRun | WorkflowRunWithoutData;
 type AnyStep = Step | StepWithoutData;
@@ -39,11 +40,13 @@ type WithData = { resolveData?: 'all' };
 const encoder = new TextEncoder();
 const runKey = (run: AnyRun): [number, string] => [run.createdAt.getTime(), run.runId];
 const hookKey = (hook: Hook): [number, string] => [hook.createdAt.getTime(), hook.hookId];
+const isComplete = <T>(answer: IndexAnswer<T>): answer is { complete: true; value: T } => answer.complete;
 
 /**
  * The World's `Storage`. Every call is an RPC to a store Durable Object: the run's shard for a
- * run-scoped call, the token's shard for a token, and every store for a cross-run list. Large
- * payloads go to R2 before the call and come back from R2 after it, so the objects only see refs to them.
+ * run-scoped call, the token's shard for a token, and the index shards for a cross-run list or
+ * `hooks.get` (every store while a store has still to backfill the index). Large payloads go to R2
+ * before the call and come back from R2 after it, so the objects only see refs to them.
  */
 export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): Storage {
   // A stub belongs to one request, so the route helpers make one per call; never cache it in the World singleton.
@@ -67,8 +70,9 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
       for (const [index, run] of runs.entries()) if (run !== null) found.set(asked[index], run);
     };
     // One call per shard, then one to the legacy store for the rest.
-    await Promise.all([...groupBy(new Set(ids), storeShardFor)].map(async ([, group]) =>
-      record(group, await storeShard(stores, group[0]).getManyRuns(group, params?.resolveData))));
+    const calls = new Semaphore(FAN_OUT_CONCURRENCY);
+    await Promise.all([...groupBy(new Set(ids), storeShardFor)].map(([, group]) => calls.run(async () =>
+      record(group, await storeShard(stores, group[0]).getManyRuns(group, params?.resolveData)))));
     const rest = [...new Set(ids)].filter((id) => !found.has(id));
     if (rest.length) record(rest, await legacyStore(stores).getManyRuns(rest, params?.resolveData));
     return resolveAll(ids.map((id) => found.get(id) ?? null));
@@ -86,8 +90,22 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
   function listRuns(params?: ListWorkflowRunsParams & WithData): Promise<PaginatedResponse<WorkflowRun>>;
   function listRuns(params?: ListWorkflowRunsParams): Promise<PaginatedResponse<AnyRun>>;
   async function listRuns(params: ListWorkflowRunsParams = {}): Promise<PaginatedResponse<AnyRun>> {
-    const pages = await onEveryStore(stores, (store) => store.listRuns(params));
-    return resolveAll(mergePages(pages, runKey, params.pagination));
+    const indexed = await fromIndex<WorkflowRunWithoutData>((shard) => shard.listIndexedRuns(params));
+    if (indexed === undefined) return resolveAll(mergePages(await onEveryStore(stores, (store) => store.listRuns(params)), runKey, params.pagination));
+    const page = mergePages<AnyRun>(indexed, runKey, params.pagination);
+    if (params.resolveData === ResolveData.None) return resolveAll(page);
+    // The index keeps runs without their payloads, so the page's runs come whole from their stores.
+    const runs = await getMany(page.data.map(({ runId }) => runId), { resolveData: params.resolveData });
+    return { ...page, data: runs.filter((run) => run !== null) };
+  }
+
+  /**
+   * Every index shard's page of a cross-run list, or undefined while a store has still to backfill
+   * them, when the caller asks every store instead.
+   */
+  async function fromIndex<T>(read: (shard: Store) => Promise<IndexPage<T>>): Promise<PaginatedResponse<T>[] | undefined> {
+    const answers = await onStores(stores, indexShardNames(), read);
+    return answers.every(isComplete) ? answers.map(({ value }) => value) : undefined;
   }
 
   function getStep(runId: string, stepId: string, params: WithoutData): Promise<StepWithoutData>;
@@ -187,18 +205,24 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
         };
       },
     },
-    // A hook lives with its run, and its token's copy on the token's shard. The SDK runtime calls
-    // `hooks.get` only for invocations, which this World does not declare, so it asks every store.
+    // A hook lives with its run, its token's copy on the token's shard, and its list row on an index
+    // shard of its run's epoch. A hook ID does not name its run, so `hooks.get` asks one index shard per epoch.
     hooks: {
       get: async (hookId, params) => {
-        const found = (await onEveryStore(stores, (store) => store.findHook(hookId, params?.resolveData))).find((hook) => hook !== undefined);
+        // RPC stubs widen the answer's type; this is `WorldStore.findIndexedHook`'s own.
+        const indexed: IndexAnswer<Hook | undefined>[] = await onStores(stores, hookIndexShards(hookId),
+          (shard) => shard.findIndexedHook(hookId, params?.resolveData));
+        const found = indexed.every(isComplete)
+          ? indexed.find(({ value }) => value !== undefined)?.value
+          : (await onEveryStore(stores, (store) => store.findHook(hookId, params?.resolveData))).find((hook) => hook !== undefined);
         if (found === undefined) throw new HookNotFoundError(hookId);
         return resolveAll(found);
       },
       getByToken: async (token, params) => resolveAll(await tokenShard(stores, token).getHookByToken(token, params?.resolveData)),
       list: async (params) => {
         if (params.runId !== undefined) return resolveAll(await onRun(stores, params.runId, (store) => store.listHooks(params), answersUnknown));
-        return resolveAll(mergePages(await onEveryStore(stores, (store) => store.listHooks(params)), hookKey, params.pagination));
+        const pages = await fromIndex<Hook>((shard) => shard.listIndexedHooks(params));
+        return resolveAll(mergePages(pages ?? await onEveryStore(stores, (store) => store.listHooks(params)), hookKey, params.pagination));
       },
     },
   };

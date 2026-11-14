@@ -14,22 +14,23 @@ import {
 } from '@workflow/world';
 import migrations from '../../drizzle/store/migrations.js';
 import {
-  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_PAGE_READS, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_START_HOOK_RETENTION_MS,
-  MAX_TERMINAL_WAIT_MS,
+  DISPATCH_KINDS, DISPATCH_RECOVERY_DELAY_MS, EVENT_PAGE_READS, EVENT_POLL_BATCH, EVENT_POLL_MS, INDEX_BACKFILL_BATCH,
+  INDEX_PUSH_WAIT_MS, MAX_START_HOOK_RETENTION_MS, MAX_TERMINAL_WAIT_MS,
   MIN_ALARM_DELAY_MS, REDRIVE_DELAY_MS, RELEASE_KINDS, STORE_NAME,
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { isSingleOrchestrator, mintSpecVersion } from '../lib/spec.js';
-import { EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
+import { BackfillStage, EventType, MessageKind, RunStatus, TokenClaim, WaitStatus } from '../enums.js';
 import { toJson } from '../lib/json.js';
 import { Semaphore } from '../lib/semaphore.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import { unreachable } from '../lib/unreachable.js';
 import { Waiters } from '../lib/waiters.js';
 import { shardPusher } from '../queue/push.js';
-import { queueShardFor, storeShardFor, tokenShardFor } from '../lib/shards.js';
+import { holdsRuns, indexShardsOf, queueShardFor, storeShardFor, tokenShardFor } from '../lib/shards.js';
 import type {
-  DispatchKind, EnqueueResult, EventOf, HeldToken, OutboxClaim, QueueDispatch, ResolveDataMode, TokenRelease, WorldEnv,
+  DispatchKind, EnqueueResult, EventOf, HeldToken, IndexAnswer, IndexBackfill, IndexBatch, IndexPage, OutboxClaim, QueueDispatch,
+  ResolveDataMode, TokenRelease, WorldEnv,
 } from '../types.js';
 import { Db } from './db.js';
 import { drainOutbox, isPendingStep, pendingStepSlot, pendingWaitSlot } from './dispatch.js';
@@ -38,9 +39,11 @@ import { checkBatch } from './events/batch.js';
 import { newHook, startHookOf } from './events/hooks.js';
 import { appendEvent, skippedEvents } from './events/journal.js';
 import type { TokenAnswer, Tokens } from './events/types.js';
+import { IndexOutbox } from './index-outbox.js';
 import { Outbox } from './outbox.js';
 import { listRecords, readEventPage } from './pages.js';
 import { toEvent } from './rows.js';
+import { RunIndex } from './run-index.js';
 import { TokenOutbox } from './token-outbox.js';
 import { TokenRegistry } from './tokens.js';
 import { TokenTakeovers, type Takeover } from './takeovers.js';
@@ -48,6 +51,8 @@ import { hookView, runView, stepView } from './views.js';
 
 /** Storage key a token shard sets once it has imported the legacy store's tokens. */
 const LEGACY_TOKENS_IMPORTED = 'legacy-tokens-imported';
+/** Storage key for a store's `IndexBackfill`. */
+const INDEX_BACKFILL = 'index-backfill';
 
 /** A batch item the World refuses on its own, as its single create would be: a 4xx, not a failure of the batch. */
 function isItemRefusal(error: unknown): error is WorkflowWorldError {
@@ -75,8 +80,9 @@ function freesTokens(data: AnyEventRequest, result: EventResult): boolean {
  * (`tokenShardFor(token)`), which keeps a token unique across runs.
  *
  * The store named `STORE_NAME` is the legacy store: it still holds every run created before store
- * shards, with their hooks. Retained executors call these methods over RPC, so keep names and
- * signatures stable.
+ * shards, with their hooks. Every store owes the index shards the list rows of its runs and hooks.
+ * A store named `index-*` is an index shard (`RunIndex`), which holds those rows and answers
+ * cross-run lists. Retained executors call these methods over RPC, so keep names and signatures stable.
  */
 export class WorldStore extends DurableObject<WorldEnv> {
   readonly #db: Db;
@@ -85,22 +91,34 @@ export class WorldStore extends DurableObject<WorldEnv> {
   readonly #releases: TokenOutbox;
   readonly #tokens: TokenRegistry;
   readonly #takeovers: TokenTakeovers;
+  readonly #index: IndexOutbox;
+  readonly #runIndex: RunIndex;
   readonly #waiters = new Waiters();
   readonly #pageReads = new Semaphore(EVENT_PAGE_READS);
+  readonly #name: string;
   readonly #isLegacy: boolean;
   /** The token release push in flight, if any. */
   #pushing: Promise<void> | undefined;
+  /** The last index push round, and the round queued after it that has not started yet, if any. */
+  #indexRound: Promise<void> = Promise.resolve();
+  #indexQueued: Promise<void> | undefined;
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
+    const name = ctx.id.name;
+    if (name === undefined) throw new Error('World stores are reached by name');
+    this.#name = name;
     this.#db = new Db(ctx.storage.sql);
     this.#outbox = new Outbox(ctx.storage.sql);
     this.#pushQueue = shardPusher(env.QUEUE_SHARD);
     this.#releases = new TokenOutbox(ctx.storage.sql);
     this.#tokens = new TokenRegistry(ctx.storage.sql);
     this.#takeovers = new TokenTakeovers(ctx.storage.sql);
-    this.#isLegacy = ctx.id.name === STORE_NAME;
+    this.#index = new IndexOutbox(ctx.storage.sql, this.#db);
+    this.#runIndex = new RunIndex(ctx.storage.sql, this.#db, name);
+    this.#isLegacy = name === STORE_NAME;
     migrateOnStart(ctx, migrations);
+    if (holdsRuns(name)) ctx.blockConcurrencyWhile(() => this.#resumeIndexing());
   }
 
   // Runs.
@@ -209,7 +227,9 @@ export class WorldStore extends DurableObject<WorldEnv> {
     let result: EventResult;
     try {
       // No awaits inside: the slot, event, state and outbox rows commit together.
-      result = this.ctx.storage.transactionSync(() => applyEvent(this.#db, this.#outbox, this.#releases, tokens, runId, data, params));
+      result = this.ctx.storage.transactionSync(() => applyEvent(
+        this.#db, this.#outbox, this.#releases, this.#index, tokens, runId, data, params,
+      ));
     } catch (error) {
       // A token granted for a write that did not commit, such as one racing the run's end, goes back,
       // unless a concurrent write of the same hook committed with it.
@@ -262,7 +282,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
         }
         try {
           // A nested transaction is a savepoint, so a rejected event leaves nothing behind.
-          return storage.transactionSync(() => applyEvent(db, this.#outbox, this.#releases, tokens, runId, event, {
+          return storage.transactionSync(() => applyEvent(db, this.#outbox, this.#releases, this.#index, tokens, runId, event, {
             resolveData: params.resolveData, requestId: params.requestId, occurredAt, computeInstanceId,
           }));
         } catch (error) {
@@ -440,17 +460,24 @@ export class WorldStore extends DurableObject<WorldEnv> {
   /**
    * After a write: owed token releases go to their shards in the background, so a freed token is
    * free shortly after the write returns. A failed release stays owed and the alarm retries it.
+   * Owed list rows go to the index shards before the write answers; see `#awaitIndex`.
    */
   async #afterWrite(freesTokens: boolean): Promise<void> {
+    const indexed = this.#awaitIndex();
     if (this.#releases.nextDueAt() !== null) {
       // A write that frees a token answers once the token's shard has it, so the token is free
       // when the write returns. A failed release stays owed for the alarm and fails nothing here.
       if (freesTokens) await this.#push();
       else this.ctx.waitUntil(this.#push());
+      await indexed;
       return;
     }
+    await indexed;
     // A finished run usually owes nothing now, so its store need not wake for the recovery alarm.
-    if (freesTokens && this.#outbox.nextDueAt() === null) await this.ctx.storage.deleteAlarm();
+    if (freesTokens && this.#outbox.nextDueAt() === null && this.#index.nextDueAt() === null
+      && this.#backfill().stage === BackfillStage.Reported) {
+      await this.ctx.storage.deleteAlarm();
+    }
   }
 
   /** One push at a time; a release owed during a push rides its loop. A failed one arms the alarm. */
@@ -459,6 +486,139 @@ export class WorldStore extends DurableObject<WorldEnv> {
       .then((retryAt) => (retryAt === undefined ? undefined : this.#armAlarm(retryAt, 'token release retry')))
       .finally(() => { this.#pushing = undefined; });
     return this.#pushing;
+  }
+
+  // List index: every store owes the index shards its runs' and hooks' list rows.
+
+  /**
+   * Pushes owed list rows in a round after the one in flight, so it carries every row owed before
+   * this call. A failed push stays owed and arms the alarm; a backlog gets more rounds.
+   */
+  #pushIndex(): Promise<void> {
+    if (this.#indexQueued === undefined) {
+      this.#indexRound = this.#indexRound.then(async () => {
+        this.#indexQueued = undefined;
+        try {
+          const retryAt = await this.#index.push((name) => this.#store(name));
+          if (retryAt !== undefined) await this.#armAlarm(retryAt, 'index push retry');
+          else if (this.#index.hasDue()) this.ctx.waitUntil(this.#pushIndex());
+        } catch (error) {
+          console.error('Index push round failed', error);
+        }
+      });
+      this.#indexQueued = this.#indexRound;
+    }
+    return this.#indexQueued;
+  }
+
+  /**
+   * A write answers once its list rows reach their index shards, so a list right after it sees it,
+   * or after `INDEX_PUSH_WAIT_MS`, while a slow push goes on.
+   */
+  async #awaitIndex(): Promise<void> {
+    if (!this.#index.hasDue()) return;
+    const pushed = this.#pushIndex();
+    this.ctx.waitUntil(pushed);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([pushed, new Promise((resolve) => { timer = setTimeout(resolve, INDEX_PUSH_WAIT_MS); })]);
+    clearTimeout(timer);
+  }
+
+  #backfill(): IndexBackfill {
+    // SAFETY: only `#setBackfill` writes this key.
+    return this.ctx.storage.kv.get<IndexBackfill>(INDEX_BACKFILL) ?? { stage: BackfillStage.Scanning, after: '' };
+  }
+
+  #setBackfill(backfill: IndexBackfill): void {
+    this.ctx.storage.kv.put(INDEX_BACKFILL, backfill);
+  }
+
+  /**
+   * On waking: a store that holds nothing reports to its index shards at once, and one with runs
+   * from before the index backfills them through the alarm. Rows a reset left owed go out too.
+   */
+  async #resumeIndexing(): Promise<void> {
+    let backfill = this.#backfill();
+    if (backfill.stage === BackfillStage.Scanning && backfill.after === '' && this.#db.runIdsAfter('', 1).length === 0) {
+      backfill = { stage: BackfillStage.Scanned };
+      this.#setBackfill(backfill);
+    }
+    if (backfill.stage === BackfillStage.Scanned && this.#index.nextDueAt() === null) {
+      // Not through the alarm, which would also publish dispatches still in their grace period.
+      this.ctx.waitUntil(this.#reportIndexed().catch(async (error: unknown) => {
+        console.error('Index backfill report failed', error);
+        await this.#armAlarm(Date.now() + DISPATCH_RECOVERY_DELAY_MS, 'index backfill report');
+      }));
+    } else if (backfill.stage !== BackfillStage.Reported || this.#index.nextDueAt() !== null) {
+      await this.#armAlarm(Date.now(), 'index backfill');
+    }
+  }
+
+  /**
+   * The alarm's index work: the next backfill batch, a push round, and the report once every run
+   * is pushed. Returns when to run again, or null.
+   */
+  async #indexAlarm(): Promise<number | null> {
+    const backfill = this.#backfill();
+    if (backfill.stage === BackfillStage.Scanning) {
+      this.ctx.storage.transactionSync(() => {
+        const after = this.#index.oweRunsAfter(backfill.after, INDEX_BACKFILL_BATCH);
+        this.#setBackfill(after === null ? { stage: BackfillStage.Scanned } : { stage: BackfillStage.Scanning, after });
+      });
+    }
+    await this.#pushIndex();
+    const owedAt = this.#index.nextDueAt();
+    switch (this.#backfill().stage) {
+      case BackfillStage.Scanning:
+        return Date.now();
+      case BackfillStage.Scanned:
+        if (owedAt !== null) return owedAt;
+        try {
+          await this.#reportIndexed();
+          return null;
+        } catch (error) {
+          console.error('Index backfill report failed', error);
+          return Date.now() + DISPATCH_RECOVERY_DELAY_MS;
+        }
+      case BackfillStage.Reported:
+        return owedAt;
+    }
+  }
+
+  /** Tells every index shard this store feeds that it holds every run and hook this store held before the index. */
+  async #reportIndexed(): Promise<void> {
+    await Promise.all(indexShardsOf(this.#name).map((name) => this.#store(name).markIndexed(this.#name)));
+    this.#setBackfill({ stage: BackfillStage.Reported });
+  }
+
+  // Index shard: list rows from every store of its epoch, read by cross-run lists.
+
+  /** Applies list rows a store pushed. */
+  async indexChanges(batch: IndexBatch): Promise<void> {
+    this.ctx.storage.transactionSync(() => this.#runIndex.apply(batch));
+  }
+
+  /** Records that `store` has pushed this shard every run and hook it held before the index. */
+  async markIndexed(store: string): Promise<void> {
+    this.#runIndex.markIndexed(store);
+  }
+
+  async listIndexedRuns(params: ListWorkflowRunsParams = {}): Promise<IndexPage<WorkflowRunWithoutData>> {
+    return this.#runIndex.answer(() => this.#runIndex.listRuns(params));
+  }
+
+  async findIndexedHook(hookId: string, resolveData?: ResolveDataMode): Promise<IndexAnswer<Hook | undefined>> {
+    return this.#runIndex.answer(() => {
+      const hook = this.#runIndex.findHook(hookId, new Date());
+      return hook === undefined ? undefined : hookView(hook, resolveData);
+    });
+  }
+
+  async listIndexedHooks(params: ListHooksParams): Promise<IndexPage<Hook>> {
+    return this.#runIndex.answer(() => {
+      const page = this.#runIndex.listHooks(params, new Date());
+      return { ...page, data: page.data.map((hook) => hookView(hook, params.resolveData)) };
+    });
   }
 
   // Token shard: the registry for the tokens that hash to this store, called by every store.
@@ -570,12 +730,16 @@ export class WorldStore extends DurableObject<WorldEnv> {
           eventType: EventType.HookDisposed, correlationId: hookId, specVersion, eventData: { token, forceClaimedBy: claimedBy },
         }, new Date());
       }
-      if (holds) db.deleteRunHook(runId, hookId);
+      if (holds) {
+        db.deleteRunHook(runId, hookId);
+        this.#index.oweHook(runId, hookId);
+      }
       db.insertForcedDisposal(runId, hookId, { token, claimedBy, claimedFrom });
       return { claimedFrom, journaled: holds && running };
     });
     if (outcome === null) return null;
     if (outcome.journaled) this.#waiters.wake(runId);
+    await this.#awaitIndex();
     return outcome.claimedFrom;
   }
 
@@ -810,7 +974,8 @@ export class WorldStore extends DurableObject<WorldEnv> {
     for (const token of this.#takeovers.due(Date.now())) await this.finishTakeover(token).catch((error: unknown) => {
       console.error('Token takeover failed', { token, error });
     });
-    const due = [this.#outbox.nextDueAt(), this.#releases.nextDueAt(), this.#takeovers.nextDueAt()].filter((at) => at !== null);
+    const indexAt = holdsRuns(this.#name) ? await this.#indexAlarm() : null;
+    const due = [this.#outbox.nextDueAt(), this.#releases.nextDueAt(), this.#takeovers.nextDueAt(), indexAt].filter((at) => at !== null);
     if (due.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + MIN_ALARM_DELAY_MS, Math.min(...due)));
     return drained;
   }

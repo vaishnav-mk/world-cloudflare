@@ -1,5 +1,7 @@
-import type { AnyEventRequest, Hook, MessageId, Queue, QueueOptions, QueuePayload, ValidQueueName } from '@workflow/world';
-import type { DeliveryResult, EventType, MessageKind, ResolveData } from './enums.js';
+import type {
+  AnyEventRequest, Hook, MessageId, PaginatedResponse, Queue, QueueOptions, QueuePayload, ValidQueueName, WorkflowRunWithoutData,
+} from '@workflow/world';
+import type { BackfillStage, DeliveryResult, EventType, MessageKind, ResolveData } from './enums.js';
 import type { QueueShard } from './queue/queue-shard.js';
 import type { Runner } from './runner/runner.js';
 import type { WorldStore } from './store/world-store.js';
@@ -76,8 +78,11 @@ export type EnqueueRequest = {
 
 /** `QueueShard.enqueueMany`'s outcome for one message. */
 export type EnqueueResult = { id: string; fresh: boolean } | { error: string };
-/** From `from` (ms since the epoch, run ULID time), new runs use `store` store shards and `queue` queue shards. */
-export type ShardEpoch = { from: number; store: number; queue: number };
+/**
+ * From `from` (ms since the epoch, run ULID time), new runs use `store` store shards and `queue` queue
+ * shards, and their list rows live on `index` index shards (`DEFAULT_INDEX_SHARDS` when unset).
+ */
+export type ShardEpoch = { from: number; store: number; queue: number; index?: number };
 /** A queue message that settles an outbox row, routed through its run's store. */
 export type QueueDispatch = { request: EnqueueRequest; claim: OutboxClaim; shard: string };
 
@@ -87,8 +92,29 @@ export type QueueDispatch = { request: EnqueueRequest; claim: OutboxClaim; shard
  */
 export type TokenRelease = { token: string; hookId: string; disposed: boolean };
 
-/** A token a legacy hook holds, as the legacy store hands it to the token's shard. */
+/**
+ * A hook and whether its run has finished: a token a legacy hook holds, as the legacy store hands it
+ * to the token's shard, and a hook's row on its index shard.
+ */
 export type HeldToken = { hook: Hook; finished: boolean };
+
+/**
+ * What a store pushes to one index shard: the latest list rows of its runs and hooks, and the hooks
+ * it no longer holds. Each push carries the state at the time it is sent, so the latest one wins.
+ */
+export type IndexBatch = { runs: WorkflowRunWithoutData[]; hooks: HeldToken[]; goneHooks: { runId: string; hookId: string }[] };
+
+/** An index shard's answer, which callers may trust only once every store has backfilled it. */
+export type IndexAnswer<T> = { complete: false } | { complete: true; value: T };
+
+/** An index shard's page of runs or hooks. */
+export type IndexPage<T> = IndexAnswer<PaginatedResponse<T>>;
+
+/** A store's backfill of the index, kept in its storage: the scan resumes after `after`. */
+export type IndexBackfill =
+  | { stage: BackfillStage.Scanning; after: string }
+  | { stage: BackfillStage.Scanned }
+  | { stage: BackfillStage.Reported };
 
 /** Props the dispatching consumer passes to a retained executor. */
 export type ExecutorProps = { privateDispatch?: boolean; targetDeployment?: string };

@@ -6,6 +6,7 @@ import { createWorld, type WorldEnv } from '@workflow/world-cloudflare';
 import { encode } from '../packages/world-cloudflare/src/lib/codec.js';
 import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import type { WorldStore } from '../packages/world-cloudflare/src/store/world-store.js';
+import { predateIndex } from './backfill.js';
 
 const world = createWorld(env);
 const bytes = (text: string) => new TextEncoder().encode(text);
@@ -203,6 +204,8 @@ describe('store shards', () => {
         oldHook.hookId, runId, token, encode(oldHook), createdAt.getTime());
     });
     await runInDurableObject(shard(token), (_store, state) => { state.storage.kv.delete('legacy-tokens-imported'); });
+    // It predates the list index too.
+    await predateIndex('global');
 
     expect((await world.runs.list({ workflowName: name })).data.map((run) => run.runId)).toEqual([runId]);
     expect((await world.runs.get(runId)).status).toBe('pending');

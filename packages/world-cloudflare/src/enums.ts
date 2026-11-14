@@ -123,3 +123,13 @@ export enum DeliveryResult {
   Wake = 'wake',
   Failed = 'failed',
 }
+
+/** Where a store's one-time backfill of the index shards stands. */
+export enum BackfillStage {
+  /** Owing the index its runs, a batch per alarm. */
+  Scanning = 'scanning',
+  /** Every run owed; it reports once they are pushed. */
+  Scanned = 'scanned',
+  /** Every index shard it feeds knows it is backfilled. */
+  Reported = 'reported',
+}

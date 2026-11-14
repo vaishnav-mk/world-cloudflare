@@ -8,7 +8,7 @@ import { allRows, findRow, requireRow } from '../lib/qb.js';
 import type { EventRow, RecordRow } from './rows.js';
 import type { StoreSchema } from './tables.js';
 
-export type RecordTable = 'runs' | 'steps' | 'hooks';
+export type RecordTable = 'runs' | 'steps' | 'hooks' | 'index_runs' | 'index_hooks';
 
 /** A hook another run took over: its token, the hook that took it, and what the takeover answered. */
 export type ForcedDisposal = { token: string; claimedBy: { runId: string; hookId: string }; claimedFrom: HookClaimedFrom };
@@ -129,8 +129,11 @@ export class Db {
     this.#qb.delete({ tableName: 'hooks', where: { conditions: ['id = ?', 'run_id = ?'], params: [hookId, runId] } }).execute();
   }
 
-  deleteHookByToken(token: string): void {
-    this.#qb.delete({ tableName: 'hooks', where: { conditions: 'token = ?', params: [token] } }).execute();
+  /** Removes the hook holding `token`, and returns it, whose index row its run then owes. */
+  deleteHookByToken(token: string): { id: string; run_id: string }[] {
+    return allRows(this.#qb.delete<{ id: string; run_id: string }>({
+      tableName: 'hooks', where: { conditions: 'token = ?', params: [token] }, returning: ['id', 'run_id'],
+    }));
   }
 
   /**
@@ -177,6 +180,21 @@ export class Db {
 
   insertStartHookRefusal(runId: string, token: string, conflictingRunId: string): void {
     this.#qb.insert({ tableName: 'start_hook_refusals', data: { run_id: runId, token, conflicting_run_id: conflictingRunId } }).execute();
+  }
+
+  /** A run's hook IDs. */
+  hookIdsOf(runId: string): string[] {
+    return allRows(this.#qb.fetchAll<'hooks', 'id'>({
+      tableName: 'hooks', fields: ['id'], where: { conditions: 'run_id = ?', params: [runId] },
+    })).map((row) => row.id);
+  }
+
+  /** IDs of the runs this store holds after `after`, in ID order, leaving out the legacy store's index copies. */
+  runIdsAfter(after: string, limit: number): string[] {
+    return allRows(this.#qb.fetchAll<'runs', 'id'>({
+      tableName: 'runs', fields: ['id'], where: { conditions: ['id > ?', 'index_slot IS NULL'], params: [after] },
+      orderBy: { id: OrderTypes.ASC }, limit,
+    })).map((row) => row.id);
   }
 
   /** Every hook whose token passes `keep`. Only the matches are decoded. */

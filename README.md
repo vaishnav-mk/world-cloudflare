@@ -74,7 +74,7 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 
 ## Limits
 
-- Runs, hook tokens and messages hash onto store and queue shards, 128 and 256 by default, and `SHARD_EPOCHS` adds shards for new runs without moving old ones. `runs.list` and global `hooks.list` ask every store, so they cost more than a run-scoped read and grow with the shard count.
+- Runs, hook tokens and messages hash onto store and queue shards, 128 and 256 by default, and `SHARD_EPOCHS` adds shards for new runs without moving old ones. `runs.list`, global `hooks.list` and `hooks.get` read index shards, 16 per epoch by default, which every store keeps up to date, so they do not grow with the store shard count.
 - Payloads and stream chunks over 1 MiB go to R2. On Workers with QuickJS a 16 MiB step output works and 20 MiB does not, because the workflow VM runs out of memory, so the World rejects any serialized payload over 18 MiB with a 413 and the step or run fails on its first attempt instead of retrying. HTTP bodies are capped at 100 MB. Larger data goes from step to step in a byte stream, in chunks of at most 16 MiB, because 64 MiB chunks ran out of memory on Workers ([streams](docs/limits.md#streams)). A flow request waits for the stream writes its steps left running before it answers, and a stream whose writer is gone ends its readers with an error. Measurements are in [limits](docs/limits.md#payloads).
 - R2 payload objects are never deleted, including ones left by writes that failed.
 - A step that exceeds the CPU limit is retried until the queue gives up, and holds up its delivery lane meanwhile. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.

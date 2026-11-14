@@ -23,7 +23,10 @@ function pageLimit(limit = DEFAULT_PAGE_LIMIT): number {
   return limit;
 }
 
-/** Runs, steps or hooks, newest first by default. The cursor is the encoded `[createdAt, id]` of the last row. */
+/**
+ * Runs, steps or hooks, or an index shard's rows of them, newest first by default. The cursor is the
+ * encoded `[createdAt, id]` of the last row.
+ */
 export function listRecords<T>(db: Db, table: RecordTable, filter: RecordFilter): PaginatedResponse<T> {
   const { limit: requestedLimit, sortOrder, cursor: rawCursor } = filter.pagination ?? {};
   const limit = pageLimit(requestedLimit);

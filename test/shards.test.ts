@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SHARD_EPOCHS } from '../packages/world-cloudflare/src/constants.js';
 import {
-  parseEpochs, queueShardFor, queueShardNames, queueShardsToWake, runnerShardFor, storeShardFor, storeShardNames, tokenShardFor,
+  hookIndexShards, indexShardFor, indexShardNames, indexShardsOf, indexSourceCount, parseEpochs, queueShardFor, queueShardNames,
+  queueShardsToWake, runnerShardFor, storeShardFor, storeShardNames, tokenShardFor,
 } from '../packages/world-cloudflare/src/lib/shards.js';
 
-// wrangler.test.jsonc sets two epochs: { from: 0, store: 4, queue: 4 } and { from: 1700000000000, store: 8, queue: 8 }.
+// wrangler.test.jsonc sets two epochs: { from: 0, store: 4, queue: 4, index: 2 } and
+// { from: 1700000000000, store: 8, queue: 8, index: 3 }.
 const SECOND = (1_700_000_000_000).toString(36);
 
 /** A run ID whose ULID time is `ms`: 10 Crockford base32 time characters, then a fixed random part. */
@@ -67,6 +69,29 @@ describe('shard epochs', () => {
     expect(queueShardNames()).toEqual(['flow', 'flow-0', 'flow-1', 'flow-2', 'flow-3', ...Array.from({ length: 8 }, (_, n) => `flow-e${SECOND}-${n}`)]);
   });
 
+  it("puts a run's list row, and its hooks', on an index shard of the run's epoch", () => {
+    const old = runIdAt(1_600_000_000_000);
+    const current = runIdAt(Date.now());
+    expect(indexShardFor(old)).toMatch(/^index-[0-1]$/);
+    expect(indexShardFor(current)).toMatch(new RegExp(`^index-e${SECOND}-[0-2]$`));
+    // A hook hashes by its own ID within its run's epoch, so hooks.get asks one shard per epoch.
+    const hookId = `hook_${crypto.randomUUID()}`;
+    expect(hookIndexShards(hookId)).toHaveLength(2);
+    expect(hookIndexShards(hookId)).toContain(indexShardFor(old, hookId));
+    expect(hookIndexShards(hookId)).toContain(indexShardFor(current, hookId));
+    expect(indexShardNames()).toEqual(['index-0', 'index-1', `index-e${SECOND}-0`, `index-e${SECOND}-1`, `index-e${SECOND}-2`]);
+  });
+
+  it('has each store report to the index shards it feeds, and each index shard count its stores', () => {
+    expect(indexShardsOf('store-3')).toEqual(['index-0', 'index-1']);
+    expect(indexShardsOf(`store-e${SECOND}-7`)).toEqual([`index-e${SECOND}-0`, `index-e${SECOND}-1`, `index-e${SECOND}-2`]);
+    expect(indexShardsOf('global')).toEqual(indexShardNames());
+    // An epoch's store shards and the legacy store.
+    expect(indexSourceCount('index-1')).toBe(5);
+    expect(indexSourceCount(`index-e${SECOND}-2`)).toBe(9);
+    expect(() => indexShardsOf('store-x')).toThrow();
+  });
+
   it('wakes every queue shard once per cycle of cron ticks', () => {
     // 13 shards fit in one tick, so each tick wakes all of them.
     expect(queueShardsToWake(0)).toEqual(queueShardNames());
@@ -82,7 +107,8 @@ describe('shard epochs', () => {
   it('parses and validates SHARD_EPOCHS', () => {
     expect(parseEpochs(undefined)).toBe(DEFAULT_SHARD_EPOCHS);
     expect(parseEpochs('[{"from":0,"store":2,"queue":3}]')).toEqual([{ from: 0, store: 2, queue: 3 }]);
-    for (const bad of ['[]', '[{"from":5,"store":1,"queue":1}]', '[{"from":0,"store":0,"queue":1}]',
+    expect(parseEpochs('[{"from":0,"store":2,"queue":3,"index":4}]')).toEqual([{ from: 0, store: 2, queue: 3, index: 4 }]);
+    for (const bad of ['[]', '[{"from":5,"store":1,"queue":1}]', '[{"from":0,"store":0,"queue":1}]', '[{"from":0,"store":1,"queue":1,"index":0}]',
       '[{"from":0,"store":1,"queue":1},{"from":0,"store":2,"queue":2}]']) {
       expect(() => parseEpochs(bad), bad).toThrow();
     }

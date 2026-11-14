@@ -3,6 +3,8 @@ import { ResolveData } from '../enums.js';
 import type { ResolveDataMode } from '../types.js';
 
 /** `resolveData: 'none'` drops payloads from entities. */
+export function runView(run: WorkflowRun, resolveData: ResolveData.None): WorkflowRunWithoutData;
+export function runView(run: WorkflowRun, resolveData?: ResolveDataMode): WorkflowRun | WorkflowRunWithoutData;
 export function runView(run: WorkflowRun, resolveData?: ResolveDataMode): WorkflowRun | WorkflowRunWithoutData {
   if (resolveData !== ResolveData.None) return run;
   const { dynamicWorkflowCode: _code, ...rest } = run;

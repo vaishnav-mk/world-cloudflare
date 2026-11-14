@@ -152,6 +152,20 @@ export const DEFAULT_SHARD_EPOCHS: readonly ShardEpoch[] = [{ from: 0, store: 12
 export const CRON_WAKES_PER_TICK = 512;
 /** Store calls in flight at once when a cross-run read, such as `runs.list`, asks every store. */
 export const FAN_OUT_CONCURRENCY = 32;
+/**
+ * Index shards per epoch when its `SHARD_EPOCHS` entry sets no `index`. Every list asks all of them,
+ * and every new run's list row goes to one of the latest epoch's.
+ */
+export const DEFAULT_INDEX_SHARDS = 16;
+/** Owed list rows a store pushes to the index shards in one round. */
+export const INDEX_PUSH_BATCH = 200;
+/** Runs a store's backfill owes the index per alarm. */
+export const INDEX_BACKFILL_BATCH = 200;
+/**
+ * How long a write waits for its list rows to reach the index shards before it answers. A slower
+ * push goes on in the background, and a failed one stays owed for the alarm.
+ */
+export const INDEX_PUSH_WAIT_MS = 1_000;
 
 /** Workers for Platforms script names in `EXECUTOR_ROUTES`. */
 export const EXECUTOR_SCRIPT_PATTERN = /^[a-zA-Z0-9_-]{1,63}$/;

@@ -13,8 +13,8 @@ const tables = (sql: SqlStorage) => sql.exec<{ name: string }>(
 it('creates each object’s tables on first use', async () => {
   await runInDurableObject(env.WORLD_STORE.getByName(crypto.randomUUID()), (_store, state) => {
     expect(tables(state.storage.sql)).toEqual(expect.arrayContaining([
-      'directory_outbox', 'directory_releases', 'dispatch_outbox', 'events', 'forced_disposals', 'hooks', 'runs', 'start_hook_refusals',
-      'steps', 'token_releases', 'token_takeovers', 'tokens', 'waits',
+      'directory_outbox', 'directory_releases', 'dispatch_outbox', 'events', 'forced_disposals', 'hooks', 'index_hooks', 'index_outbox',
+      'index_runs', 'index_sources', 'runs', 'start_hook_refusals', 'steps', 'token_releases', 'token_takeovers', 'tokens', 'waits',
     ]));
   });
   await runInDurableObject(env.QUEUE_SHARD.getByName(crypto.randomUUID()), (_shard, state) => {
@@ -70,6 +70,7 @@ it('applies the baselines over tables created before Drizzle, keeping their rows
         'DROP TABLE tokens', 'DROP TABLE token_releases',
         'DROP TABLE forced_disposals', 'DROP TABLE token_takeovers', 'ALTER TABLE runs DROP COLUMN seq_in_band',
         'DROP TABLE start_hook_refusals',
+        'DROP TABLE index_outbox', 'DROP TABLE index_runs', 'DROP TABLE index_hooks', 'DROP TABLE index_sources',
       ] },
     { namespace: env.QUEUE_SHARD, migrations: queueMigrations,
       seed: `INSERT INTO queue_dedup (key, id, queue_name, payload_digest, delay_ms) VALUES ('kept', 'm', 'q', 'd', 0)`,

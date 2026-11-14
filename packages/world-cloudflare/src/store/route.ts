@@ -5,7 +5,7 @@ import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
 type Namespace = WorldEnv['WORLD_STORE'];
-type Store = ReturnType<Namespace['getByName']>;
+export type Store = ReturnType<Namespace['getByName']>;
 
 /** Runs the legacy store holds, created before store shards. A run never moves, and there are finitely many. */
 const legacyRuns = new Set<string>();
@@ -46,16 +46,20 @@ export async function onRun<T>(
   return result;
 }
 
-/** Makes a cross-run read on every store shard, then the legacy store, `FAN_OUT_CONCURRENCY` at a time, answering in that order. */
-export async function onEveryStore<T>(namespace: Namespace, call: (store: Store) => T): Promise<Awaited<T>[]> {
-  const STORE_NAMES = [...storeShardNames(), STORE_NAME];
+/** Makes a call on each named store, `FAN_OUT_CONCURRENCY` at a time, answering in `names` order. */
+export async function onStores<T>(namespace: Namespace, names: readonly string[], call: (store: Store) => T): Promise<Awaited<T>[]> {
   const results: Awaited<T>[] = [];
   let next = 0;
   const worker = async () => {
-    for (let index = next++; index < STORE_NAMES.length; index = next++) {
-      results[index] = await call(transientAsWorldError(namespace.getByName(STORE_NAMES[index])));
+    for (let index = next++; index < names.length; index = next++) {
+      results[index] = await call(transientAsWorldError(namespace.getByName(names[index])));
     }
   };
   await Promise.all(Array.from({ length: FAN_OUT_CONCURRENCY }, worker));
   return results;
+}
+
+/** Makes a cross-run read on every store shard, then the legacy store. */
+export function onEveryStore<T>(namespace: Namespace, call: (store: Store) => T): Promise<Awaited<T>[]> {
+  return onStores(namespace, [...storeShardNames(), STORE_NAME], call);
 }
