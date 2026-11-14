@@ -149,7 +149,7 @@ function workersPlugin(outDir: string): esbuild.Plugin {
     setup(build) {
       build.onResolve({ filter: /^(node:)?vm$/ }, () => ({ path: VM_SHIM }));
       for (const { find, replacement } of workerAliases) build.onResolve({ filter: find }, () => ({ path: replacement }));
-      // flow.mjs imports the steps module, and both the WebAssembly modules; Wrangler loads them.
+      // flow.mjs loads the steps module and the WebAssembly modules; Wrangler bundles them.
       build.onResolve({ filter: new RegExp(`^\\./(${STEPS}\\.mjs|__quickjs_[\\w-]+\\.wasm)$`) }, ({ path }) => ({ path, external: true }));
       // workerd forbids WebAssembly.compile(), so core's embedded QuickJS binaries become \`.wasm\`
       // imports, which Wrangler compiles at deploy time. Core caches its compiled modules in a
