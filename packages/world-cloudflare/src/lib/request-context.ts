@@ -8,9 +8,12 @@ export type FlowRequest = {
   waitUntil(promise: Promise<unknown>): void;
   /** When the consumer took the delivery, from its `x-workflow-invocation-started-at` header. */
   readonly startedAt?: number;
-  /** Aborted when the request ends. Work it started must not go on past that. */
+  /** Aborted when the request ends. Its stream writers must stop appending chunks. */
   readonly signal: AbortSignal;
-  /** Run as the request ends, before it answers. `cut` means background work was still running. */
+  /**
+   * Run as the request ends, awaited only until its background deadline; unfinished cleanup goes
+   * to the platform's `waitUntil`. `cut` means background work was still running.
+   */
   readonly onEnd: ((cut: boolean) => Promise<void>)[];
 };
 
@@ -57,7 +60,8 @@ export async function withRequestContext<T>(
   } finally {
     const cut = !(await settle(pending, deadline));
     ended.abort();
-    await Promise.allSettled(flowRequest.onEnd.map((end) => end(cut)));
+    for (const end of flowRequest.onEnd) flowRequest.waitUntil(end(cut));
+    await settle(pending, deadline);
   }
 }
 
