@@ -157,7 +157,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
       : data.eventType === EventType.StepCreated && params?.inBand !== true
         ? await gathered(id, request, params)
         : await onRun(stores, id, (store) => store.createEvent(id, request, params));
-    // The store returns the union result; narrow it to the request's event type.
+    // SAFETY: the store answers with the result for the request's own event type; RPC types it as the union.
     return resolveAll(result, written) as Promise<EventResult<T['eventType']>>;
   }
 

@@ -12,6 +12,7 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === 'nu
 export async function startRun({ request }: RouteContext): Promise<Response> {
   const body = await readJson(request);
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Invalid JSON');
+  // SAFETY: checked to be a plain object above; each field stays `unknown` until it is checked.
   const { value, name } = body as { value?: unknown; name?: unknown };
   const args = Array.isArray(value) ? value : [value];
   if (args.length === 0 || args.length > MAX_ARGS || !args.every(isFiniteNumber)) throw new HttpError(400, 'Invalid value');

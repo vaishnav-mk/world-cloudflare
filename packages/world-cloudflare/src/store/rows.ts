@@ -22,6 +22,7 @@ export type OutboxRow = OutboxColumns & (
 
 /** `resolveData` is the SDK's events mode; only `none` changes the result. */
 export function toEvent(row: EventRow, resolveData?: string): Event {
+  // SAFETY: `kind` is only ever written from a validated event's `eventType` (`CreateEventSchema`).
   const eventType = row.kind as Event['eventType'];
   const eventData = row.data === null ? undefined : decode<Record<string, unknown>>(row.data);
   const field = getEventDataPayloadField(eventType);
@@ -31,6 +32,7 @@ export function toEvent(row: EventRow, resolveData?: string): Event {
     if (!eventData) throw new Error('Corrupt event: payload without metadata');
     eventData[field] = new Uint8Array(row.payload);
   }
+  // SAFETY: these are the fields of the stored event of type `eventType`, written from a validated request.
   const event = {
     eventType,
     runId: row.run_id,

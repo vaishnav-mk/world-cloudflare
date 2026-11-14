@@ -30,6 +30,7 @@ export const createQueueHandler: Queue['createQueueHandler'] = (prefix, handler)
     return Response.json({ error: 'Invalid queue delivery' }, { status: 400 });
   }
   try {
+    // SAFETY: only runners and private dispatch reach this route, with a body `queue()` stored; the SDK handler checks its shape.
     const payload = parse(await request.text()) as QueuePayload;
     // Absent from a consumer that predates them: then every delivery may be a redelivery.
     const deliveryCount = Number(request.headers.get('x-vqs-delivery-count') ?? Number.NaN);
