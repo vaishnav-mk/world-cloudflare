@@ -1,53 +1,112 @@
-import assert from 'node:assert/strict';
-import { setTimeout as sleep } from 'node:timers/promises';
+// Load test against a deployed (or `wrangler dev`) example Worker. POSTs /runs straight from this machine.
+//   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-load.mjs [count] [concurrency] [--wait] [--verify] [--name=<workflow>]
+// Starts `count` runs (default 50), `concurrency` requests at a time (default 10), of `demo` or the
+// workflow `--name` names, and prints one JSON line: creation throughput, latency percentiles and
+// errors by status. `--wait` then polls every run until it finishes and adds end-to-end throughput.
+// `--verify` also checks each completed run's result, for `demo`, which returns its value doubled;
+// it implies `--wait`.
 
 const base = process.env.WORKFLOW_BASE_URL?.replace(/\/$/, '');
-const count = Number(process.env.WORKFLOW_LOAD_COUNT ?? 50);
-if (!base || !Number.isSafeInteger(count) || count < 1 || count > 100) {
-  throw new Error('Set WORKFLOW_BASE_URL and 1..100 WORKFLOW_LOAD_COUNT');
+const flags = process.argv.slice(2).filter((arg) => arg.startsWith('--'));
+const [count = 50, concurrency = 10] = process.argv.slice(2).filter((arg) => !arg.startsWith('--')).map(Number);
+const verify = flags.includes('--verify');
+const wait = verify || flags.includes('--wait');
+const name = flags.find((flag) => flag.startsWith('--name='))?.slice('--name='.length);
+if (!base || !Number.isSafeInteger(count) || count < 1 || !Number.isSafeInteger(concurrency) || concurrency < 1) {
+  throw new Error('Set WORKFLOW_BASE_URL; count and concurrency are positive integers');
 }
-const headers = { 'content-type': 'application/json' };
+
+const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+const WAIT_LIMIT_SECONDS = 1_800;
+const POLL_CONCURRENCY = 100;
+
 const startedAt = performance.now();
-const ids = [];
-for (let offset = 0; offset < count; offset += 10) {
-  const batch = await Promise.all(Array.from({ length: Math.min(10, count - offset) }, async (_, index) => {
-    const value = offset + index + 1;
+const seconds = () => (performance.now() - startedAt) / 1000;
+const percentile = (sorted, p) => Math.round(sorted[Math.floor(sorted.length * p)] ?? 0);
+
+/** Runs `work` over `items`, `limit` at a time. */
+async function pool(items, limit, work) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (let index = next++; index < items.length; index = next++) await work(items[index]);
+  }));
+}
+
+// Create.
+const latencies = [];
+const errors = {};
+/** Run ID to the value it was started with. */
+const runs = new Map();
+await pool(Array.from({ length: count }, (_, index) => index + 1), concurrency, async (value) => {
+  const sent = performance.now();
+  try {
     const response = await fetch(`${base}/runs`, {
-      method: 'POST', headers, body: JSON.stringify({ value }), signal: AbortSignal.timeout(20_000),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(name ? { name, value } : { value }),
     });
-    assert.equal(response.status, 202, `create #${value}: ${response.status}`);
-    return { runId: (await response.json()).runId, value };
-  }));
-  ids.push(...batch);
-}
-const createdMs = Math.round(performance.now() - startedAt);
-const pending = new Set(ids.map((item) => item.runId));
-const completedAt = new Map();
-const deadline = performance.now() + 90_000;
-while (pending.size && performance.now() < deadline) {
-  await Promise.all([...pending].map(async (id) => {
-    const response = await fetch(`${base}/runs/${id}`, {
-      headers, signal: AbortSignal.timeout(20_000),
+    const body = await response.text();
+    if (response.status !== 202) {
+      errors[response.status] = (errors[response.status] ?? 0) + 1;
+      return;
+    }
+    latencies.push(performance.now() - sent);
+    runs.set(JSON.parse(body).runId, value);
+  } catch (error) {
+    const key = error.cause?.code ?? error.name;
+    errors[key] = (errors[key] ?? 0) + 1;
+  }
+});
+const createSeconds = seconds();
+latencies.sort((a, b) => a - b);
+const report = {
+  count, concurrency, created: runs.size, createSeconds: +createSeconds.toFixed(1),
+  createdPerSecond: +(runs.size / createSeconds).toFixed(1),
+  p50Ms: percentile(latencies, 0.5), p95Ms: percentile(latencies, 0.95), p99Ms: percentile(latencies, 0.99), errors,
+};
+
+// Wait.
+if (wait) {
+  /** Run ID to when it finished, in seconds since the start, and how. */
+  const finished = new Map();
+  let pending = [...runs.keys()];
+  while (pending.length > 0 && seconds() < WAIT_LIMIT_SECONDS) {
+    const still = [];
+    await pool(pending, POLL_CONCURRENCY, async (runId) => {
+      try {
+        const run = await (await fetch(`${base}/runs/${runId}`)).json();
+        if (TERMINAL.has(run.status)) finished.set(runId, { at: seconds(), status: run.status });
+        else still.push(runId);
+      } catch {
+        still.push(runId);
+      }
     });
-    assert.equal(response.status, 200);
-    const run = await response.json();
-    if (run.status === 'completed') { pending.delete(id); completedAt.set(id, performance.now() - startedAt); }
-    else if (run.status === 'failed' || run.status === 'cancelled') throw new Error(`${id}: ${run.status}/${run.errorCode ?? 'unknown'}`);
-  }));
-  if (pending.size) await sleep(350);
+    pending = still;
+    if (pending.length > 0) await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  const times = [...finished.values()].map(({ at }) => at).sort((a, b) => a - b);
+  const statuses = {};
+  for (const { status } of finished.values()) statuses[status] = (statuses[status] ?? 0) + 1;
+  const last = times.at(-1) ?? 0;
+  Object.assign(report, {
+    finished: finished.size, unfinished: pending.length, statuses,
+    finishedP50Seconds: +(times[Math.floor(times.length * 0.5)] ?? 0).toFixed(1), allFinishedSeconds: +last.toFixed(1),
+    endToEndPerSecond: last > 0 ? +(finished.size / last).toFixed(1) : 0,
+  });
+
+  // Verify.
+  if (verify) {
+    const completed = [...finished].filter(([, { status }]) => status === 'completed').map(([runId]) => runId);
+    const wrong = [];
+    await pool(completed, POLL_CONCURRENCY, async (runId) => {
+      const expected = runs.get(runId) * 2;
+      try {
+        const { value } = await (await fetch(`${base}/runs/${runId}/result`)).json();
+        if (value !== expected) wrong.push({ runId, expected, got: value });
+      } catch (error) {
+        wrong.push({ runId, error: String(error) });
+      }
+    });
+    Object.assign(report, { verified: completed.length, wrong: wrong.length, wrongSample: wrong.slice(0, 3) });
+  }
 }
-assert.equal(pending.size, 0, `Still pending after 90s: ${pending.size}`);
-const output = await Promise.all(ids.map(async ({ runId, value }) => {
-  const response = await fetch(`${base}/runs/${runId}/result`, { headers, signal: AbortSignal.timeout(20_000) });
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).value, value * 2);
-  return completedAt.get(runId);
-}));
-output.sort((a, b) => a - b);
-console.log(JSON.stringify({
-  runs: count,
-  createdMs,
-  totalMs: Math.round(performance.now() - startedAt),
-  p50Ms: Math.round(output[Math.floor(count * 0.5)]),
-  p95Ms: Math.round(output[Math.floor(count * 0.95)]),
-}));
+
+console.log(JSON.stringify(report));

@@ -54,7 +54,7 @@ The example has no authentication. Anyone who can reach it can start runs, and w
 
 ```sh
 WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-e2e.mjs
-WORKFLOW_BASE_URL=https://<worker>.workers.dev WORKFLOW_LOAD_COUNT=50 node scripts/remote-load.mjs
+WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-load.mjs 50 10 --verify
 ```
 
 ## Web UI
