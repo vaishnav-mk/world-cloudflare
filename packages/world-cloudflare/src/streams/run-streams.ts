@@ -10,7 +10,7 @@ import type { WorldEnv } from '../types.js';
 import type { StreamsSchema } from './tables.js';
 
 type StreamInfo = { tailIndex: number; done: boolean };
-type ChunkStream = { body: ReadableStream<Uint8Array>; next: number; done: boolean };
+type ChunkStream = { body: ReadableStream<Uint8Array>; next: number; done: boolean; abandoned: boolean };
 type ChunkPage = {
   data: { index: number; data: Uint8Array }[];
   cursor: string | null;
@@ -39,12 +39,12 @@ export class RunStreams extends DurableObject<WorldEnv> {
     migrateOnStart(ctx, migrations);
   }
 
-  write(name: string, bytes: Uint8Array): void {
-    this.writeMulti(name, [bytes]);
+  write(name: string, bytes: Uint8Array, leaseMs?: number): void {
+    this.writeMulti(name, [bytes], leaseMs);
   }
 
-  /** Appends chunks in order, atomically. */
-  writeMulti(name: string, chunks: Uint8Array[]): void {
+  /** Appends chunks in order, atomically. With `leaseMs`, the writer holds the stream's lease that long. */
+  writeMulti(name: string, chunks: Uint8Array[], leaseMs?: number): void {
     if (!chunks.length) return;
     this.ctx.storage.transactionSync(() => {
       const stream = this.#ensureStream(name);
@@ -54,9 +54,23 @@ export class RunStreams extends DurableObject<WorldEnv> {
         position++;
         this.#qb.insert({ tableName: 'chunks', data: { name, position, bytes: toBuffer(bytes) } }).execute();
       }
-      this.#qb.update({ tableName: 'streams', data: { tail: position }, where: { conditions: 'name = ?', params: [name] } }).execute();
+      const lease = leaseMs === undefined ? {} : { lease_until: Date.now() + leaseMs };
+      this.#qb.update({ tableName: 'streams', data: { tail: position, ...lease }, where: { conditions: 'name = ?', params: [name] } }).execute();
     });
     this.#waiters.wake(name);
+  }
+
+  /**
+   * Extends the writer's lease on each open stream in `names` to `ms` from now; 0 ends it. Once a
+   * stream's lease has run out, a reader that has every chunk ends with an error instead of waiting.
+   */
+  lease(names: string[], ms: number): void {
+    if (!names.length) return;
+    this.#qb.update({
+      tableName: 'streams', data: { lease_until: Date.now() + ms },
+      where: { conditions: `closed = 0 AND name IN (${names.map(() => '?').join(', ')})`, params: names },
+    }).execute();
+    for (const name of names) this.#waiters.wake(name);
   }
 
   close(name: string): void {
@@ -114,16 +128,25 @@ export class RunStreams extends DurableObject<WorldEnv> {
   /**
    * Every chunk written so far from `start`, as one byte stream, after waiting up to one poll for
    * the first. `next` is the position after them, and `done` means the stream is closed, so no
-   * chunk follows. Each chunk is read when the reader has taken the one before it, and a chunk in
-   * R2 is piped from its object.
+   * chunk follows. `abandoned` means none follows either: there was none to send, and the writer's
+   * lease has run out. Each chunk is read when the reader has taken the one before it, and a chunk
+   * in R2 is piped from its object.
    */
   async stream(name: string, start: number): Promise<ChunkStream> {
-    await this.#waitForChunk(name, start);
+    if (!this.#lapsed(name)) await this.#waitForChunk(name, start);
     const { tailIndex, done } = this.info(name);
     const next = Math.max(start, tailIndex + 1);
     const { readable, writable } = new IdentityTransformStream();
     this.ctx.waitUntil(this.#pipeChunks(name, start, next, writable));
-    return { body: readable, next, done };
+    return { body: readable, next, done, abandoned: next === start && this.#lapsed(name) };
+  }
+
+  /** Whether the stream is open and its writer's lease has run out. */
+  #lapsed(name: string): boolean {
+    const row = findRow(this.#qb.fetchOne<'streams', 'closed' | 'lease_until'>({
+      tableName: 'streams', fields: ['closed', 'lease_until'], where: { conditions: 'name = ?', params: [name] },
+    }));
+    return row !== undefined && !row.closed && row.lease_until !== null && row.lease_until <= Date.now();
   }
 
   async #pipeChunks(name: string, start: number, end: number, writable: WritableStream<Uint8Array>): Promise<void> {

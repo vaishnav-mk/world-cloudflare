@@ -76,7 +76,8 @@ it('applies the baselines over tables created before Drizzle, keeping their rows
       read: 'SELECT key AS id FROM queue_dedup', newer: ['DROP TABLE inflight', 'DROP TABLE delivery_counts', 'DROP TABLE holds'] },
     { namespace: env.RUN_STREAMS, migrations: streamsMigrations,
       seed: `INSERT INTO streams (name) VALUES ('kept')`,
-      read: 'SELECT name AS id FROM streams', newer: ['DROP TABLE snapshot', 'DROP TABLE snapshot_parts'] },
+      read: 'SELECT name AS id FROM streams',
+      newer: ['DROP TABLE snapshot', 'DROP TABLE snapshot_parts', 'ALTER TABLE streams DROP COLUMN lease_until'] },
   ] as const;
   for (const { namespace, migrations, seed, read, newer } of cases) {
     const stub = (namespace as DurableObjectNamespace).getByName(crypto.randomUUID());

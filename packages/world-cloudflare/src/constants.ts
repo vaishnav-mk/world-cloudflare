@@ -58,6 +58,12 @@ export const MAX_TERMINAL_WAIT_MS = 30_000;
  * chunks and near 90 MiB with 32 MiB ones. A larger chunk fails its step instead.
  */
 export const STREAM_CHUNK_MAX_BYTES = 16 * 1_048_576;
+/**
+ * How long a stream passed across a step boundary waits for a chunk once no flow request holds its
+ * writer. Then its readers end with an error instead of waiting for chunks nobody will write. The
+ * request writing it renews the lease every third of this while it runs.
+ */
+export const STREAM_WRITER_LEASE_MS = 30_000;
 
 /**
  * Payloads and stream chunks above this size go to R2, and the Durable Objects keep a ref instead.

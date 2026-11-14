@@ -1,11 +1,15 @@
 import { integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import { bytes } from '../db/columns.js';
 
-/** One row per stream. `tail` is the last chunk's position, -1 while empty. */
+/**
+ * One row per stream. `tail` is the last chunk's position, -1 while empty. `lease_until` is when the
+ * writer's lease ends (ms since the epoch), null for a stream written with none.
+ */
 export const streams = sqliteTable('streams', {
   name: text('name').primaryKey(),
   tail: integer('tail').notNull().default(-1),
   closed: integer('closed').notNull().default(0),
+  lease_until: integer('lease_until'),
 });
 
 export const chunks = sqliteTable('chunks', {

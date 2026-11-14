@@ -1,6 +1,7 @@
-import { env } from 'cloudflare:test';
+import { createExecutionContext, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { PAYLOAD_INLINE_MAX_BYTES, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
+import { currentRequest, withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createStreamer } from '../packages/world-cloudflare/src/streams/streamer.js';
 
 const streams = createStreamer(env);
@@ -16,6 +17,12 @@ const concat = (parts: Uint8Array[]) => Buffer.concat(parts);
 /** Compares without handing vitest megabytes to diff. */
 const same = (actual: Uint8Array, expected: Uint8Array) => Buffer.from(actual).equals(Buffer.from(expected));
 const objects = async (runId: string) => (await env.PAYLOADS.list({ prefix: `runs/${runId}/` })).objects;
+
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+/** A name like the one the SDK gives a stream a step returns, which takes a writer lease. */
+const stepStream = () => `strm_${Array.from(crypto.getRandomValues(new Uint8Array(26)), (byte) => CROCKFORD[byte % 32]).join('')}`;
+const text = (bytes: Uint8Array | undefined) => new TextDecoder().decode(bytes);
+const ok = () => new Response('ok');
 
 async function pieces(stream: ReadableStream<Uint8Array>): Promise<Uint8Array[]> {
   const reader = stream.getReader();
@@ -152,5 +159,59 @@ describe('large stream chunks', () => {
     await streams.streams.close(runId, 'lost');
     await env.PAYLOADS.delete((await objects(runId)).map(({ key }) => key));
     await expect(pieces(await streams.streams.get(runId, 'lost'))).rejects.toThrow();
+  });
+});
+
+describe('abandoned streams', () => {
+  it('ends a reader once the request writing the stream ends with that work cut off', async () => {
+    const runId = crypto.randomUUID();
+    const name = stepStream();
+    const reader = (await streams.streams.get(runId, name)).getReader();
+    await withRequestContext(createExecutionContext(), { FLOW_BACKGROUND_BUDGET_MS: '100' }, async () => {
+      await streams.streams.write(runId, name, 'first');
+      // The rest of the stream is still being written when the budget runs out.
+      currentRequest()?.waitUntil(new Promise(() => {}));
+      return ok();
+    });
+    expect(text((await reader.read()).value)).toBe('first');
+    await expect(reader.read()).rejects.toThrow('ended without being closed');
+    expect(await streams.streams.getInfo(runId, name)).toEqual({ tailIndex: 0, done: false });
+  });
+
+  it('refuses a write from a request that has ended', async () => {
+    const runId = crypto.randomUUID();
+    const name = stepStream();
+    let late = Promise.resolve();
+    await withRequestContext(createExecutionContext(), { FLOW_BACKGROUND_BUDGET_MS: '50' }, async () => {
+      late = scheduler.wait(200).then(() => streams.streams.write(runId, name, 'late'));
+      currentRequest()?.waitUntil(late.catch(() => {}));
+      return ok();
+    });
+    await expect(late).rejects.toThrow('after its flow request ended');
+    expect(await streams.streams.getInfo(runId, name)).toEqual({ tailIndex: -1, done: false });
+  });
+
+  it('ends a reader once the writer lease runs out unrenewed, as when the writer is killed', async () => {
+    const runId = crypto.randomUUID();
+    await env.RUN_STREAMS.getByName(runId).write('killed', new TextEncoder().encode('only'), 50);
+    await scheduler.wait(100);
+    const reader = (await streams.streams.get(runId, 'killed')).getReader();
+    expect(text((await reader.read()).value)).toBe('only');
+    await expect(reader.read()).rejects.toThrow('ended without being closed');
+  });
+
+  it('keeps a reader waiting while the lease of a stream its request finished writing lasts', async () => {
+    const runId = crypto.randomUUID();
+    const name = stepStream();
+    await withRequestContext(createExecutionContext(), {}, async () => {
+      await streams.streams.write(runId, name, 'a');
+      return ok();
+    });
+    const reader = (await streams.streams.get(runId, name)).getReader();
+    expect(text((await reader.read()).value)).toBe('a');
+    const next = reader.read();
+    expect(await Promise.race([next.then(() => 'ended', () => 'ended'), scheduler.wait(200).then(() => 'waiting')])).toBe('waiting');
+    await streams.streams.close(runId, name);
+    expect((await next).done).toBe(true);
   });
 });

@@ -1,0 +1,1 @@
+ALTER TABLE `streams` ADD `lease_until` integer;

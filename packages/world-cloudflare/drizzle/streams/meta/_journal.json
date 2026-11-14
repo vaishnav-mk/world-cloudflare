@@ -15,6 +15,13 @@
       "when": 1792409526607,
       "tag": "0001_snapshots",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794624728070,
+      "tag": "0002_writer_leases",
+      "breakpoints": true
     }
   ]
 }

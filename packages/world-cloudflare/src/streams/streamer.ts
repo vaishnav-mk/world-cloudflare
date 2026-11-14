@@ -1,10 +1,21 @@
+import { StreamError } from '@workflow/errors';
 import type { GetChunksOptions, Streamer } from '@workflow/world';
-import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES } from '../constants.js';
+import {
+  DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES, STREAM_WRITER_LEASE_MS,
+} from '../constants.js';
 import { createPayloads, isPayloadRef, tooLarge } from '../lib/payloads.js';
+import { currentRequest, type FlowRequest } from '../lib/request-context.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import type { WorldEnv } from '../types.js';
 
 const encoder = new TextEncoder();
+/**
+ * The names the SDK gives the streams it passes across a step boundary, such as one a step returns.
+ * Only the flow request running that step writes one, so once that request is gone no chunk
+ * follows. A stream `getWritable()` names for the run takes writes from later steps, so it gets no
+ * writer lease and its readers wait for it as before.
+ */
+const STEP_STREAM_NAME = /^strm_[0-9A-HJKMNP-TV-Z]{26}$/;
 /** A chunk as bytes, checked against `STREAM_CHUNK_MAX_BYTES` before the World copies it anywhere. */
 function toChunk(chunk: string | Uint8Array): Uint8Array {
   const bytes = typeof chunk === 'string' ? encoder.encode(chunk) : chunk;
@@ -22,16 +33,57 @@ function toChunk(chunk: string | Uint8Array): Uint8Array {
 export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>): Streamer {
   const streamsOf = (runId: string) => transientAsWorldError(env.RUN_STREAMS.getByName(runId));
   const payloads = createPayloads(env.PAYLOADS);
+  /** The step streams each flow request writes and has not closed, by run. */
+  const writing = new WeakMap<FlowRequest, Map<string, Set<string>>>();
+
+  /**
+   * The writer lease a write to a step stream takes, held by the flow request writing it: renewed
+   * while the request runs, and ended at once if the request ends with that work cut off. A write
+   * outside a flow request, or to another stream, takes none.
+   */
+  function lease(runId: string, name: string): number | undefined {
+    const request = currentRequest();
+    if (request === undefined || !STEP_STREAM_NAME.test(name)) return undefined;
+    // The request's work is being cut off; a late chunk would only revive a stream it abandoned.
+    if (request.signal.aborted) throw new StreamError(`Stream ${name} was written after its flow request ended`);
+    let runs = writing.get(request);
+    if (runs === undefined) {
+      const held = new Map<string, Set<string>>();
+      const renew = (ms: number) => Promise.all([...held].filter(([, names]) => names.size > 0)
+        .map(([heldRunId, names]) => streamsOf(heldRunId).lease([...names], ms)));
+      // shortcut: a failed renewal waits for the next; the lease lapses only after three fail in a row.
+      const timer = setInterval(() => void renew(STREAM_WRITER_LEASE_MS).catch(() => {}), STREAM_WRITER_LEASE_MS / 3);
+      request.onEnd.push(async (cut) => {
+        clearInterval(timer);
+        // Cut-off work never finishes these streams, so their readers need not wait out the lease.
+        if (cut) await renew(0);
+      });
+      writing.set(request, held);
+      runs = held;
+    }
+    const names = runs.get(runId) ?? new Set<string>();
+    names.add(name);
+    runs.set(runId, names);
+    return STREAM_WRITER_LEASE_MS;
+  }
+
   return {
     streams: {
       write: async (runId, name, chunk) => {
-        await streamsOf(runId).write(name, await payloads.offload(runId, toChunk(chunk)));
+        const bytes = toChunk(chunk);
+        const leaseMs = lease(runId, name);
+        await streamsOf(runId).write(name, await payloads.offload(runId, bytes), leaseMs);
       },
       writeMulti: async (runId, name, chunks) => {
         const checked = chunks.map(toChunk);
-        await streamsOf(runId).writeMulti(name, await Promise.all(checked.map((bytes) => payloads.offload(runId, bytes))));
+        const leaseMs = lease(runId, name);
+        await streamsOf(runId).writeMulti(name, await Promise.all(checked.map((bytes) => payloads.offload(runId, bytes))), leaseMs);
       },
-      close: (runId, name) => streamsOf(runId).close(name),
+      close: (runId, name) => {
+        const request = currentRequest();
+        if (request !== undefined) writing.get(request)?.get(runId)?.delete(name);
+        return streamsOf(runId).close(name);
+      },
       list: (runId) => streamsOf(runId).list(),
       getInfo: (runId, name) => streamsOf(runId).info(name),
       getChunks: async (runId, name, { limit = DEFAULT_PAGE_LIMIT, cursor = '0' }: GetChunksOptions = {}) => {
@@ -69,6 +121,9 @@ export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>):
               const chunks = await stub.stream(name, next);
               await chunks.body.pipeTo(writable, { preventClose: true });
               if (chunks.done) break;
+              if (chunks.abandoned) {
+                throw new StreamError(`Stream ${name} ended without being closed: its writer stopped`);
+              }
               next = chunks.next;
             }
             await writable.close();
