@@ -423,7 +423,7 @@ describe('World v5 contract (workerd bindings)', () => {
   it('advertises exactly the capabilities it implements', () => {
     expect(world.capabilities).toEqual({
       hookRetention: { active: true }, atomicStartHook: { active: true }, hookResumeDedup: true, resolvedHookResume: true, inBandFence: true, maxConcurrency: true,
-      hookForceClaim: true, dynamicWorkflowCode: true,
+      hookForceClaim: true, dynamicWorkflowCode: true, deploymentAffinity: true,
     });
   });
 

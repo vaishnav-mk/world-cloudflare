@@ -262,7 +262,9 @@ describe('durability fanout', () => {
   });
 
   it('retains delayed delivery and rejects another deployment', async () => {
-    await expect(queue.queue(queueName, { runId: 'run-2' }, { deploymentId: 'old-v0' })).rejects.toThrow('unavailable');
+    const unreachable = await queue.queue(queueName, { runId: 'run-2' }, { deploymentId: 'old-v0' }).catch((error: unknown) => error);
+    expect(queue.isDeploymentUnavailableError!(unreachable)).toBe(true);
+    expect(queue.isDeploymentUnavailableError!(new Error('Deployment old-v0 is unavailable'))).toBe(false);
     const id = (await queue.queue(queueName, { runId: 'run-2' }, { delaySeconds: 1 })).messageId;
     await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor('run-2', { runId: 'run-2' })));
     expect(await env.SINK.getByName('sink').received()).not.toContain(id);

@@ -1,3 +1,4 @@
+import { WorkflowWorldError } from '@workflow/errors';
 import { parse, stringify } from 'devalue';
 import {
   MessageId, QueuePrefix, ValidQueueName,
@@ -64,6 +65,10 @@ export function createQueue(env: QueueEnv): HoldingQueue {
         if ('error' in ready) throw new Error(ready.error);
         return holdMessage(() => env.QUEUE_SHARD.getByName(ready.shard), queueName, message, ready.request, leaseSeconds * 1000);
       }
+      const target = rest.deploymentId;
+      if (target !== undefined && !reachable(env, target)) {
+        throw new WorkflowWorldError(`Deployment ${target} is unavailable`, { status: 404, code: DEPLOYMENT_UNAVAILABLE });
+      }
       const [result] = await queueBatch(queueName, [{ message, opts: rest }]);
       if (result === undefined || result.error !== undefined) throw new Error(result?.error ?? 'Message was not enqueued');
       return hold === undefined
@@ -72,6 +77,9 @@ export function createQueue(env: QueueEnv): HoldingQueue {
     },
 
     queueBatch,
+
+    // Only a deployment with no executor to run it is definitely unreachable.
+    isDeploymentUnavailableError: (error) => WorkflowWorldError.is(error) && error.code === DEPLOYMENT_UNAVAILABLE,
 
     createQueueHandler: (prefix, handler) => async (request) => {
       const queueName = request.headers.get('x-vqs-queue-name');
@@ -104,6 +112,14 @@ export function createQueue(env: QueueEnv): HoldingQueue {
   };
 }
 
+/** `WorkflowWorldError.code` for a message to a deployment that has no executor here. */
+const DEPLOYMENT_UNAVAILABLE = 'DEPLOYMENT_UNAVAILABLE';
+
+/** Whether this Worker runs `deploymentId`'s flows, itself or on a retained executor. */
+function reachable(env: Pick<QueueEnv, 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>, deploymentId: string): boolean {
+  return deploymentId === env.DEPLOYMENT_ID || executorFor(env, deploymentId) !== undefined;
+}
+
 /** The legacy store answers outbox calls for a run it lacks, such as one whose `run_created` is still in flight. */
 const answersUnknown = { answersUnknown: true };
 
@@ -112,7 +128,7 @@ async function prepare(
   env: QueueEnv, queueName: string, message: QueuePayload,
   { deploymentId: target, delaySeconds: delay = 0, idempotencyKey }: QueueOptions,
 ): Promise<Ready | { error: string }> {
-  if (target && target !== env.DEPLOYMENT_ID && !executorFor(env, target)) return { error: `Deployment ${target} is unavailable` };
+  if (target && !reachable(env, target)) return { error: `Deployment ${target} is unavailable` };
   if (!Number.isFinite(delay) || delay < 0) return { error: 'Invalid queue delay' };
   const key = idempotencyKey ? `${queueName}:${idempotencyKey}` : undefined;
   const encoded = stringify(message);

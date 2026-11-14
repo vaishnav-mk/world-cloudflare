@@ -35,6 +35,9 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       hookForceClaim: true,
       // The code is stored with the run like any payload, in R2 once it is large.
       dynamicWorkflowCode: true,
+      // A deployment ID names one release, run by this Worker or by its own retained executor, so a
+      // delivery that reached another deployment goes back to its run's.
+      deploymentAffinity: true,
     },
     // A dynamic run's code too large for its run_created goes to R2 first, under the run's prefix.
     uploadDynamicWorkflowCode: async (runId, { code }) => {
