@@ -111,8 +111,13 @@ export class QueueShard extends DurableObject<WorldEnv> {
     id: string, queueName: string, encoded: string, delayMs: number,
     targetDeployment?: string, deduplicationKey?: string, payloadDigest?: string,
   ): Promise<{ id: string; fresh: boolean }> {
-    const [result] = await this.enqueueMany([{ id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest }]);
-    if (result === undefined || 'error' in result) throw new Error(result?.error ?? 'Message was not enqueued');
+    return this.#enqueueOne({ id, queueName, encoded, delayMs, targetDeployment, deduplicationKey, payloadDigest });
+  }
+
+  /** Enqueues one message, or throws why it was not. */
+  async #enqueueOne(request: EnqueueRequest): Promise<{ id: string; fresh: boolean }> {
+    const [result] = await this.enqueueMany([request]);
+    if ('error' in result) throw new Error(result.error);
     return result;
   }
 
@@ -153,7 +158,6 @@ export class QueueShard extends DurableObject<WorldEnv> {
    */
   async hold(request: EnqueueRequest): Promise<EnqueueResult> {
     const [result] = await this.enqueueMany([request]);
-    if (result === undefined) return { error: 'Message was not enqueued' };
     if ('fresh' in result && result.fresh) this.#holds.add({ ...request, id: result.id }, Date.now() + request.delayMs);
     return result;
   }
@@ -177,8 +181,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
     if (message === undefined) return;
     if (delayMs !== null) {
       if (handoff) this.#counts.handoff(id);
-      const [result] = await this.enqueueMany([{ ...message, id: crypto.randomUUID(), delayMs, messageId: id }]);
-      if (result === undefined || 'error' in result) throw new Error(result?.error ?? 'Held message was not released');
+      await this.#enqueueOne({ ...message, id: crypto.randomUUID(), delayMs, messageId: id });
     }
     this.#holds.settle(id);
   }
@@ -248,8 +251,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
     for (const { id, ...message } of this.#inflight.all()) {
       // A new fanout ID: the cut-off delivery stays claimed until it times out, and the SDK tolerates
       // the copy. The copy keeps the message's ID, so its delivery counts as a redelivery.
-      const [result] = await this.enqueueMany([{ ...message, id: crypto.randomUUID(), messageId: id }]);
-      if (result === undefined || 'error' in result) throw new Error(result?.error ?? 'Orphan was not enqueued');
+      await this.#enqueueOne({ ...message, id: crypto.randomUUID(), messageId: id });
       this.#inflight.remove(id);
     }
   }
