@@ -113,7 +113,7 @@ Runs written before the index reach it through a one-time backfill per store, 20
 
 Durable Object SQLite documents a 2 MB value limit and RPC a 32 MiB message limit, so the World client, in the calling Worker, keeps large values in R2:
 - **Writes.** Each binary `eventData` field and stream chunk over 1 MiB goes to `PAYLOADS` at `runs/<runId>/<uuid>` before the write, and the object stores a ref. A serialized payload over 18 MiB, or a stream chunk over 16 MiB, is rejected with a 413 marked `fatal`, so the step fails instead of running the workflow out of memory.
-- **Reads.** Every read swaps refs back for their bytes; `resolveData: 'none'` reads nothing from R2. Stream reads pipe each chunk from R2 as the reader takes it, and `getChunks` pages stop at 4 MiB.
+- **Reads.** Every read swaps refs back for their bytes; `resolveData: 'none'` reads nothing from R2. Stream reads pipe each chunk from R2 as the reader takes it, in 1 MiB pieces, and `getChunks` pages stop at 4 MiB.
 - **Not cleaned up.** R2 objects are never deleted, including ones left by writes that failed.
 
 For more than one payload holds, have a step return a `ReadableStream` of `type: 'bytes'` and pass it to the next step. The workflow holds only a handle, and each chunk goes to R2 on its own:

@@ -17,7 +17,7 @@ Vercel's column is its documented limits.
 | Replay | 240 s budget | A QuickJS snapshot restore took 81 ms at 30,000 events; pauses between invocations stayed at 4 to 8 s | Workers, `a72251d` |
 | One payload | 50 MB | 16 MiB step output with either engine; 20 MiB ran out of memory. Larger payloads are rejected, and larger data goes in a [byte stream](#streams) | Workers, `3f15876` |
 | One stream chunk | 10 MB | 16 MiB (`STREAM_CHUNK_MAX_BYTES`); 32 MiB chunks worked and 64 MiB ran out of memory | Workers, `e888166` |
-| One stream | Not documented | 1 GiB in 8 MiB chunks on Workers; 4 GiB in 64 MiB chunks locally, every byte checked | Workers, `e888166`; local, `25028b4` |
+| One stream | Not documented | 1 GiB in 8 MiB chunks on Workers; 4 GiB in 64 MiB chunks locally, every byte checked. A reading step on SDK 5.5.0 holds about 40 MiB per GiB it reads ([below](#streams)) | Workers, `e888166`; local, `25028b4`, `819e11b` |
 | Run creations | 1,000 per second | 321 per second, 82 per second end to end ([below](#run-creation)) | Workers, `3fdbf00` |
 | 1,000 parallel steps | Not documented | 66 to 74 s | Workers, `c4cecd7` |
 
@@ -69,9 +69,19 @@ Locally under `wrangler dev`, `streamBytes(totalMiB, chunkMiB)` writes a pattern
 | 1 GiB in one chunk | 13.3 s | 5.3 s, 195 MiB/s |
 | 4 GiB in 64 MiB chunks | 54 s | 19.6 s, 209 MiB/s |
 
-The writing step ran at about 130 MiB/s, most of it filling the pattern a byte at a time. A reading step gets 4 KiB pieces, because the SDK's reader is a byte stream without `autoAllocateChunkSize`, which with the byte checks keeps it near 200 MiB/s at any chunk size. A JavaScript byte stream without `autoAllocateChunkSize` is read 4 KiB at a time, and each read becomes a chunk: 256 MiB of 4 KiB chunks wrote in 1.1 s and read back in 2.1 s (`25028b4`).
+The writing step ran at about 130 MiB/s, most of it filling the pattern a byte at a time. A JavaScript byte stream without `autoAllocateChunkSize` is read 4 KiB at a time, and each read becomes a chunk: 256 MiB of 4 KiB chunks wrote in 1.1 s and read back in 2.1 s (`25028b4`).
 
-Live memory, locally, with `node scripts/perf/memory.mjs <engine> streamBytes 256x<chunk>`: the most heap plus external memory a garbage collection left, so memory still in use (`e888166`).
+`streams.get` reads each `RunStreams` stream 1 MiB at a time (`STREAM_READ_PIECE_BYTES`) and hands the reader 1 MiB pieces. Before `6f9051c` it read 4 KiB at a time, each read a wait on I/O; through the World alone, 512 MiB read at 610 MiB/s that way and 3,200 MiB/s now. The reading step still gets 4 KiB pieces, because workerd reads the SDK's byte stream 4 KiB at a time, but those reads come from memory. Reading steps of `streamBytes`, locally:
+
+| Stream | QuickJS, `3cdb4fc` | QuickJS, `819e11b` | Node engine, `3cdb4fc` | Node engine, `819e11b` |
+| --- | --- | --- | --- | --- |
+| 256 MiB in 16 MiB chunks | 226 MiB/s | 394 MiB/s | 212 MiB/s | 386 MiB/s |
+| 1 GiB in 8 MiB chunks | 196 MiB/s | 319 MiB/s | 195 MiB/s | 317 MiB/s |
+| 2 GiB in 16 MiB chunks | 191 MiB/s | 307 MiB/s | 190 MiB/s | 306 MiB/s |
+
+Before the stream changes of `a61d88f` to `4faa354`, `8e5bcc2` read 1 GiB in 8 MiB chunks at 194 MiB/s with QuickJS and 192 MiB/s with the node engine, so the slowdown measured on Workers after them (15 MiB/s to 4 MiB/s with QuickJS) does not show locally. Each R2 upload now has its next 1 MiB part queued while one is sent (`819e11b`), so it does not wait on the isolate between parts; local R2 writes about 155 MiB/s either way, so only Workers can show the difference.
+
+Live memory, locally, with `node scripts/perf/memory.mjs <engine> streamBytes 256x<chunk>`: the most heap plus external memory a garbage collection left (`e888166`). The script now reports that as `peakMiB`, and as `liveMiB` only after full collections, because a scavenge leaves the old generation's garbage in place.
 
 | Chunk | QuickJS | Node engine |
 | --- | --- | --- |
@@ -82,6 +92,15 @@ Live memory, locally, with `node scripts/perf/memory.mjs <engine> streamBytes 25
 | 64 MiB | 228 to 236 MiB | 157 to 221 MiB |
 
 16 MiB is the largest of these that stays near half the 128 MB limit with both engines, so the World rejects larger chunks with a `fatal` 413. On Workers, 32 MiB chunks worked for a 32 MiB stream and failed for 4 GiB with QuickJS, and 64 MiB chunks failed with both engines (`e888166`).
+
+A reading step's memory grows with the bytes it reads, about 40 MiB per GiB with either engine. `liveMiB` for `streamBytes` in 16 MiB chunks, locally on `819e11b`, with the published SDK and with a local copy of it whose per-read race (below) is removed:
+
+| Stream | QuickJS | QuickJS, race removed | Node engine | Node engine, race removed |
+| --- | --- | --- | --- | --- |
+| 2 GiB | 133 MiB | 71 MiB | 125 MiB | 63 MiB |
+| 4 GiB | 224 MiB | 71 MiB | 215 MiB | 63 MiB |
+
+The SDK holds it, not the World. `flushablePipe` in `@workflow/core` 5.5.0, which pipes the World's stream into the reading step, races every read against its sink's `closed` promise. Each race adds a reaction to that promise, kept until the stream ends, and with 4 KiB reads that is about 150 bytes per 4 KiB. A 4 GiB read in one step holds about 150 MiB more, past the 128 MB isolate limit, which matches `streamBytes:4096x16` running out of memory on Workers with both engines (`35fd052`). Without the race, memory stays flat from 2 GiB to 4 GiB. The World on `3cdb4fc` held the same: 140 MiB with QuickJS and 123 MiB with the node engine at 2 GiB with the published SDK, 55 to 71 MiB with QuickJS without the race. So the World holds memory flat in the total size, and `test/streams.test.ts` checks that it keeps at most two 16 MiB chunks while writing 512 MiB and two 1 MiB pieces while reading it back. The upstream fix is to watch `closed` once per pipe instead of once per read.
 
 A step's returned stream is written after the step completes, as `waitUntil` work, which Workers cancels 30 s after an invocation ends: that cut a 1 GiB stream off at 128 to 416 MiB on Workers (`e888166`). So a flow request waits for its background work before it answers, for up to 13.5 minutes after its delivery started (`FLOW_BACKGROUND_BUDGET_MS`). `node scripts/remote-limits.mjs streamSlowly:120` writes a stream for two minutes after its step returns.
 
