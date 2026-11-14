@@ -113,12 +113,14 @@ export function queueShardFor(runId: string, payload: unknown, key?: string): st
 /**
  * The runner (`Runner`) that runs a run's workflow deliveries and invocations, so a run has one.
  * An epoch has as many runners as queue shards, and a run's runner has its queue shard's index, so
- * that shard hands its replays to one runner. With `key`, the runner for another of the run's
- * messages, such as a step, which any runner of the epoch may run.
+ * that shard hands its replays to one runner; with a queue count that is a multiple of the store
+ * count, a runner's runs all live on one store shard, which creates it (`StoreContext.placeRunner`).
+ * With `key`, the runner for another of the run's messages, such as a step: any of the epoch's step
+ * runners, named apart so that a step never creates a run's runner before its store does.
  */
-export function runnerShardFor(runId: string, key = runId): string {
+export function runnerShardFor(runId: string, key?: string): string {
   const { epoch, tag } = epochOf(runId);
-  return `${RUNNER_NAME}-${tag}${bucket(key, epoch.queue)}`;
+  return key === undefined ? `${RUNNER_NAME}-${tag}${bucket(runId, epoch.queue)}` : `${RUNNER_NAME}-steps-${tag}${bucket(key, epoch.queue)}`;
 }
 
 /** Every store shard in every epoch. */

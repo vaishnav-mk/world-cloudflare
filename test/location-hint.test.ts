@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { afterAll, describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import { createWorld, drainOutbox } from '@workflow/world-cloudflare';
-import { parseLocationHint } from '../packages/world-cloudflare/src/lib/shards.js';
+import { parseLocationHint, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 
 // wrangler.test.jsonc sets LOCATION_HINT to weur. The Durable Objects run in this isolate, so
 // patching the namespaces' shared prototype sees their calls too.
@@ -54,5 +54,22 @@ describe('LOCATION_HINT', () => {
       expect(ours.some(({ name }) => name.startsWith(prefix)), prefix).toBe(true);
     }
     expect(ours.filter(({ options }) => (options as { locationHint?: string } | undefined)?.locationHint !== 'weur')).toEqual([]);
+  });
+
+  it("creates a run's runner from the run's store without the hint, before the run's start reaches it", async () => {
+    const { run: { runId } } = await world.events.create(null, {
+      eventType: 'run_created', eventData: { deploymentId: 'test-v1', workflowName: 'placed', input: bytes('input') },
+    });
+    const from = calls.length;
+    const queueName = `${getQueueTopicPrefix('workflow')}placed` as ValidQueueName;
+    const { messageId } = await world.queue(queueName, {
+      runId, runInput: { input: bytes('input'), deploymentId: 'test-v1', workflowName: 'placed', specVersion: 8 },
+    });
+    await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(messageId);
+
+    const runner = calls.slice(from).filter(({ name }) => name === runnerShardFor(runId));
+    // The store's call, then the queue shard's hand-off, which finds the runner where it is.
+    expect(runner.length).toBeGreaterThan(1);
+    expect(runner[0]?.options).toBeUndefined();
   });
 });

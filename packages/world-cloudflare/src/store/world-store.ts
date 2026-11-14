@@ -46,7 +46,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
     // Reads `this.env` at call time, so a test can swap the bindings of a live object.
-    this.#store = new StoreContext(ctx, env.QUEUE_SHARD, (name) =>
+    this.#store = new StoreContext(ctx, env.QUEUE_SHARD, env.RUNNER, (name) =>
       (name === ctx.id.name ? this : transientAsWorldError(this.env.WORLD_STORE.getByName(name, objectOptions()))));
     migrateOnStart(ctx, migrations);
     if (holdsRuns(this.#store.name)) ctx.blockConcurrencyWhile(() => this.#store.feed.resume());
@@ -281,7 +281,7 @@ export class WorldStore extends DurableObject<WorldEnv> {
    */
   async drainOutbox(): Promise<number> {
     const store = this.#store;
-    const drained = await dispatch.drainOutbox(store.db, store.outbox,
+    const drained = await dispatch.drainOutbox(store,
       (runId, payload, key) => this.env.QUEUE_SHARD.getByName(queueShardFor(runId, payload, key), objectOptions()));
     await store.pushReleases();
     for (const token of store.takeovers.due(Date.now())) {

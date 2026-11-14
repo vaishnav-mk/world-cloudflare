@@ -1,5 +1,6 @@
 import { EVENT_PAGE_READS, STORE_NAME } from '../constants.js';
 import { Semaphore } from '../lib/semaphore.js';
+import { runnerShardFor } from '../lib/shards.js';
 import { Waiters } from '../lib/waiters.js';
 import { shardPusher } from '../queue/push.js';
 import type { WorldEnv } from '../types.js';
@@ -34,8 +35,13 @@ export class StoreContext {
   readonly pageReads = new Semaphore(EVENT_PAGE_READS);
   /** The token release push in flight, if any. */
   #pushing: Promise<void> | undefined;
+  readonly #runners: WorldEnv['RUNNER'];
+  /** The runners this instance has created or found, by name. */
+  readonly #placed = new Map<string, Promise<void>>();
 
-  constructor(readonly ctx: DurableObjectState, queueShards: WorldEnv['QUEUE_SHARD'], readonly peer: (name: string) => Peer) {
+  constructor(
+    readonly ctx: DurableObjectState, queueShards: WorldEnv['QUEUE_SHARD'], runners: WorldEnv['RUNNER'], readonly peer: (name: string) => Peer,
+  ) {
     const name = ctx.id.name;
     if (name === undefined) throw new Error('World stores are reached by name');
     const sql = ctx.storage.sql;
@@ -50,6 +56,27 @@ export class StoreContext {
     this.runIndex = new RunIndex(sql, this.db, name);
     this.feed = new IndexFeed(this);
     this.pushQueue = shardPusher(queueShards);
+    this.#runners = runners;
+  }
+
+  /**
+   * Creates a run's runner near this store before the run's first delivery reaches it. The run's
+   * workflow code runs where its runner is and calls this store a few times per step, while
+   * `LOCATION_HINT` puts each object anywhere in its region, so the runner is reached without the
+   * hint here, and an object is created near its first caller. A runner that exists stays where it
+   * is. Placement only speeds runs up, so a failure here is logged, not thrown.
+   */
+  placeRunner(runId: string): Promise<void> {
+    const name = runnerShardFor(runId);
+    let placed = this.#placed.get(name);
+    if (placed === undefined) {
+      placed = this.#runners.getByName(name).wake().catch((error: unknown) => {
+        this.#placed.delete(name);
+        console.error('Could not create a runner near its store', { runner: name, error });
+      });
+      this.#placed.set(name, placed);
+    }
+    return placed;
   }
 
   /** A store shard answers only for its own runs. The legacy store answers for any run, as before. */

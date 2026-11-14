@@ -98,6 +98,8 @@ export function markPublished(store: StoreContext, kind: MessageKind, runId: str
  */
 export async function dispatch(store: StoreContext, entries: QueueDispatch[]): Promise<EnqueueResult[]> {
   const slots = entries.map(({ claim }) => pendingSlotFor(store, claim));
+  // A start is its run's first delivery.
+  await Promise.all(entries.flatMap(({ claim }) => (claim.kind === MessageKind.Start ? [store.placeRunner(claim.runId)] : [])));
   const results = await store.pushQueue(entries);
   for (const [index, { claim }] of entries.entries()) {
     const slot = slots[index];
@@ -139,7 +141,8 @@ async function reopen(store: StoreContext, runId: string, at: number, kind: Disp
 }
 
 /** Publishes due outbox rows. Returns how many rows were due. */
-export async function drainOutbox(db: Db, outbox: Outbox, shardFor: ShardFor): Promise<number> {
+export async function drainOutbox(store: StoreContext, shardFor: ShardFor): Promise<number> {
+  const { db, outbox } = store;
   const due = outbox.due(Date.now(), OUTBOX_DRAIN_BATCH);
   for (const row of due) {
     const plan = planFor(db, outbox, row);
@@ -151,6 +154,7 @@ export async function drainOutbox(db: Db, outbox: Outbox, shardFor: ShardFor): P
         outbox.postpone(row, Date.now() + WAIT_RETRY_DELAY_MS);
         break;
       case DispatchAction.Publish:
+        if (row.kind === EventType.RunCreated) await store.placeRunner(row.run_id);
         await publish(outbox, shardFor, row, plan.message, plan.stillOwed);
         break;
     }

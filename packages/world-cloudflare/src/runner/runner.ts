@@ -52,6 +52,9 @@ export class Runner extends DurableObject<WorldEnv> {
     });
   }
 
+  /** Does nothing: a store shard calls it to create the runner near itself (`StoreContext.placeRunner`). */
+  wake(): void {}
+
   /** Runs deliveries side by side, such as steps, and returns each one's outcome in order. */
   consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {
     return this.env.CONSUMER.consume(deliveries);
