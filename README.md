@@ -111,14 +111,14 @@ To browse runs in the SDK's web UI, set `WORLD_RPC_TOKEN` on the Worker (`wrangl
 
 ## Limits
 
-Measured on Workers; [limits](docs/limits.md) has every number with the build it was measured on.
+Measured on Workers, with the objects and the load in one region. [Limits](docs/limits.md) compares them with Vercel's and gives the build of each.
 
-- **Long runs.** 30,000 sequential steps (90,003 events) in one run, in 23 minutes. The World sets no event cap.
-- **Payloads.** 16 MiB step outputs; the World rejects serialized payloads over 18 MiB. Larger data goes in byte streams, in chunks of up to 32 MiB: 1 GiB streams worked on Workers, 4 GiB locally ([streams](docs/limits.md#streams)).
-- **Throughput.** 321 runs created per second, 82 per second end to end, with 512 store and 1,024 queue shards ([run creation](docs/limits.md#run-creation)). 1,000 parallel steps in 66 to 74 s.
-- **CPU.** A step that exceeds the CPU limit is retried until the queue gives up. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
-- **Not done.** Finished runs and R2 payloads are kept forever, the encryption secret cannot be rotated, and steps run at least once, so give their side effects idempotency keys. [Contract parity](docs/contract-parity.md) lists what else is missing.
-- **SDK internals.** `@workflow/world-cloudflare/build` relies on a few internals of `@workflow/builders` and `@workflow/core` 5.5.0 (see its comments); check it when upgrading the SDK.
+- 4,220 runs created per second, over 100,000 runs. 1,000 parallel steps in one run in 7 to 26 s.
+- 30,000 sequential steps (90,003 events) in one run; the World sets no event cap. Replay after 10,000 steps took 185 ms with QuickJS and 3.9 s native.
+- 16 MiB step outputs, below Vercel's 50 MB; the World rejects serialized payloads over 18 MiB. Larger data goes in byte streams, in chunks of up to 32 MiB: 1 GiB streams worked, every byte checked ([streams](docs/limits.md#streams)).
+- A step that exceeds the CPU limit is retried until the queue gives up. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
+- Finished runs and R2 payloads are kept forever, the encryption secret cannot be rotated, and steps run at least once, so give their side effects idempotency keys. [Contract parity](docs/contract-parity.md) lists what else is missing.
+- `@workflow/world-cloudflare/build` relies on a few internals of `@workflow/builders` and `@workflow/core` 5.5.0 (see its comments); check it when upgrading the SDK.
 
 ## Docs
 
