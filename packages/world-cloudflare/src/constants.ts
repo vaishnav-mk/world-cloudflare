@@ -52,6 +52,13 @@ export const STREAM_READ_BATCH = 100;
  * would otherwise pass the 32 MiB RPC limit.
  */
 export const STREAM_PAGE_MAX_BYTES = 4 * 1_048_576;
+/**
+ * `streams.get` reads a `RunStreams` object's stream this many bytes at a time, and hands its
+ * reader pieces this size, short only where the chunks written so far end. Read without a buffer,
+ * the runtime reads 4 KiB at a time, each read a wait on I/O; locally the World read 610 MiB/s that
+ * way and 3,200 MiB/s with 1 MiB pieces. A reader holds about two pieces.
+ */
+export const STREAM_READ_PIECE_BYTES = 1_048_576;
 export const MAX_TERMINAL_WAIT_MS = 30_000;
 /**
  * The largest stream chunk the World accepts. The writing step's isolate holds a few chunks at once

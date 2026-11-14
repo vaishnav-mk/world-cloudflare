@@ -1,6 +1,8 @@
 import { createExecutionContext, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { PAYLOAD_INLINE_MAX_BYTES, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
+import {
+  PAYLOAD_INLINE_MAX_BYTES, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES, STREAM_READ_PIECE_BYTES,
+} from '../packages/world-cloudflare/src/constants.js';
 import { currentRequest, withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createStreamer } from '../packages/world-cloudflare/src/streams/streamer.js';
 
@@ -79,8 +81,9 @@ describe('large stream chunks', () => {
     const read: Uint8Array[] = [];
     for (let result = await first; !result.done; result = await reader.read()) read.push(result.value);
     expect(same(concat(read), concat(written))).toBe(true);
-    // No piece is a whole chunk from R2.
-    expect(Math.max(...read.map(({ byteLength }) => byteLength))).toBeLessThan(2 * MiB);
+    // No piece is a whole chunk from R2, and a short one ends the chunks written so far.
+    expect(Math.max(...read.map(({ byteLength }) => byteLength))).toBe(STREAM_READ_PIECE_BYTES);
+    expect(read.filter(({ byteLength }) => byteLength < STREAM_READ_PIECE_BYTES).length).toBeLessThanOrEqual(2);
     expect(await objects(runId)).toHaveLength(2);
     // A negative start counts back from the end.
     expect(same(concat(await pieces(await streams.streams.get(runId, 'big', -2))), concat(written.slice(1)))).toBe(true);

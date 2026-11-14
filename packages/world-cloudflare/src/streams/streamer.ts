@@ -1,7 +1,8 @@
 import { StreamError } from '@workflow/errors';
 import type { GetChunksOptions, Streamer } from '@workflow/world';
 import {
-  DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES, STREAM_WRITER_LEASE_MS,
+  DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES, STREAM_READ_PIECE_BYTES,
+  STREAM_WRITER_LEASE_MS,
 } from '../constants.js';
 import { createPayloads, isPayloadRef, tooLarge } from '../lib/payloads.js';
 import { currentRequest, type FlowRequest } from '../lib/request-context.js';
@@ -27,8 +28,9 @@ function toChunk(chunk: string | Uint8Array): Uint8Array {
 
 /**
  * The World's `Streamer`. Each run's streams live in that run's `RunStreams` object. Large chunks
- * go to R2 first, and the object keeps a ref to each. `get` joins the object's streams of the
- * chunks written so far, one after another, and a chunk in R2 is piped from its object body.
+ * go to R2 first, and the object keeps a ref to each. `get` reads the object's streams of the
+ * chunks written so far, one after another, in `STREAM_READ_PIECE_BYTES` pieces, and a chunk in R2
+ * is piped from its object body.
  */
 export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>): Streamer {
   const streamsOf = (runId: string) => transientAsWorldError(env.RUN_STREAMS.getByName(runId));
@@ -113,26 +115,36 @@ export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>):
         const stub = streamsOf(runId);
         const start = startIndex < 0 ? Math.max(0, (await stub.info(name)).tailIndex + 1 + startIndex) : startIndex;
         if (!Number.isSafeInteger(start) || start < 0) throw new RangeError('Invalid stream start index');
-        const { readable, writable } = new IdentityTransformStream();
-        // Ends with the stream, or with an error once the reader cancels or a read fails.
-        const follow = async () => {
-          try {
-            for (let next = start; ;) {
-              const chunks = await stub.stream(name, next);
-              await chunks.body.pipeTo(writable, { preventClose: true });
-              if (chunks.done) break;
-              if (chunks.abandoned) {
-                throw new StreamError(`Stream ${name} ended without being closed: its writer stopped`);
+        let next = start;
+        let cancelled = false;
+        // The object's stream of the chunks written so far from `next`, while it is being read.
+        let chunks: { reader: ReadableStreamBYOBReader; next: number; done: boolean; abandoned: boolean } | undefined;
+        return new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            for (;;) {
+              if (chunks === undefined) {
+                const { body, ...rest } = await stub.stream(name, next);
+                if (cancelled) return body.cancel();
+                chunks = { reader: body.getReader({ mode: 'byob' }), ...rest };
               }
+              const piece = await chunks.reader.read(new Uint8Array(STREAM_READ_PIECE_BYTES), { min: STREAM_READ_PIECE_BYTES });
+              if (!piece.done) {
+                // A short piece ends the chunks written so far; copied, so it does not hold a whole buffer.
+                controller.enqueue(piece.value.byteLength === STREAM_READ_PIECE_BYTES ? piece.value : piece.value.slice());
+                return;
+              }
+              if (chunks.done) return controller.close();
+              if (chunks.abandoned) throw new StreamError(`Stream ${name} ended without being closed: its writer stopped`);
               next = chunks.next;
+              chunks = undefined;
             }
-            await writable.close();
-          } catch (error) {
-            await writable.abort(error).catch(() => {});
-          }
-        };
-        void follow();
-        return readable;
+          },
+          // Stops the object's reads at the next chunk.
+          cancel: (reason) => {
+            cancelled = true;
+            return chunks?.reader.cancel(reason);
+          },
+        });
       },
     },
   };
