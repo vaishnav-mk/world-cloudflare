@@ -169,6 +169,8 @@ export const FLOW_BACKGROUND_BUDGET_MS = FLOW_ATTEMPT_TIMEOUT_MS - 30_000;
 export const DEFAULT_SHARD_EPOCHS: readonly ShardEpoch[] = [{ from: 0, store: 128, queue: 256 }];
 /** Queue shards the cron wakes per tick. With more shards, each tick wakes the next slice instead. */
 export const CRON_WAKES_PER_TICK = 512;
+/** How often a flow request reads again which steps of a run are dispatched (`createQueue`). */
+export const DISPATCHED_STEPS_READ_MS = 1_000;
 /** Messages in one `queueBatch` a flow request's single publishes are gathered into (`createQueue`). */
 export const PUBLISH_BATCH_MAX = 500;
 /** Store calls in flight at once when a cross-run read, such as `runs.list`, asks every store. */

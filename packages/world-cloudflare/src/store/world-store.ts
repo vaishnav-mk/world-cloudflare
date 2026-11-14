@@ -225,6 +225,10 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return dispatch.dispatch(this.#store, entries);
   }
 
+  async dispatchedSteps(runId: string): Promise<string[]> {
+    return dispatch.dispatchedSteps(this.#store, runId);
+  }
+
   /** Settles the outbox rows of messages the queue accepted, in one call. */
   async markDispatchesPublished(published: { claim: OutboxClaim; slot: number }[]): Promise<void> {
     for (const { claim, slot } of published) dispatch.markPublished(this.#store, claim.kind, claim.runId, slot);

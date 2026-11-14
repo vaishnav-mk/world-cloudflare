@@ -31,8 +31,11 @@ describe('v5 event storage in SQLite DO', () => {
       eventType: 'step_created', correlationId: `drained-${index}`, eventData: { stepName: 'double', input: bytes('2') },
     })));
     expect(await owed(runId)).toBe(60);
-    await env.WORLD_STORE.getByName(storeShardFor(runId)).drainOutbox();
+    const stub = env.WORLD_STORE.getByName(storeShardFor(runId));
+    expect(await stub.dispatchedSteps(runId)).toEqual([]);
+    await stub.drainOutbox();
     expect(await owed(runId)).toBe(0);
+    expect((await stub.dispatchedSteps(runId)).sort()).toEqual(Array.from({ length: 60 }, (_, index) => `drained-${index}`).sort());
   });
 
   it('recovers a committed hook event when no SDK queue publish follows', async () => {

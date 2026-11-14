@@ -55,6 +55,34 @@ describe('durability fanout', () => {
     expect(calls).toEqual([PUBLISH_BATCH_MAX, 1, 1, 1]);
   });
 
+  it("answers a flow request's publish of a dispatched step itself, reading the run's dispatched steps once", async () => {
+    const calls = { reads: 0, dispatched: [] as string[] };
+    const stores = { getByName: () => ({
+      dispatchedSteps: async () => {
+        calls.reads++;
+        return ['done'];
+      },
+      dispatch: async (entries: { request: { id: string; encoded: string } }[]) => entries.map(({ request }) => {
+        calls.dispatched.push(request.id);
+        return { id: request.id, fresh: true };
+      }),
+    }) } as unknown as WorldEnv['WORLD_STORE'];
+    const answering = createQueue({ ...env, WORLD_STORE: stores });
+    const runId = `wrun_${'0'.repeat(26)}`;
+    // The SDK's dispatch key: the step's ID and the FNV-1a hash of its name.
+    const step = (stepId: string, idempotencyKey = `${stepId}:a0eb0f08`) =>
+      answering.queue(queueName, { runId, stepId, stepName: 'double' }, { idempotencyKey });
+    const id = async (key: string) => `qmsg_${Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${queueName}:${key}`))).toString('hex')}`;
+    await withRequestContext(createExecutionContext(), {}, async () => {
+      expect((await step('done')).messageId).toBe(await id('done:a0eb0f08'));
+      expect(calls.dispatched).toEqual([]);
+      await step('pending');
+      await step('done', 'done:retry-1');
+    });
+    expect(calls.reads).toBe(1);
+    expect(calls.dispatched).toEqual([await id('pending:a0eb0f08'), await id('done:retry-1')]);
+  });
+
   it('runs a batch of deliveries together and returns each its own outcome', async () => {
     let running = 0;
     let peak = 0;

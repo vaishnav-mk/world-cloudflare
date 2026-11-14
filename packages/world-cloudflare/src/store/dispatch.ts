@@ -108,6 +108,15 @@ export async function dispatch(store: StoreContext, entries: QueueDispatch[]): P
   return results;
 }
 
+/**
+ * The run's steps whose message the queue has, or no longer needs: an SDK publish of one under its
+ * dispatch key changes nothing, so the queue client answers it itself (`createQueue`).
+ */
+export function dispatchedSteps(store: StoreContext, runId: string): string[] {
+  store.own(runId);
+  return store.outbox.settledSteps(runId);
+}
+
 /** After a run's hook wake dead-lettered: reopens its start if it never started, else its hook wakes. */
 export async function reopenHookWakes(store: StoreContext, runId: string): Promise<number> {
   store.own(runId);

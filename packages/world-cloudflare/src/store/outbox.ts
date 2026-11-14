@@ -115,6 +115,16 @@ export class Outbox {
     })).length;
   }
 
+  /** The run's steps whose `step_created` row is settled: its message published, or no longer needed. */
+  settledSteps(runId: string): string[] {
+    return allRows(this.#qb.raw<{ correlation_id: string }>({
+      query: `SELECT e.correlation_id FROM dispatch_outbox o JOIN events e ON e.run_id = o.run_id AND e.slot = o.slot
+              WHERE o.run_id = ? AND o.status = ? AND e.kind = ?`,
+      args: [runId, OutboxStatus.Published, EventType.StepCreated],
+      fetchType: FetchTypes.ALL,
+    })).map((row) => row.correlation_id);
+  }
+
   due(now: number, limit: number): OutboxRow[] {
     // SAFETY: only step and wait events, which always have a correlation ID, write those kinds.
     return allRows(this.#qb.raw<OutboxRow>({

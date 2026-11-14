@@ -5,14 +5,14 @@ import { MessageId, ValidQueueName, type Queue, type QueueOptions, type QueuePay
 import { currentRequest, type FlowRequest } from '../lib/request-context.js';
 import { MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
-import { messageIdFor, sha256Hex } from '../lib/hash.js';
+import { fnv1a32Hex, messageIdFor, sha256Hex } from '../lib/hash.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import { onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
-import { DEFAULT_HOLD_LEASE_SECONDS, MAX_HOLD_LEASE_SECONDS, PUBLISH_BATCH_MAX } from '../constants.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS, PUBLISH_BATCH_MAX } from '../constants.js';
 import { createQueueHandler } from './handler.js';
 import { holdMessage } from './hold.js';
 
@@ -20,6 +20,8 @@ type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'RUNNER' | 'DEPLO
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
 type Published = Awaited<ReturnType<NonNullable<Queue['queueBatch']>>>[number];
 type Waiting = { message: QueuePayload; opts: QueueOptions; resolve: (result: Published | undefined) => void; reject: (error: unknown) => void };
+/** The steps of a run a flow request read as dispatched, and when it last asked. */
+type Dispatched = { steps: Set<string>; readAt: number; reading?: Promise<unknown> };
 
 /** The World's `Queue`, backed by the queue shard Durable Objects. */
 export function createQueue(env: QueueEnv): HoldingQueue {
@@ -78,6 +80,31 @@ export function createQueue(env: QueueEnv): HoldingQueue {
     return new Promise((resolve, reject) => batch.push({ message, opts, resolve, reject }));
   };
 
+  // A replay of a spec 8 run publishes every step still pending again, one at a time, under the
+  // step's dispatch key. A step whose message the queue already has needs nothing, so a flow request
+  // answers those from the run's dispatched steps, read at most once per DISPATCHED_STEPS_READ_MS,
+  // instead of a call per step, which took minutes for thousands of steps.
+  const dispatched = new WeakMap<FlowRequest, Map<string, Dispatched>>();
+  const isDispatched = async (runId: string, stepId: string): Promise<boolean> => {
+    const request = currentRequest();
+    if (request === undefined) return false;
+    const runs = dispatched.get(request) ?? new Map<string, Dispatched>();
+    dispatched.set(request, runs);
+    const known = runs.get(runId) ?? { steps: new Set<string>(), readAt: Number.NEGATIVE_INFINITY };
+    runs.set(runId, known);
+    if (known.steps.has(stepId)) return true;
+    if (known.reading === undefined && Date.now() - known.readAt >= DISPATCHED_STEPS_READ_MS) {
+      known.readAt = Date.now();
+      known.reading = onRun(env.WORLD_STORE, runId, (store) => store.dispatchedSteps(runId))
+        .then((steps) => steps.forEach((step) => known.steps.add(step)))
+        // A failed read leaves the publish to the store.
+        .catch((error: unknown) => console.error('Could not read dispatched steps', { runId, error }))
+        .finally(() => { known.reading = undefined; });
+    }
+    await known.reading;
+    return known.steps.has(stepId);
+  };
+
   return {
     getDeploymentId: async () => env.DEPLOYMENT_ID,
     // Only the queue consumer, called by runners, and private executor dispatch reach the flow route; no public route serves it.
@@ -97,6 +124,13 @@ export function createQueue(env: QueueEnv): HoldingQueue {
       const target = rest.deploymentId;
       if (target !== undefined && !reachable(env, target)) {
         throw new WorkflowWorldError(`Deployment ${target} is unavailable`, { status: 404, code: DEPLOYMENT_UNAVAILABLE });
+      }
+      if (hold === undefined && 'stepId' in message && message.stepId && message.stepName && !rest.delaySeconds && target === undefined) {
+        // The SDK's dispatch key for the step (`stepDispatchIdempotencyKey`), which the store's outbox publishes under too.
+        const key = `${message.stepId}:${fnv1a32Hex(message.stepName)}`;
+        if (rest.idempotencyKey === key && await isDispatched(message.runId, message.stepId)) {
+          return { messageId: MessageId.parse(await messageIdFor(`${queueName}:${key}`)) };
+        }
       }
       const result = await publish(queueName, message, rest);
       if (result === undefined || result.error !== undefined) throw new Error(result?.error ?? 'Message was not enqueued');
