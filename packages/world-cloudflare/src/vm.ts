@@ -8,12 +8,12 @@
  * only the deterministic globals the SDK installs on the sandbox.
  *
  * The sandbox shares the host realm, so it cannot have its own `Array.prototype`: `[]` always makes
- * the realm's arrays. What a run can write must stay in the run, though, also while other runs replay
- * concurrently in the isolate and between their awaits. So:
+ * the realm's arrays. Most writes stay in the run, also while other runs replay concurrently in
+ * the isolate and between their awaits. Error's stack settings remain shared (see freezeExcept). So:
  * - namespaces (`Math`, `JSON`, `Reflect`, `Intl`, `console`, `crypto`...) and `Date` are copies per
  *   sandbox, which workflow code may change;
  * - the shared built-ins it can reach (constructors, prototypes, host classes) are frozen for the
- *   whole isolate before the first replay, so a write to one throws. Reverting writes after a replay
+ *   whole isolate before the first replay, except Error's stack settings. Reverting writes after a replay
  *   would not do: concurrent replays and host code would see them meanwhile, and a suspended replay
  *   never finishes. Frozen prototypes keep the usual overrides working (`this.name = ...` on an error).
  * Like node:vm, this is not a security boundary.
