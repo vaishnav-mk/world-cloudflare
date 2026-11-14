@@ -12,10 +12,10 @@ type ConsumerEnv = WorldEnv & { EXECUTORS?: DispatchNamespace };
  * message runs on the retained executor for its deployment. Without one, it runs on this Worker's
  * flow route.
  */
-export function createQueueConsumer(flow: FlowHandler) {
+export function createQueueConsumer(flow: FlowHandler): new (ctx: ExecutionContext, env: ConsumerEnv) => WorkerEntrypoint<ConsumerEnv> & WorldEnv['CONSUMER'] {
   return class QueueConsumer extends WorkerEntrypoint<ConsumerEnv> {
     /** This Worker's deployment: the latest, since every executor's `CONSUMER` binding reaches it. */
-    latestDeploymentId(): string {
+    async latestDeploymentId(): Promise<string> {
       return this.env.DEPLOYMENT_ID;
     }
 

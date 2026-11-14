@@ -13,7 +13,8 @@ import { createStreamer } from './streams/streamer.js';
 import type { WorldEnv } from './types.js';
 
 /** The Cloudflare World. Defaults to the Worker's own bindings. */
-export function createWorld(env: WorldEnv = platformEnv): World {
+// SAFETY: the Worker declares the World's bindings (README, Setup); `Cloudflare.Env` lists them only in the Worker's own generated types.
+export function createWorld(env: WorldEnv = platformEnv as WorldEnv): World {
   return {
     specVersion: mintSpecVersion(),
     capabilities: {

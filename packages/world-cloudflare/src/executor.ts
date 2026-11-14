@@ -4,7 +4,7 @@ import { withRequestContext } from './lib/request-context.js';
 import type { ExecutorProps, FlowHandler, WorldEnv } from './types.js';
 
 /** Default export for an immutable executor uploaded to the `EXECUTORS` dispatch namespace. */
-export function createExecutor(flow: FlowHandler) {
+export function createExecutor(flow: FlowHandler): new (ctx: ExecutionContext, env: WorldEnv) => WorkerEntrypoint<WorldEnv, ExecutorProps> {
   return class Executor extends WorkerEntrypoint<WorldEnv, ExecutorProps> {
     fetch(request: Request): Promise<Response> | Response {
       if (request.method !== 'POST' || new URL(request.url).pathname !== FLOW_PATH) {
