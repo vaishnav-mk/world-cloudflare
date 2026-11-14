@@ -5,8 +5,9 @@
 //
 // Starts `wrangler dev` on fresh local state with V8's GC trace, runs the workflow from
 // `workflows/limits.ts` to its end, and prints the most heap plus external memory (ArrayBuffers and
-// what the runtime reports) that a garbage collection left in any isolate. That is memory still in
-// use, which the 128 MB isolate limit counts; between collections the total runs higher.
+// what the runtime reports) in any isolate: `liveMiB` after full (mark-compact) collections, which
+// is memory still in use, and `peakMiB` after any collection. A scavenge leaves the old
+// generation's garbage in place, so `peakMiB` also counts memory a full collection would free.
 import { spawn } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -23,19 +24,27 @@ const dev = spawn('pnpm', ['exec', 'wrangler', 'dev', '--port', String(port), '-
   detached: true,
 });
 
-// Per isolate: the heap the last collection left, and the most heap plus external memory seen.
+// Per isolate: whether the last collection was a full one, the heap it left, and the most heap
+// plus external memory seen after any collection and after full ones.
+const full = new Map();
 const heap = new Map();
 const peak = new Map();
+const live = new Map();
 let partial = '';
 const read = (data) => {
   const lines = (partial + data).split('\n');
   partial = lines.pop();
   for (const line of lines) {
-    const match = /^\[\d+:(0x[0-9a-f]+)\] (?:All spaces,\s+used:\s+(\d+) KB|External memory reported:\s+(\d+) KB)/.exec(line);
+    const match = /^\[\d+:(0x[0-9a-f]+)\] (?:\s*\d+ ms: (\S+)|All spaces,\s+used:\s+(\d+) KB|External memory reported:\s+(\d+) KB)/.exec(line);
     if (!match) continue;
-    const [, isolate, used, external] = match;
-    if (used !== undefined) heap.set(isolate, Number(used));
-    else if (heap.has(isolate)) peak.set(isolate, Math.max(peak.get(isolate) ?? 0, heap.get(isolate) + Number(external)));
+    const [, isolate, kind, used, external] = match;
+    if (kind !== undefined) full.set(isolate, kind === 'Mark-Compact');
+    else if (used !== undefined) heap.set(isolate, Number(used));
+    else if (heap.has(isolate)) {
+      const total = heap.get(isolate) + Number(external);
+      peak.set(isolate, Math.max(peak.get(isolate) ?? 0, total));
+      if (full.get(isolate)) live.set(isolate, Math.max(live.get(isolate) ?? 0, total));
+    }
   }
 };
 dev.stdout.on('data', read);
@@ -55,7 +64,8 @@ try {
     if (['completed', 'failed', 'cancelled'].includes(run.status)) break;
   }
   const result = run.status === 'completed' ? (await (await fetch(`${base}/runs/${runId}/result`)).json()).value : undefined;
-  console.log(JSON.stringify({ vm, name, value, status: run.status, result, liveMiB: +(Math.max(...peak.values()) / 1024).toFixed(1) }));
+  const mib = (kib) => +(Math.max(0, ...kib.values()) / 1024).toFixed(1);
+  console.log(JSON.stringify({ vm, name, value, status: run.status, result, liveMiB: mib(live), peakMiB: mib(peak) }));
 } finally {
   process.kill(-dev.pid);
 }
