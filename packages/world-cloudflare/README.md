@@ -231,4 +231,14 @@ With `WORKFLOW_SPEC_VERSION=9` on the Worker and its executors, new runs follow 
 
 `@workflow/world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker's `handleWorldRpc` endpoint, so the SDK's tools, such as the web UI (`workflow web`), can read and write its runs. Load it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, and set `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`. In this repo, build it first with `pnpm build` in this package.
 
+The synchronous `createWorld({ url?, token? })` factory stays usable with older RPC servers. Until initialized, it declares no capabilities and uses `mintedSpecVersion()` without assuming a fence, so a local `WORKFLOW_SPEC_VERSION=9` cannot enable spec 9 by itself. Existing read/write calls need no initialization.
+
+For SDK starts that need the server's spec version or capabilities, use `await connectWorld({ url?, token? })` from the same module, or call `await world.start()` once on a synchronous instance before passing it to the SDK. Initialization makes an authenticated discovery request and exposes the server's `specVersion` and parsed capabilities as synchronous properties. It does not advertise `invoke`, which the remote transport does not implement. Discovery failures reject rather than guessing server support; an older server must be upgraded before using discovery.
+
+The SDK loader accepts async factories but does not call `world.start()`. To enable discovery with `WORKFLOW_TARGET_WORLD`, point it at a module such as `./remote-world.mjs` containing:
+
+```js
+export { connectWorld as createWorld } from '@workflow/world-cloudflare/remote';
+```
+
 The token can write events and, with an encryption secret, fetch every run's key, so keep it in a secret. The client cannot receive queue deliveries; workflows still run on Cloudflare. Payloads travel in one request or response, so the Worker's request body limit and memory bound the largest value it can move.

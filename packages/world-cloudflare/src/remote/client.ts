@@ -1,7 +1,6 @@
 import * as errors from '@workflow/errors';
-import type { World, WorkflowRun } from '@workflow/world';
+import { mintedSpecVersion, parseWorldCapabilities, type World, type WorkflowRun } from '@workflow/world';
 import { isRecord } from '../lib/is-record.js';
-import { mintSpecVersion } from '../lib/spec.js';
 import { decodeResult, encode, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcError } from './protocol.js';
 
 /**
@@ -10,7 +9,8 @@ import { decodeResult, encode, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcEr
  * - `WORKFLOW_CLOUDFLARE_URL`: the Worker that serves `/world/rpc`;
  * - `WORKFLOW_CLOUDFLARE_TOKEN`: the Worker's `WORLD_RPC_TOKEN` secret.
  *
- * It cannot receive queue deliveries; workflows still run on Cloudflare.
+ * It cannot receive queue deliveries; workflows still run on Cloudflare. This synchronous factory
+ * advertises no capabilities until `await world.start()`. Use `connectWorld()` for SDK starts.
  */
 export function createWorld(options: { url?: string; token?: string } = {}): World {
   const url = options.url ?? process.env.WORKFLOW_CLOUDFLARE_URL;
@@ -34,8 +34,24 @@ export function createWorld(options: { url?: string; token?: string } = {}): Wor
     return result.value;
   };
 
+  let server: Pick<World, 'specVersion' | 'capabilities'> = { specVersion: mintedSpecVersion() };
+  let initialization: Promise<void> | undefined;
   const world = {
-    specVersion: mintSpecVersion(),
+    get specVersion() { return server.specVersion; },
+    get capabilities() { return server.capabilities; },
+    // Explicit initialization keeps the synchronous factory usable with older RPC servers.
+    start: () => initialization ??= (async () => {
+      const info = await call(RpcMethod.Discover)();
+      if (!isRecord(info) || typeof info.specVersion !== 'number' || !Number.isSafeInteger(info.specVersion) || info.specVersion < 1) {
+        throw new TypeError('Invalid World RPC discovery response');
+      }
+      // Invocation has no RPC transport here, even when the backend supports it.
+      const { invoke: _invoke, ...capabilities } = parseWorldCapabilities(info.capabilities) ?? {};
+      server = { specVersion: info.specVersion, capabilities };
+    })().catch((error: unknown) => {
+      initialization = undefined;
+      throw error;
+    }),
     runs: {
       get: call(RpcMethod.RunsGet),
       getMany: call(RpcMethod.RunsGetMany),
@@ -92,6 +108,13 @@ function rebuild({ name, message, props }: RpcError): Error {
   const ErrorClass = (errors as Record<string, unknown>)[name];
   if (typeof ErrorClass === 'function') Object.setPrototypeOf(error, ErrorClass.prototype);
   return error;
+}
+
+/** Discovers the deployed World's contract before exposing it to the SDK. */
+export async function connectWorld(options: Parameters<typeof createWorld>[0] = {}): Promise<World> {
+  const world = createWorld(options);
+  await world.start?.();
+  return world;
 }
 
 export default createWorld;

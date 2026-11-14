@@ -11,6 +11,8 @@ export const RPC_CONTENT_TYPE = 'application/x-devalue';
 
 /** World methods the endpoint serves. Anything else is rejected. */
 export enum RpcMethod {
+  /** Reports the deployed World's version and capabilities without invoking it. */
+  Discover = 'discover',
   RunsGet = 'runs.get',
   RunsGetMany = 'runs.getMany',
   RunsList = 'runs.list',

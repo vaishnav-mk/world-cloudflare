@@ -18,6 +18,9 @@ export async function handleWorldRpc(request: Request, world: World, token: stri
     return new Response('Invalid World RPC request', { status: 400 });
   }
   try {
+    if (call.method === RpcMethod.Discover) {
+      return respond({ ok: true, value: { specVersion: world.specVersion, capabilities: world.capabilities } });
+    }
     if (call.method === RpcMethod.StreamsGet) {
       const [runId, name, startIndex] = call.args as Parameters<World['streams']['get']>;
       return new Response(await world.streams.get(runId, name, startIndex), {
