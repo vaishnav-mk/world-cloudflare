@@ -10,9 +10,10 @@
   "durable_objects": { "bindings": [
     { "name": "WORLD_STORE", "class_name": "WorldStore" },
     { "name": "QUEUE_SHARD", "class_name": "QueueShard" },
-    { "name": "RUN_STREAMS", "class_name": "RunStreams" }
+    { "name": "RUN_STREAMS", "class_name": "RunStreams" },
+    { "name": "RUNNER", "class_name": "Runner" }
   ] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldStore", "QueueShard", "RunStreams"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldStore", "QueueShard", "RunStreams"] }, { "tag": "v2", "new_sqlite_classes": ["Runner"] }],
   "r2_buckets": [
     { "binding": "DLQ", "bucket_name": "workflow-sdk-test-dlq" },
     { "binding": "PAYLOADS", "bucket_name": "workflow-sdk-test-payloads" }

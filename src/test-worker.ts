@@ -1,7 +1,7 @@
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { parse } from 'devalue';
 import { DeliveryResult, type Delivery, type DeliveryOutcome } from '@workflow/world-cloudflare';
-export { QueueShard, RunStreams, WorldStore } from '@workflow/world-cloudflare';
+export { QueueShard, Runner, RunStreams, WorldStore } from '@workflow/world-cloudflare';
 
 /** One delivery as a `_timed` or `_handoff` queue saw it. */
 export type DeliveryLog = { id: string; runId: string; attempt: number; deliveryCount?: number; start: number; end: number };

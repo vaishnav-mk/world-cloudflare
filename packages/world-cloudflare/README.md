@@ -6,6 +6,7 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 | --- | --- |
 | `WorldStore` | Store shards ([below](#store-shards)). Each holds the runs that hash to it, with their events, steps, hooks, waits and outboxes, and the registry for the hook tokens that hash to it. The one named `global` holds runs created before store shards |
 | `QueueShard` | Queue shards: queue messages, delays, retries and idempotency keys; dead letters go to R2 |
+| `Runner` | Runners ([below](#runners)): where flows and steps run. Holds nothing durable |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
 Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It creates spec 8 runs, or spec 9 (single-orchestrator) runs with `WORKFLOW_SPEC_VERSION=9`, and advertises every capability Vercel's World does: `inBandFence`, `maxConcurrency`, `hookRetention`, `hookResumeDedup`, `resolvedHookResume`, `hookForceClaim`, `atomicStartHook`, `deploymentAffinity` and `dynamicWorkflowCode`. Its `queue()` also holds a message for its sender (`experimental_hold`), which `@workflow/world` 5.2.0 has no capability for. It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
@@ -42,7 +43,7 @@ It writes `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handl
 import { createQueueConsumer, createWorld, drainOutbox, registerWorld, type WorldEnv } from '@workflow/world-cloudflare';
 import { POST as flow } from '../.well-known/workflow/v1/flow.mjs';
 
-export { QueueShard, RunStreams, WorldStore } from '@workflow/world-cloudflare';
+export { QueueShard, Runner, RunStreams, WorldStore } from '@workflow/world-cloudflare';
 export const QueueConsumer = createQueueConsumer(flow);
 
 registerWorld(createWorld());
@@ -57,8 +58,8 @@ Bindings, as in the repo's `wrangler.jsonc`:
 
 | Binding | Type |
 | --- | --- |
-| `WORLD_STORE`, `QUEUE_SHARD`, `RUN_STREAMS` | SQLite Durable Objects with those class names |
-| `CONSUMER` | Service binding to the main Worker's `QueueConsumer` entrypoint; executors use it to resolve the latest deployment |
+| `WORLD_STORE`, `QUEUE_SHARD`, `RUN_STREAMS`, `RUNNER` | SQLite Durable Objects with those class names (`Runner` for `RUNNER`) |
+| `CONSUMER` | Service binding to the main Worker's `QueueConsumer` entrypoint, which runners call to run deliveries; executors use it to resolve the latest deployment |
 | `DLQ` | R2 bucket for dead letters |
 | `PAYLOADS` | R2 bucket for payloads and stream chunks over 1 MiB |
 | `DEPLOYMENT_ID` | A new ID per release |
@@ -74,7 +75,7 @@ Add a `* * * * *` cron so `drainOutbox` can recover the legacy store's dispatche
 
 A run lives in one store shard from its first event, so no single object sees every run. The store named `global` is the legacy store: it holds the runs created before store shards, with their hooks.
 - **Epochs.** `SHARD_EPOCHS` is a JSON list of `{ "from": <ms>, "store": <count>, "queue": <count> }`, oldest first, the first at 0. The default is one epoch of 128 store and 256 queue shards. A run's ULID time picks its epoch, and the run lives in store shard `hash(runId) % store` of it; its workflow messages (start, wakes, hook resumes and timers) go to queue shard `hash(runId) % queue`, and other messages, such as steps, to `hash(key) % queue`. To add capacity, append an epoch whose `from` is later than the deploy: new runs spread over its shards and no existing run moves. Every Worker running World code, retained executors included, needs the same value. Size shards to load: a shard that sees too few runs stays cold, and each cold one costs about 1.7 s on Workers.
-- **Replays.** A run's queue shard delivers its workflow messages one at a time. A wake that asks only for a replay, delivered for the first time, is settled without a delivery once a replay that started after it was due has succeeded; a start, a timer, a legacy hook resume or a message with a retry counter is always delivered.
+- **Replays.** A run's queue shard delivers its workflow messages one at a time, to the run's runner. A wake that asks only for a replay, delivered for the first time, is settled without a delivery once a replay that started after it was due has succeeded; a start, a timer, a legacy hook resume or a message with a retry counter is always delivered.
 - **Event pages.** A page of events ends at its count limit or once its stored rows pass 4 MiB, and the SDK reads on with the cursor. A store reads at most two pages at once, 512 KiB at a time.
 - **Routing.** The World client sends a run-scoped call to the run's shard. A shard throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the legacy store and remembers, per isolate, that the run lives there.
 - **Lists.** `runs.list` and `hooks.list` without a run ID ask every shard of every epoch and the legacy store, 32 at a time, merge their pages by `createdAt` then ID, and return the last row's sort key as the cursor. `runs.getMany` makes one call per shard its IDs hash to, then one to the legacy store for the rest. `hooks.get` asks every store.
@@ -95,6 +96,13 @@ With `WORKFLOW_SPEC_VERSION=9` on the Worker and its executors, new runs follow 
 - **Live feed.** `events.subscribe` long-polls the run's store, which answers as each event commits.
 
 Runs created before keep spec 8, which the World still serves.
+
+## Runners
+
+A call from a Durable Object to a service binding or a dispatch namespace Worker runs on the caller's thread. So a queue shard runs no workflow code: it hands each due message to a `Runner`, which calls the `CONSUMER` entrypoint with it, and the flow handler, or the retained executor, runs on the runner's thread.
+- **Sharding.** An epoch has as many runners as queue shards. A run's workflow messages go to runner `hash(runId) % queue` of its epoch, the index of its queue shard, so a run has one runner and a busy one stays warm. Other messages, such as steps, spread over the epoch's runners by message ID.
+- **One at a time.** A runner runs a run's workflow deliveries one after another, even when two queue shards deliver for it, as the legacy `flow` shard may, or when a reset queue shard delivers again a message the runner still runs. A Durable Object has one live instance, and a reset ends every delivery in it, so two replays of a run never share an isolate: the SDK's in-process step single-flight would make one request wait on a promise another settles.
+- **Recovery.** A runner keeps nothing. A delivery it was running when it reset fails on its queue shard, which delivers it again.
 
 ## Large payloads
 
@@ -171,7 +179,7 @@ registerWorld(createWorld());
 export default createExecutor(flow);
 ```
 
-Each executor binds the three Durable Objects with `script_name` set to the main Worker. See [`wrangler.executor.jsonc`](../../wrangler.executor.jsonc). The main Worker binds the namespace as `EXECUTORS`, and `EXECUTOR_ROUTES` maps each deployment ID to its executor script. It never runs a flow itself, so it can leave the workflow bundle out, as the example's `src/dispatcher.ts` does.
+Each executor binds the World's Durable Objects with `script_name` set to the main Worker, whose runners call it. See [`wrangler.executor.jsonc`](../../wrangler.executor.jsonc). The main Worker binds the namespace as `EXECUTORS`, and `EXECUTOR_ROUTES` maps each deployment ID to its executor script. It never runs a flow itself, so it can leave the workflow bundle out, as the example's `src/dispatcher.ts` does.
 
 ## Exports
 
@@ -179,7 +187,7 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 | --- | --- |
 | `createWorld(env?)` | The World, including VM snapshot storage (`experimental_snapshots`) and `runs.cancelMany`; also the default export |
 | `registerWorld(world)` | Makes `world` the SDK's World, as `setWorld()` does |
-| `WorldStore`, `QueueShard`, `RunStreams` | Durable Object classes to re-export from the Worker |
+| `WorldStore`, `QueueShard`, `Runner`, `RunStreams` | Durable Object classes to re-export from the Worker |
 | `createQueueConsumer(flow)` | The `QueueConsumer` entrypoint class |
 | `createExecutor(flow)` | A retained executor's default export |
 | `drainOutbox(env)` | Cron handler body |

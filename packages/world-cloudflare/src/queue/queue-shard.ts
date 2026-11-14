@@ -10,10 +10,12 @@ import {
 } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus, DeliveryResult, MessageKind } from '../enums.js';
+import { groupBy } from '../lib/group.js';
 import { replayOf } from '../lib/messages.js';
+import { runnerShardFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
 import { onRun } from '../store/route.js';
-import type { Delivery, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
+import type { Delivery, DeliveryOutcome, EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
 import { DeliveryCounts, type Counts } from './delivery-counts.js';
 import { Holds } from './holds.js';
@@ -30,13 +32,17 @@ type DeadLetter =
   | { kind: MessageKind.WaitContinuation; runId: string; correlationId: string }
   | { kind: MessageKind.HookWake; runId: string };
 
+/** A due delivery and the runner it goes to: its run's, in the run's turn, for a replay of `run`. */
+type HandOff = { delivery: Delivery; runner: string; run?: string };
+
 /** The single `flow` shard's delivery lanes before queue shards. */
 const LEGACY_LANES = Array.from({ length: 8 }, (_, lane) => `${FLOW_TARGET}-${lane}`);
 
 /**
- * One queue shard: delayed, retried delivery of its runs' messages to the `CONSUMER` entrypoint. A
- * shard holds all of a run's replay messages (`queueShardFor`), delivers them one at a time, and
- * settles the pure ones a later successful replay covers without delivering them.
+ * One queue shard: delayed, retried delivery of its runs' messages to the runners
+ * (`runnerShardFor`), which run the workflow code. A shard holds all of a run's replay messages
+ * (`queueShardFor`), delivers them one at a time to the run's runner, and settles the pure ones a
+ * later successful replay covers without delivering them.
  */
 export class QueueShard extends DurableObject<WorldEnv> {
   readonly #dedup = new DedupTable(this.ctx.storage.sql);
@@ -183,7 +189,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
   }
 
   /**
-   * Holds messages until their delay passes, then hands the due ones to the consumer. The fanout
+   * Holds messages until their delay passes, then hands the due ones to the runners. The fanout
    * delivers one batch per shard at a time and a run's replays all reach its shard, so holding a
    * run's second replay in a batch keeps its replays to one at a time, whatever its spec version.
    * Two replays of a run at once would let the SDK's in-process step single-flight make one request
@@ -193,7 +199,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
    * are not deliveries: only `#counts` feeds `attempt`.
    */
   async #deliver(messages: FanoutMessage[]): Promise<void> {
-    const due: { message: FanoutMessage; delivery: Delivery; appends: boolean; replays: string | undefined }[] = [];
+    const due: (HandOff & { message: FanoutMessage; appends: boolean; replays: string | undefined })[] = [];
     const running = new Set<string>();
     const maxAttempts = Number(this.env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS);
     const now = Date.now();
@@ -238,16 +244,17 @@ export class QueueShard extends DurableObject<WorldEnv> {
         // A start may skip reading the log, so its replay covers no other message.
         replays: replay?.start === false ? runId : undefined,
         delivery: { id, attempt: deliveries - handoffs, deliveryCount: deliveries, enqueuedAt: message.enqueuedAt, body: message.body },
+        // Other messages spread over the run's epoch by ID; a health check names no run.
+        ...(runId === undefined ? { runner: runnerShardFor(runIdOf(payload), id) } : { runner: runnerShardFor(runId), run: runId }),
       });
     }
     if (!due.length) return;
     const deliveries = due.map(({ delivery }) => delivery);
     this.#inflight.add(deliveries);
     const startedAt = Date.now();
-    const outcomes = await this.env.CONSUMER.consume(deliveries).finally(() => {
+    const outcomes = await this.#handOff(due).finally(() => {
       for (const { id } of deliveries) this.#inflight.remove(id);
     });
-    if (outcomes.length !== due.length) throw new Error('Incomplete queue delivery response');
     for (const [index, outcome] of outcomes.entries()) {
       const { message, delivery, appends, replays } = due[index];
       switch (outcome.kind) {
@@ -267,6 +274,33 @@ export class QueueShard extends DurableObject<WorldEnv> {
           unreachable(outcome);
       }
     }
+  }
+
+  /**
+   * Hands each delivery to its runner, and returns their outcomes in order: a replay to its run's
+   * runner on its own, the rest together to each runner. A runner call that fails fails its own
+   * deliveries, which are delivered again.
+   */
+  async #handOff(due: HandOff[]): Promise<DeliveryOutcome[]> {
+    const outcomes: DeliveryOutcome[] = [];
+    const failed = (error: unknown): DeliveryOutcome => ({ kind: DeliveryResult.Failed, error: String(error) });
+    const batches = groupBy(due.flatMap((entry, index) => entry.run === undefined ? [{ ...entry, index }] : []), ({ runner }) => runner);
+    await Promise.all([
+      ...due.map(async ({ delivery, runner, run }, index) => {
+        if (run === undefined) return;
+        outcomes[index] = await this.env.RUNNER.getByName(runner).replay(run, delivery).catch(failed);
+      }),
+      ...[...batches].map(async ([runner, batch]) => {
+        const results = await this.env.RUNNER.getByName(runner).consume(batch.map(({ delivery }) => delivery))
+          .then((settled) => {
+            if (settled.length !== batch.length) throw new Error('Incomplete queue delivery response');
+            return settled;
+          })
+          .catch((error: unknown) => batch.map(() => failed(error)));
+        for (const [position, { index }] of batch.entries()) outcomes[index] = results[position];
+      }),
+    ]);
+    return outcomes;
   }
 
   /** Records that a replay of `runId` that started at `startedAt` succeeded. */
@@ -362,4 +396,9 @@ function readDeadLetter(payload: unknown): DeadLetter | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object';
+}
+
+/** The run a message names, or `''` for one that names none, such as a health check. */
+function runIdOf(payload: unknown): string {
+  return isRecord(payload) && typeof payload.runId === 'string' ? payload.runId : '';
 }

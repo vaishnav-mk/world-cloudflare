@@ -106,7 +106,7 @@ A candidate whose token claim succeeded but whose run never committed, because b
 | Item | Before | After | Tests | Notes |
 | --- | --- | --- | --- | --- |
 | `queue`, `queueBatch`, `getDeploymentId` | Built | Built | contract, queue | |
-| `queueAuthMode: 'skip'` | Built | Built | contract | Only the queue consumer and private executor dispatch reach the flow route |
+| `queueAuthMode: 'skip'` | Built | Built | contract | Only the queue consumer, called by runners, and private executor dispatch reach the flow route |
 | `QueueOptions.deploymentId` | Built | Built | queue | Routed to the deployment's retained executor |
 | `QueueOptions.idempotencyKey`, dedupe for 24 hours | Built | Built | queue | Keys are kept forever; a repeat next to a message in backoff changes nothing |
 | `QueueOptions.delaySeconds` | Built | Built | queue | |
@@ -184,3 +184,4 @@ A candidate whose token claim succeeded but whose run never committed, because b
 - **Token release.** A write that frees a token now waits for the token's shard to apply the release, so it is free when the write returns. That adds one RPC to a run's last write when it held hooks.
 - **Inline budget.** `getRuntimeDeadline` raises the runtime's inline budget from 2 to 5 minutes per delivery on spec 8 runs too. A CPU-bound workflow near the 300 s CPU limit can set `WORKFLOW_V2_TIMEOUT_MS` to keep the old budget.
 - **`CONSUMER`.** Retained executors call `latestDeploymentId` on the main Worker's consumer, so deploy the main Worker first.
+- **Runners.** The `Runner` class needs a `v2` migration (`new_sqlite_classes`) and a `RUNNER` binding. Queue shards hand deliveries to runners once the new code reaches them; a delivery in flight on the old code finishes there. Retained executors need no change: they never ran the queue shards.

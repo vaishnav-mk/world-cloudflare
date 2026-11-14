@@ -7,6 +7,7 @@ export { createWorld, registerWorld } from './world.js';
 export { createExecutor } from './executor.js';
 export { createQueueConsumer } from './queue/consumer.js';
 export { QueueShard } from './queue/queue-shard.js';
+export { Runner } from './runner/runner.js';
 export { WorldStore } from './store/world-store.js';
 export { RunStreams } from './streams/run-streams.js';
 export { DeliveryResult, EventType, ResolveData, RunStatus, StepStatus, WaitStatus } from './enums.js';

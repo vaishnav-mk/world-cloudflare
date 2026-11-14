@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { orchestratorRunIdOf } from '@workflow/world';
 import { decodeTime } from 'ulid';
-import { CRON_WAKES_PER_TICK, DEFAULT_SHARD_EPOCHS, QUEUE_SHARD_NAME } from '../constants.js';
+import { CRON_WAKES_PER_TICK, DEFAULT_SHARD_EPOCHS, QUEUE_SHARD_NAME, RUNNER_NAME } from '../constants.js';
 import type { ShardEpoch, WorldEnv } from '../types.js';
 import { fnv1a32Hex } from './hash.js';
 
@@ -86,6 +86,17 @@ export function queueShardFor(runId: string, payload: unknown, key?: string): st
   const { epoch, tag } = epochOf(runId);
   const routingKey = orchestratorRunIdOf(payload) === undefined ? key ?? runId : runId;
   return `${QUEUE_SHARD_NAME}-${tag}${bucket(routingKey, epoch.queue)}`;
+}
+
+/**
+ * The runner (`Runner`) that runs a run's workflow deliveries and invocations, so a run has one.
+ * An epoch has as many runners as queue shards, and a run's runner has its queue shard's index, so
+ * that shard hands its replays to one runner. With `key`, the runner for another of the run's
+ * messages, such as a step, which any runner of the epoch may run.
+ */
+export function runnerShardFor(runId: string, key = runId): string {
+  const { epoch, tag } = epochOf(runId);
+  return `${RUNNER_NAME}-${tag}${bucket(key, epoch.queue)}`;
 }
 
 /** Every store shard in every epoch. */

@@ -4,10 +4,12 @@ import type { DispatchKind, ShardEpoch } from './types.js';
 /**
  * Durable Object names. Runs and hook tokens live on store shards (`lib/shards.ts`); the store named
  * `STORE_NAME` is the legacy store, which still holds runs created before store shards.
- * `QUEUE_SHARD_NAME` named the single queue shard before queue shards.
+ * `QUEUE_SHARD_NAME` named the single queue shard before queue shards. Runners are named
+ * `RUNNER_NAME-<n>` (`runnerShardFor`).
  */
 export const STORE_NAME = 'global';
 export const QUEUE_SHARD_NAME = 'flow';
+export const RUNNER_NAME = 'runner';
 
 /** Fanout target the queue shard delivers to. */
 export const FLOW_TARGET = 'flow';

@@ -1,6 +1,7 @@
 import type { AnyEventRequest, Hook, MessageId, Queue, QueueOptions, QueuePayload, ValidQueueName } from '@workflow/world';
 import type { DeliveryResult, EventType, MessageKind, ResolveData } from './enums.js';
 import type { QueueShard } from './queue/queue-shard.js';
+import type { Runner } from './runner/runner.js';
 import type { WorldStore } from './store/world-store.js';
 import type { RunStreams } from './streams/run-streams.js';
 
@@ -9,6 +10,7 @@ export type WorldEnv = {
   WORLD_STORE: DurableObjectNamespace<WorldStore>;
   QUEUE_SHARD: DurableObjectNamespace<QueueShard>;
   RUN_STREAMS: DurableObjectNamespace<RunStreams>;
+  RUNNER: DurableObjectNamespace<Runner>;
   /** Service binding to the main Worker's `QueueConsumer` entrypoint, from it and from its retained executors. */
   CONSUMER: { consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]>; latestDeploymentId(): Promise<string> };
   DLQ: R2Bucket;
@@ -41,7 +43,7 @@ export type Envelope = {
   messageId?: string;
 };
 
-/** The outcome of one delivery, returned by `QueueConsumer.consume` in delivery order. */
+/** The outcome of one delivery, returned by `QueueConsumer.consume` and `Runner.consume` in delivery order. */
 export type DeliveryOutcome =
   | { kind: DeliveryResult.Done }
   | { kind: DeliveryResult.Wake; seconds: number }

@@ -8,8 +8,9 @@ import { executorFor } from './routes.js';
 type ConsumerEnv = WorldEnv & { EXECUTORS?: DispatchNamespace };
 
 /**
- * The entrypoint the queue shard delivers to. With an `EXECUTORS` dispatch namespace, each message
- * runs on the retained executor for its deployment. Without one, it runs on this Worker's flow route.
+ * The entrypoint a runner hands each delivery to, so it runs on the runner's thread. With an
+ * `EXECUTORS` dispatch namespace, each message runs on the retained executor for its deployment.
+ * Without one, it runs on this Worker's flow route.
  */
 export function createQueueConsumer(flow: FlowHandler) {
   return class QueueConsumer extends WorkerEntrypoint<ConsumerEnv> {

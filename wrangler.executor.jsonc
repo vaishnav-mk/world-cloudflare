@@ -19,7 +19,8 @@
   "durable_objects": { "bindings": [
     { "name": "WORLD_STORE", "class_name": "WorldStore", "script_name": "workflow-sdk-cloudflare" },
     { "name": "QUEUE_SHARD", "class_name": "QueueShard", "script_name": "workflow-sdk-cloudflare" },
-    { "name": "RUN_STREAMS", "class_name": "RunStreams", "script_name": "workflow-sdk-cloudflare" }
+    { "name": "RUN_STREAMS", "class_name": "RunStreams", "script_name": "workflow-sdk-cloudflare" },
+    { "name": "RUNNER", "class_name": "Runner", "script_name": "workflow-sdk-cloudflare" }
   ] },
   "r2_buckets": [
     { "binding": "DLQ", "bucket_name": "workflow-sdk-dlq" },

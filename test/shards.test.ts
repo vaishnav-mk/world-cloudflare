@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SHARD_EPOCHS } from '../packages/world-cloudflare/src/constants.js';
 import {
-  parseEpochs, queueShardFor, queueShardNames, queueShardsToWake, storeShardFor, storeShardNames, tokenShardFor,
+  parseEpochs, queueShardFor, queueShardNames, queueShardsToWake, runnerShardFor, storeShardFor, storeShardNames, tokenShardFor,
 } from '../packages/world-cloudflare/src/lib/shards.js';
 
 // wrangler.test.jsonc sets two epochs: { from: 0, store: 4, queue: 4 } and { from: 1700000000000, store: 8, queue: 8 }.
@@ -46,6 +46,16 @@ describe('shard epochs', () => {
       return queueShardFor(runId, payload, key);
     });
     expect(new Set(shards).size).toBeGreaterThan(1);
+  });
+
+  it("gives a run the runner with its queue shard's index and spreads its other messages over the epoch", () => {
+    for (const runId of [runIdAt(1_600_000_000_000), runIdAt(Date.now())]) {
+      expect(runnerShardFor(runId)).toBe(queueShardFor(runId, { runId }).replace(/^flow-/, 'runner-'));
+    }
+    const runId = runIdAt(Date.now());
+    const runners = new Set(Array.from({ length: 32 }, (_, index) => runnerShardFor(runId, `message-${index}`)));
+    expect(runners.size).toBeGreaterThan(1);
+    for (const runner of runners) expect(runner).toMatch(new RegExp(`^runner-e${SECOND}-[0-7]$`));
   });
 
   it('keeps hook tokens on the first epoch', () => {

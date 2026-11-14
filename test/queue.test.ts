@@ -3,7 +3,7 @@ import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
-import { queueShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
+import { queueShardFor, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
 
@@ -185,6 +185,24 @@ describe('durability fanout', () => {
       // Waiting behind the run's other delivery is not a delivery.
       expect([first, second].map(({ deliveryCount, attempt }) => [deliveryCount, attempt])).toEqual([[1, 1], [1, 1]]);
     }
+  });
+
+  it("runs a run's replays one at a time on its runner even when two shards deliver them, beside other runs'", async () => {
+    const timed = `${getQueueTopicPrefix('workflow')}runner_timed` as ValidQueueName;
+    const [busy, other] = [`wrun_${crypto.randomUUID()}`, `wrun_${crypto.randomUUID()}`];
+    const delivery = (runId: string) => ({
+      id: crypto.randomUUID(), attempt: 1, deliveryCount: 1, enqueuedAt: Date.now(), body: { queueName: timed, encoded: stringify({ runId }) },
+    });
+    // One runner, as a run's legacy and sharded queue shards would both reach it.
+    const runner = env.RUNNER.getByName(runnerShardFor(busy));
+    await Promise.all([busy, busy, busy, other].map((runId) => runner.replay(runId, delivery(runId))));
+    const runOf = async (runId: string) => (await env.SINK.getByName('sink').logged())
+      .filter((entry) => entry.runId === runId).sort((a, b) => a.start - b.start);
+    const [first, second, third] = await runOf(busy);
+    expect(second.start).toBeGreaterThanOrEqual(first.end);
+    expect(third.start).toBeGreaterThanOrEqual(second.end);
+    const [alone] = await runOf(other);
+    expect(alone.start).toBeLessThan(first.end);
   });
 
   it("counts every redelivery, and leaves a spec 9 handoff out of the attempt", async () => {
