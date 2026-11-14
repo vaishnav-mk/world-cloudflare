@@ -51,7 +51,7 @@ What is missing is optional and off the runtime's path: `describeRun`, `analytic
 | Advisory params: `skipPreload`, `preloadEvents`, `viaStepDispatch`, `afterStepBody`, `stepCreatedAt`, `replayDivergenceCount`, `computeInstanceId`, `requestId` | Built | Built | | Ignored, which the contract allows; `preloadEvents` returns no preload, so the runtime reads the log |
 | `EventResult.allocated` | Built | Built | conformance, spec9 | 0 for a write that converged on an existing event |
 | `EventResult.eventCursor` | Missing | Built | contract | `eid:<eventId>`, given where an ascending list returns the event as written |
-| `EventResult.events`, `cursor`, `hasMore` | Built | Built | contract | The skipped-slot report, one page at most |
+| `EventResult.events`, `cursor`, `hasMore` | Built | Built | contract | The skipped-slot report, one page at most; none for a write outside the in-band fence that skipped more than 100 slots |
 | `events.createBatch` | Built | Built | contract, spec9 | Spec 9 batches: one fenced block, per-entity refusal ordering, top-level report and `allocated` |
 | `events.get`, `events.listByCorrelationId` | Built | Built | contract | |
 | `events.list` | Built | Built | contract | `signal` cannot cross RPC and is ignored |

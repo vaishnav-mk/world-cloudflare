@@ -1,5 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { OUT_OF_BAND_REPORT_LIMIT } from '../packages/world-cloudflare/src/constants.js';
 import { queueShardFor, storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import {
   getQueueTopicPrefix, mintedSpecVersion, slotToEventId, SPEC_VERSION_MAX_SUPPORTED,
@@ -265,19 +266,22 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.events.list({ runId })).data).toHaveLength(2);
   });
 
-  it('caps the skipped-event report for a writer far behind at one page', async () => {
+  it('reports skipped events only to a writer at most OUT_OF_BAND_REPORT_LIMIT slots behind', async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });
     const step = (correlationId: string) => ({
       eventType: 'step_created' as const, correlationId, eventData: { stepName: 'work', input: bytes('argument') },
     });
-    for (let index = 0; index < 1001; index++) await world.events.create(runId, step(`step-${index}`));
-    // Slots 2 to 1003 were written after the writer's view; it gets the first 1,000 and a cursor.
-    const stale = await world.events.create(runId, step('late'), { eventCount: 1 });
-    expect(stale.events).toHaveLength(1000);
-    expect(stale.events?.[0]?.eventId).toBe(slotToEventId(2));
-    expect(stale.hasMore).toBe(true);
-    expect(stale.cursor).toBe(`eid:${slotToEventId(1001)}`);
+    for (let index = 1; index < OUT_OF_BAND_REPORT_LIMIT; index++) await world.events.create(runId, step(`step-${index}`));
+    // Slots 2 to OUT_OF_BAND_REPORT_LIMIT + 1 were written after the writer's view.
+    const behind = await world.events.create(runId, step('behind'), { eventCount: 1 });
+    expect(behind.events).toHaveLength(OUT_OF_BAND_REPORT_LIMIT);
+    expect(behind.events?.[0]?.eventId).toBe(slotToEventId(2));
+    expect(behind.hasMore).toBe(false);
+    // One slot further behind, the SDK would read the log anyway, so the write reads nothing for it.
+    const further = await world.events.create(runId, step('further'), { eventCount: 1 });
+    expect(further.event?.eventId).toBe(slotToEventId(OUT_OF_BAND_REPORT_LIMIT + 3));
+    expect(further.events).toBeUndefined();
   });
 
   it("treats skip-step-inputs as all except step inputs, unlike none", async () => {

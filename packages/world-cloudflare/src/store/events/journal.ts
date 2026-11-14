@@ -2,7 +2,7 @@ import {
   getEventDataPayloadField, requireEventSlot,
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult,
 } from '@workflow/world';
-import { SINCE_CURSOR_LIMIT } from '../../constants.js';
+import { OUT_OF_BAND_REPORT_LIMIT, SINCE_CURSOR_LIMIT } from '../../constants.js';
 import { ChangeKind, EventType, ResolveData, SortOrder } from '../../enums.js';
 import { encode } from '../../lib/codec.js';
 import { mintSpecVersion } from '../../lib/spec.js';
@@ -86,7 +86,9 @@ export function eventResult(db: Db, event: Event, change: Change, params: Create
     });
     return { ...result, events: page.data, cursor: page.cursor, hasMore: page.hasMore };
   }
-  const skipped = skippedEvents(db, event.runId, params.eventCount, requireEventSlot(event.eventId), params.resolveData);
+  const slot = requireEventSlot(event.eventId);
+  const reports = params.inBand === true || slot - (params.eventCount ?? 0) <= OUT_OF_BAND_REPORT_LIMIT + 1;
+  const skipped = reports ? skippedEvents(db, event.runId, params.eventCount, slot, params.resolveData) : undefined;
   return skipped === undefined ? result : { ...result, ...skipped };
 }
 

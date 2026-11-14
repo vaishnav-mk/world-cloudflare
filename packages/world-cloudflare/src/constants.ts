@@ -35,6 +35,12 @@ export const EVENT_READ_BYTES = 512 * 1024;
 export const EVENT_PAGE_READS = 2;
 /** Events returned with `sinceCursor` on `events.create`. */
 export const SINCE_CURSOR_LIMIT = 1000;
+/**
+ * A write outside a spec 9 run's in-band fence that skipped more slots than this gets no
+ * skipped-slot report: the SDK drops a truncated report whole, and writes fanned out from one
+ * snapshot would otherwise each read every event before their own, quadratic in the fan-out.
+ */
+export const OUT_OF_BAND_REPORT_LIMIT = 100;
 
 /** A run's execution context is stored in the run's row and its run_created, so it stays small. */
 export const MAX_EXECUTION_CONTEXT_BYTES = 64 * 1024;
