@@ -15,9 +15,9 @@ Rows of the tables below, by status:
 | | Built | Partly | Missing | N/A |
 | --- | ---: | ---: | ---: | ---: |
 | Before | 33 | 7 | 35 | 9 |
-| After | 70 | 1 | 4 | 9 |
+| After | 69 | 2 | 4 | 9 |
 
-What is still missing is optional and outside the runtime's path: `describeRun`, `analytics`, `telemetry` and stream write sessions. The partial row is message retention, which the attempt cap bounds rather than age. The SDK's world-testing suite cannot be pointed at this World, so its scenarios are ported ([Conformance](#conformance)).
+What is still missing is optional and outside the runtime's path: `describeRun`, `analytics`, `telemetry` and stream write sessions. The partial rows are message retention, which the attempt cap bounds rather than age, and the queue hold, which `@workflow/world` 5.2.0 has no capability for. The SDK's world-testing suite cannot be pointed at this World, so its scenarios are ported ([Conformance](#conformance)).
 
 ## Spec versions and capabilities
 
@@ -27,13 +27,13 @@ What is still missing is optional and outside the runtime's path: `describeRun`,
 | Spec 8 runs (`SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM`) | Built | Built | e2e lanes | Every new run until the variable is set |
 | Spec 9 runs (`SPEC_VERSION_SINGLE_ORCHESTRATOR`) | Missing | Built | conformance, spec9, spec9-e2e lane | See [Spec 9](#spec-9) |
 | `inBandFence` | Missing | Built | conformance | Declared; the SDK's in-band fence suite passes, 13 tests |
-| `maxConcurrency` | Missing | Built | queue | One orchestrator delivery per spec 9 run at a time |
+| `maxConcurrency` | Missing | Built | queue | One replay per run at a time, spec 9 or earlier |
 | `hookRetention` | Built | Built | contract, conformance | |
 | `hookResumeDedup` | Built | Built | contract | Static, as world-local and world-postgres declare it. Vercel attests per lookup instead |
 | `resolvedHookResume` | Missing | Built | contract | Every resume is deduplicated; `requireHookResumeDedup` without a `resumeId` is a 400, and a missing hook a `HookNotFoundError`, both before anything is written |
 | `hookForceClaim` | Missing | Built | force-claim, e2e | See [Forced hook claims](#forced-hook-claims) |
 | `atomicStartHook` | Missing | Built | conformance, start-hook, e2e | See [Start Hooks](#start-hooks) |
-| `experimental_queueHold` | Missing | Built | queue | See [Queue](#queue). The runtime does not call it yet |
+| `experimental_queueHold` | Missing | Partly | queue | `@workflow/world` 5.2.0 has no such capability and its runtime never asks for a hold, so it is not declared; `queue()` still takes `experimental_hold` ([Queue](#queue)) |
 | `deploymentAffinity` | Missing | Built | contract, e2e lanes | A deployment ID names one release, run by this Worker or its retained executor, so the runtime's guard sends a misrouted delivery back to its run's deployment |
 | `dynamicWorkflowCode` | Partly | Built | contract, e2e | Before, inline code was stored but not declared and a code ref threw. Now inline or uploaded code is stored with the run; see `uploadDynamicWorkflowCode` |
 | `invoke` | N/A | N/A | | Vercel does not declare it either; request/response invocations need an in-process runner per run, which a Worker invocation is not |
@@ -111,10 +111,10 @@ A candidate whose token claim succeeded but whose run never committed, because b
 | `QueueOptions.idempotencyKey`, dedupe for 24 hours | Built | Built | queue | Keys are kept forever; a repeat next to a message in backoff changes nothing |
 | `QueueOptions.delaySeconds` | Built | Built | queue | |
 | `QueueOptions.retentionSeconds` | Partly | Partly | | No message expires by age, but one whose deliveries keep failing is dead-lettered after `QUEUE_MAX_ATTEMPTS`: about 25 minutes before, about 4 hours now (below) |
-| `QueueOptions.experimental_hold` | Missing | Built | queue | The shard enqueues the message behind a lease the sender renews (1 to 3,600 s, default 30). `consume` runs it as its first delivery; a `{ timeoutSeconds }` result or a `release` delivers it again at once under the same ID. Only this deployment's messages, and never a repeat of an accepted key |
+| `QueueOptions.experimental_hold` | Missing | Built | queue | Not in 5.2.0's `QueueOptions`, so the World types it itself (`HoldingQueue`). The shard enqueues the message behind a lease the sender renews (1 to 3,600 s, default 30). `consume` runs it as its first delivery; a `{ timeoutSeconds }` result or a `release` delivers it again at once under the same ID. Only this deployment's messages, and never a repeat of an accepted key |
 | `QueueOptions.specVersion`, `headers` | Built | Built | | The payload is devalue-encoded whatever the version |
 | `QueueOptions.region` | N/A | N/A | | No regions; Durable Objects are placed where they are first used |
-| One orchestrator delivery per spec 9 run | Missing | Built | queue | A spec 9 run's orchestrator messages, keyed timers included, go to its run's queue shard, which delivers one batch at a time and holds a run's second message in a batch until the batch ends. Step messages and intermediate timer hops are never held |
+| One replay per run at a time | Missing | Built | queue, stress | A run's workflow messages (`orchestratorRunIdOf`, any spec version), keyed timers included, go to its run's queue shard, which delivers one batch at a time and holds a run's second message in a batch until the batch ends. A wake that asks only for a replay is settled without a delivery once a later replay of its run has succeeded. Step messages and intermediate timer hops are never held. 5.2.0 asks this only of spec 9 runs; it also keeps the SDK's in-process step single-flight from making one request wait on a promise another settles, which Workers reject |
 | `{ timeoutSeconds: n }` by run spec | Partly | Built | queue, e2e lanes | Spec 9: the same message after `n` s, counted; `0` is a handoff, not counted. Spec 8: continued after `n` s. An unbounded value waits 900 s (spec 9) or 23 hours (spec 8), never 0 |
 | `meta.messageId` stable across redeliveries | Built | Built | queue | A copy made after a reset keeps it |
 | `meta.deliveryCount` | Partly | Built | queue | Counted per message in `delivery_counts`: 1 only on the first delivery. Before, it equalled the attempt, which counted delay waits |
@@ -180,7 +180,7 @@ A candidate whose token claim succeeded but whose run never committed, because b
 - **Spec 9 is opt-in.** Nothing changes for new runs until `WORKFLOW_SPEC_VERSION=9` is set on the Worker and every retained executor. Runs created before keep spec 8.
 - **Schema.** Store migrations `0003` and `0004` add `runs.seq_in_band`, `forced_disposals`, `token_takeovers` and `start_hook_refusals`; queue migrations `0002` and `0003` add `delivery_counts` and `holds`. All additive. Existing runs have no in-band count, so an in-band write to one is a 400; the spec 8 runtime never sends one.
 - **Queue accounting.** In-flight messages start counting deliveries from 0 when the new code reaches their shard, so each gets up to `QUEUE_MAX_ATTEMPTS` more deliveries. The fanout's own attempt cap no longer dead-letters; the shard does. The longer backoff applies to every failing message.
-- **Routing.** A spec 9 run's keyed timers move to the run's queue shard. No spec 9 run exists before this change, so no key's deduplication moves.
+- **Routing.** Every run's workflow messages, keyed timers included, already go to the run's queue shard on `main`; this branch adds delivery counts and spec 9 handoffs to that shard's serialization rather than a second one.
 - **Token release.** A write that frees a token now waits for the token's shard to apply the release, so it is free when the write returns. That adds one RPC to a run's last write when it held hooks.
 - **Inline budget.** `getRuntimeDeadline` raises the runtime's inline budget from 2 to 5 minutes per delivery on spec 8 runs too. A CPU-bound workflow near the 300 s CPU limit can set `WORKFLOW_V2_TIMEOUT_MS` to keep the old budget.
 - **`CONSUMER`.** Retained executors call `latestDeploymentId` on the main Worker's consumer, so deploy the main Worker first.

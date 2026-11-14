@@ -8,7 +8,7 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 | `QueueShard` | Queue shards: queue messages, delays, retries and idempotency keys; dead letters go to R2 |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
-Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It creates spec 8 runs, or spec 9 (single-orchestrator) runs with `WORKFLOW_SPEC_VERSION=9`, and advertises every capability Vercel's World does: `inBandFence`, `maxConcurrency`, `hookRetention`, `hookResumeDedup`, `resolvedHookResume`, `hookForceClaim`, `atomicStartHook`, `experimental_queueHold`, `deploymentAffinity` and `dynamicWorkflowCode`. It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
+Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It creates spec 8 runs, or spec 9 (single-orchestrator) runs with `WORKFLOW_SPEC_VERSION=9`, and advertises every capability Vercel's World does: `inBandFence`, `maxConcurrency`, `hookRetention`, `hookResumeDedup`, `resolvedHookResume`, `hookForceClaim`, `atomicStartHook`, `deploymentAffinity` and `dynamicWorkflowCode`. Its `queue()` also holds a message for its sender (`experimental_hold`), which `@workflow/world` 5.2.0 has no capability for. It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
 
 ## Requirements
 
