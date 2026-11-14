@@ -128,6 +128,14 @@ describe('large stream chunks', () => {
     expect(same(concat(await pieces(await streams.streams.get(runId, 'cancelled'))), chunk)).toBe(true);
   });
 
+  it('sends a small view of a large buffer without the rest of the buffer', async () => {
+    // RPC would carry the whole 40 MiB buffer, over its 32 MiB message limit.
+    const view = pattern(40 * MiB, 1).subarray(100, 116);
+    const runId = crypto.randomUUID();
+    await streams.streams.write(runId, 'view', view);
+    expect((await streams.streams.getChunks(runId, 'view')).data).toEqual([{ index: 0, data: new Uint8Array(view) }]);
+  });
+
   it('errors a read whose chunk is missing from R2', async () => {
     const runId = crypto.randomUUID();
     await streams.streams.write(runId, 'lost', pattern(2 * MiB, 1));

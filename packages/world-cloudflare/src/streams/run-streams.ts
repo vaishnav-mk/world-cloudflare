@@ -18,8 +18,10 @@ type ChunkPage = {
   done: boolean;
 };
 
-/** Copies a view into its own `ArrayBuffer`, the BLOB type Durable Object SQLite binds. */
-const toBuffer = (bytes: Uint8Array): ArrayBuffer => new Uint8Array(bytes).buffer;
+/** A chunk's `ArrayBuffer`, the BLOB type Durable Object SQLite binds; a copy only for a partial view. */
+const toBuffer = (bytes: Uint8Array): ArrayBuffer =>
+  bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer : new Uint8Array(bytes).buffer;
 
 /**
  * One object per run: the run's streams and its VM snapshot. Stream names and chunk positions are

@@ -1,6 +1,6 @@
 import { WorkflowWorldError } from '@workflow/errors';
 import type { AnyEventRequest } from '@workflow/world';
-import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../constants.js';
+import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES, PAYLOAD_REF_PREFIX, R2_PUT_PART_BYTES } from '../constants.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -37,9 +37,21 @@ export function createPayloads(bucket: R2Bucket) {
   /** What a Durable Object should store: `bytes` themselves, or a ref once they are in R2. */
   async function offload(runId: string, bytes: Uint8Array, written?: Written): Promise<Uint8Array> {
     // Small bytes that look like a ref go to R2 too, so a stored ref is never user data.
-    if (bytes.byteLength <= PAYLOAD_INLINE_MAX_BYTES && !isPayloadRef(bytes)) return bytes;
+    if (bytes.byteLength <= PAYLOAD_INLINE_MAX_BYTES && !isPayloadRef(bytes)) {
+      // RPC sends the whole buffer under a view, so a small view of a large buffer goes as a copy.
+      return bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+    }
     const key = `runs/${runId}/${crypto.randomUUID()}`;
-    await bucket.put(key, bytes);
+    // A part at a time: handed whole bytes, the runtime copies all of them before sending any.
+    const { readable, writable } = new FixedLengthStream(bytes.byteLength);
+    const writer = writable.getWriter();
+    const parts = (async () => {
+      for (let offset = 0; offset < bytes.byteLength; offset += R2_PUT_PART_BYTES) {
+        await writer.write(bytes.subarray(offset, offset + R2_PUT_PART_BYTES));
+      }
+      await writer.close();
+    })();
+    await Promise.all([bucket.put(key, readable), parts]);
     written?.set(key, bytes);
     return payloadRef(key);
   }

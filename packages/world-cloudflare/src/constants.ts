@@ -66,6 +66,8 @@ export const PAYLOAD_INLINE_MAX_BYTES = 1_048_576;
  * the step with an error instead.
  */
 export const PAYLOAD_MAX_BYTES = 18 * 1_048_576;
+/** A payload goes to R2 this many bytes at a time. */
+export const R2_PUT_PART_BYTES = 1_048_576;
 /** Starts a payload ref. No UTF-8 text, SDK payload or SDK stream frame starts with 0xff. */
 export const PAYLOAD_REF_PREFIX = Uint8Array.of(0xff, ...new TextEncoder().encode('r2:'));
 
