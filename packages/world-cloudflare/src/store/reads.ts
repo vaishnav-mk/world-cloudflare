@@ -4,7 +4,7 @@ import {
   type ListHooksParams, type ListWorkflowRunStepsParams, type ListWorkflowRunsParams, type PaginatedResponse, type Step,
   type StepWithoutData, type WorkflowRun, type WorkflowRunWithoutData,
 } from '@workflow/world';
-import { EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS } from '../constants.js';
+import { EVENT_PAGE_MAX_BYTES, EVENT_POLL_BATCH, EVENT_POLL_MS, MAX_TERMINAL_WAIT_MS } from '../constants.js';
 import { toJson } from '../lib/json.js';
 import type { ResolveDataMode } from '../types.js';
 import type { StoreContext } from './context.js';
@@ -98,16 +98,26 @@ export function listEventsByCorrelationId(store: StoreContext, params: ListEvent
   return store.pageReads.run(() => readEventPage(store.db, params));
 }
 
-/** Replays events after `cursor` (a slot), or waits for the next commit. `done` once a finished run is drained. */
+/**
+ * Replays events after `cursor` (a slot), up to `EVENT_POLL_BATCH` of them or `EVENT_PAGE_MAX_BYTES`
+ * of their JSON, or waits for the next commit. `done` once a finished run is drained.
+ */
 export async function nextEvents({ db, waiters }: StoreContext, runId: string, cursor: number, filter?: string[]) {
   if (!Number.isSafeInteger(cursor) || cursor < 0) throw new RangeError('Invalid subscription cursor');
   const read = () => {
-    const rows = [...db.events(runId, cursor, EVENT_POLL_BATCH)];
-    const nextCursor = rows.at(-1)?.slot ?? cursor;
+    const events: { eventId: string; eventType: string; data: string }[] = [];
+    let nextCursor = cursor;
+    let bytes = 0;
+    for (const row of db.events(runId, cursor, EVENT_POLL_BATCH)) {
+      nextCursor = row.slot;
+      if (filter && !filter.includes(row.kind)) continue;
+      const data = toJson(toEvent(row));
+      events.push({ eventId: slotToEventId(row.slot), eventType: row.kind, data });
+      bytes += data.length;
+      if (bytes >= EVENT_PAGE_MAX_BYTES) break;
+    }
     return {
-      events: rows.filter((row) => !filter || filter.includes(row.kind)).map((row) => ({
-        eventId: slotToEventId(row.slot), eventType: row.kind, data: toJson(toEvent(row)),
-      })),
+      events,
       cursor: nextCursor,
       done: isTerminalWorkflowRunStatus(db.getRun(runId).status) && nextCursor >= db.lastSlot(runId),
     };

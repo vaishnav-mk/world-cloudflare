@@ -47,7 +47,8 @@ export const CANCEL_MANY_CONCURRENCY = 20;
 
 /** Long polls. */
 export const EVENT_POLL_MS = 15_000;
-export const EVENT_POLL_BATCH = 100;
+/** Events per subscription read, which also stops at `EVENT_PAGE_MAX_BYTES` of JSON. */
+export const EVENT_POLL_BATCH = 1_000;
 export const STREAM_POLL_MS = 15_000;
 export const STREAM_READ_BATCH = 100;
 /**
