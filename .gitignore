@@ -2,11 +2,9 @@ node_modules/
 .wrangler/
 .swc/
 dist/
-.vendor/
 .well-known/
 worker-configuration.d.ts
 .dev.vars*
-/.swc
 wrangler.staging.jsonc
 wrangler.executor.staging*.jsonc
 scripts/remote-version-gate.mjs
