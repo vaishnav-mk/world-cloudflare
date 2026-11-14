@@ -189,9 +189,6 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return legacy.holdsRun(this.#store.db, runId);
   }
 
-  /** Stores still running the version with a run index push their runs here. Runs have no index now, so it only accepts them. */
-  async indexRun(_run: WorkflowRun, _slot: number, _released: string[]): Promise<void> {}
-
   // Dispatch outbox (`dispatch.ts`), called by the queue client and the queue shard's dead-letter handler.
 
   /** The outbox slot each queue message would settle, 0 where none is owed, in one call. */
