@@ -8,5 +8,5 @@ export default defineConfig({
   plugins: [cloudflareTest({ wrangler: { configPath: './wrangler.test.jsonc' } })],
   // Tests run in the `ssr` environment, against the package's source; see AGENTS.md.
   ssr: { resolve: { conditions: ['worlds-source'] } },
-  test: { include: ['test/**/*.test.ts'], exclude: ['test/e2e.test.ts', 'test/node-engine.test.ts', 'test/encrypted.test.ts', 'test/stress.test.ts', 'test/spec9-e2e.test.ts', 'test/world-testing.test.ts', 'test/replays.test.ts'] },
+  test: { include: ['test/**/*.test.ts'], exclude: ['test/e2e.test.ts', 'test/node-engine.test.ts', 'test/encrypted.test.ts', 'test/stress.test.ts', 'test/spec9-e2e.test.ts', 'test/world-testing.test.ts'] },
 });
