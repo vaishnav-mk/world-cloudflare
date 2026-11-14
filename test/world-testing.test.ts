@@ -49,7 +49,7 @@ it('numbers events by position', async () => {
   expect(slots.map(({ eventId }) => eventId)).toEqual(slots.map(({ slot }) => slotToEventId(slot ?? 0)));
 });
 
-it('runs twenty parallel steps, each once', async () => {
+it('completes twenty parallel steps in two batches', async () => {
   expect(await output(await run('brokenWf', []))).toEqual({ numbers: Array.from({ length: 20 }, () => expect.any(Number)) });
 }, 60_000);
 
@@ -104,6 +104,7 @@ it('retries a retryable step after its delay and catches a fatal one', async () 
   expect(result).toEqual({
     gotFatalError: true, retryableResult: { attempt: 2, duration: expect.any(Number), stepStartedAt: expect.any(Date) },
   });
+  expect(result.retryableResult.duration).toBeGreaterThanOrEqual(2000);
 }, 60_000);
 
 it('completes sequential, streaming, sleeping and parallel workflows', async () => {
