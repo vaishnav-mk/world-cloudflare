@@ -11,21 +11,21 @@ A [Workflow SDK](https://workflow-sdk.dev) v5 World that runs on Cloudflare Work
 | `src/` | Example Worker: HTTP API, queue consumer, retained executor |
 | `workflows/demo.ts` | Sample workflows |
 | `test/` | workerd tests and SDK end-to-end tests |
-| `patches/` | SDK patch that adds a Workers build target |
 | [`docs/contract-parity.md`](docs/contract-parity.md) | What is implemented and what is tested |
 | [`docs/limits.md`](docs/limits.md) | Measured payload, step, CPU and concurrency limits |
-| [`docs/isolate-engine.md`](docs/isolate-engine.md) | The native V8 workflow engine (`WORKFLOW_VM=isolate`), measured against QuickJS |
+| [`docs/isolate-engine.md`](docs/isolate-engine.md) | The native V8 workflow engine (the SDK's node engine, `WORKFLOW_VM=node`), measured against QuickJS |
 
 ## Run it
 
-Requires Node 24, pnpm and Git. Start with the setup script rather than `pnpm install`: it clones the pinned SDK, applies the patch, then builds and links it.
+Requires Node 24 and pnpm. The SDK is the published `workflow` 5.5.0, unpatched.
 
 ```sh
-./scripts/setup-sdk.sh
+pnpm install
+pnpm run build:workflow   # compiles workflows/ with @workflow/world-cloudflare/build
 pnpm run typecheck
-pnpm test            # workerd storage, queue, stream and contract tests
-pnpm run test:e2e    # real SDK runs in workerd: QuickJS, the isolate engine, and encrypted
-pnpm build           # workflow build and a Wrangler dry run
+pnpm test                 # workerd storage, queue, stream and contract tests
+pnpm run test:e2e         # real SDK runs in workerd: QuickJS, the native engine, and encrypted
+pnpm build                # the workflow build and a Wrangler dry run
 ```
 
 ## Example API
@@ -80,6 +80,6 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 - A step that exceeds the CPU limit is retried until the queue gives up, and holds up its delivery lane meanwhile. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
 - Payloads and VM snapshots are stored in plaintext unless the Worker has a `WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)), and that secret cannot be rotated. Finished runs are kept forever, and forced hook claims are not supported. See [contract parity](docs/contract-parity.md).
 - Steps run at least once, so give their side effects idempotency keys.
-- The SDK patch is pinned to one SDK commit; rebase it before upgrading the SDK.
+- `@workflow/world-cloudflare/build` relies on a few internals of `@workflow/builders` and `@workflow/core` 5.5.0 (see its comments); check it when upgrading the SDK.
 - QuickJS probably needs more CPU than the Free plan's 10 ms limit.
-- Workflow code runs in QuickJS by default, with VM snapshots so a new invocation does not replay the whole log. The opt-in isolate engine (`WORKFLOW_VM=isolate`) runs it natively in V8; see [isolate engine](docs/isolate-engine.md).
+- Workflow code runs in QuickJS by default, with VM snapshots so a new invocation does not replay the whole log. The SDK's node engine (`WORKFLOW_VM=node`) runs it natively in V8 on the World's `node:vm` replacement; see [isolate engine](docs/isolate-engine.md).

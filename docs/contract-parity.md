@@ -1,6 +1,6 @@
 # Workflow SDK v5 contract parity
 
-Status against the pinned `@workflow/world` 5.x interface (`.vendor/workflow-sdk/packages/world/src/interfaces.ts`) and the capabilities the Vercel World advertises.
+Status against the pinned `@workflow/world` 5.x interface (`@workflow/world` 5.2.0, `dist/interfaces.d.ts`) and the capabilities the Vercel World advertises.
 
 - **Built**: implemented in this World.
 - **Workerd**: covered by `pnpm test` or `pnpm run test:e2e`.
@@ -112,7 +112,7 @@ Each event that owes a queue message writes an outbox row in its own transaction
 | Versioned schema migrations | ✓ | Drizzle Kit, applied by each Durable Object on start; tested over pre-Drizzle tables |
 | Published to npm | ✗ | The `@workflow` scope belongs to Vercel |
 | Listed in `worlds-manifest.json` | ✗ | |
-| SDK patch upstreamed | ✗ | Pinned to one SDK commit |
+| Runs on the published SDK | ✓ | `workflow` 5.5.0 unpatched; two performance changes are prepared upstream (the spec 8 event-log memo, and QuickJS's inline window) |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World |
 | Retention and cleanup of finished runs | ✗ | Runs, outbox and dedup rows, and R2 payloads, are kept forever |
 | Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers with QuickJS, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |

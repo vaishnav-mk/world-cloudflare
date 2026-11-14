@@ -12,24 +12,40 @@ Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/REA
 
 ## Requirements
 
-- The Workflow SDK built with this repo's [patch](../../patches/workflow-sdk-cloudflare-workers.patch), which adds `workflow build --target cloudflare-workers`.
-- `WORKFLOW_VM=quickjs` (or `isolate`, see [isolate engine](../../docs/isolate-engine.md)) and the `nodejs_compat` flag, because workerd has no working `node:vm`.
+- The published Workflow SDK (`workflow` 5.5.0), with workflows built by `@workflow/world-cloudflare/build` (below).
+- The `nodejs_compat` flag. Workflow code runs on QuickJS (`WORKFLOW_VM=quickjs`) or natively on the SDK's node engine (`WORKFLOW_VM=node`, or unset), which the build gives a `node:vm` of its own; see [isolate engine](../../docs/isolate-engine.md).
+- Wrangler `alias` entries for the SDK packages that do not load on Workers, which the SDK imports to pick a default World and to hand off background work:
+
+  ```jsonc
+  "alias": {
+    "@workflow/world-local": "@workflow/world-cloudflare/stubs/world",
+    "@workflow/world-vercel": "@workflow/world-cloudflare/stubs/world",
+    "@vercel/functions": "@workflow/world-cloudflare/stubs/vercel-functions"
+  }
+  ```
+
+  In a vitest config for the Workers pool, pass `workerAliases` from `@workflow/world-cloudflare/build` as `resolve.alias`.
 - A Wrangler rule that bundles the migration SQL as text: `"rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]`.
 - For VM snapshots, either an [encryption secret](#encryption) or `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1`. With neither, the SDK replays each run's whole event log on every invocation. Without a secret, snapshots hold the run's memory in plaintext, as the store holds its payloads.
 
 ## Add it to a Worker
 
-Build your workflows with `workflow build --target cloudflare-workers`, then:
+Build your workflows before `wrangler dev` or `wrangler deploy`:
+
+```sh
+node node_modules/@workflow/world-cloudflare/src/build.ts workflows   # the directories to scan; default .
+```
+
+It writes `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handler, the steps module it loads, the QuickJS WebAssembly modules and `manifest.json`. `flow.mjs` loads the SDK on its first delivery, not at startup. Then:
 
 ```ts
-import { setWorld } from 'workflow/runtime';
-import { createQueueConsumer, createWorld, drainOutbox, type WorldEnv } from '@workflow/world-cloudflare';
+import { createQueueConsumer, createWorld, drainOutbox, registerWorld, type WorldEnv } from '@workflow/world-cloudflare';
 import { POST as flow } from '../.well-known/workflow/v1/flow.mjs';
 
 export { QueueShard, RunStreams, WorldStore } from '@workflow/world-cloudflare';
 export const QueueConsumer = createQueueConsumer(flow);
 
-setWorld(createWorld());
+registerWorld(createWorld());
 
 export default {
   scheduled: (_controller: ScheduledController, env: WorldEnv) => drainOutbox(env),
@@ -51,7 +67,7 @@ Bindings, as in the repo's `wrangler.jsonc`:
 
 Add a `* * * * *` cron so `drainOutbox` can recover the legacy store's dispatches whose alarm was lost, and wake the queue shards.
 
-`WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`. Call `setWorld(createWorld())` instead.
+`WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`. Register the World instead. `registerWorld()` does what `setWorld()` from `workflow/runtime` does, without importing it: `workflow/runtime` 5.5.0 draws a random ID as it loads, which Workers forbid at startup. The SDK's `main` defers that ID, so `setWorld()` works again from its next release.
 
 ## Store shards
 
@@ -137,7 +153,7 @@ Without the secret the World stores plaintext, as before.
 To keep in-flight runs on the code that started them, upload one executor per release to a Workers for Platforms dispatch namespace:
 
 ```ts
-setWorld(createWorld());
+registerWorld(createWorld());
 export default createExecutor(flow);
 ```
 
@@ -148,6 +164,7 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 | Export | Use |
 | --- | --- |
 | `createWorld(env?)` | The World, including VM snapshot storage (`experimental_snapshots`) and `runs.cancelMany`; also the default export |
+| `registerWorld(world)` | Makes `world` the SDK's World, as `setWorld()` does |
 | `WorldStore`, `QueueShard`, `RunStreams` | Durable Object classes to re-export from the Worker |
 | `createQueueConsumer(flow)` | The `QueueConsumer` entrypoint class |
 | `createExecutor(flow)` | A retained executor's default export |
@@ -156,6 +173,8 @@ Each executor binds the three Durable Objects with `script_name` set to the main
 | `EventType`, `RunStatus`, `StepStatus`, `WaitStatus`, `ResolveData` | Enums of the SDK's string values |
 | `handleWorldRpc(request, world, token)` | Serves the World over HTTP for the remote client |
 | `toJson(value)` | JSON with bytes as base64 and payload refs as `{ "$ref": key }`, for HTTP responses |
+
+`@workflow/world-cloudflare/build` exports `buildWorkflows({ cwd?, dirs? })`, which the command above runs, and `workerAliases`, the replacements for the Wrangler `alias` and vitest `resolve.alias`.
 
 ## Remote client
 

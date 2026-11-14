@@ -1,7 +1,7 @@
 // Runs `sequentialSteps` against a local `wrangler dev` and prints ms per step as the log grows,
 // from the events' own timestamps. See docs/limits.md, "Step throughput and log size".
 //
-//   pnpm exec wrangler dev --port 8811 --var WORLD_RPC_TOKEN:x --var WORKFLOW_VM:isolate \
+//   pnpm exec wrangler dev --port 8811 --var WORLD_RPC_TOKEN:x --var WORKFLOW_VM:node \
 //     --var WORKFLOW_V2_TIMEOUT_MS:1800000
 //   node scripts/perf/run-steps.mjs [steps=15000]
 import { parse, stringify } from 'devalue';

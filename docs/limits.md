@@ -93,10 +93,10 @@ On Workers, run the probes with `WORKFLOW_BASE_URL=https://<worker>.workers.dev 
 
 ## Long runs
 
-A 30,000-step `sequentialSteps` run (90,003 events) with QuickJS and per-deployment executors completed in 1,402 s, 81 s of it in pauses between invocations. Three things made that possible:
+A 30,000-step `sequentialSteps` run (90,003 events) with QuickJS and per-deployment executors completed in 1,402 s, 81 s of it in pauses between invocations, on the SDK with this repo's old patch. Three things made that possible:
 - **VM snapshots.** The World implements `experimental_snapshots`: every 1,000 events (`WORKFLOW_SNAPSHOT_THRESHOLD`) the SDK saves the QuickJS heap when an invocation suspends, and the next one restores it instead of replaying the whole log. Each run's snapshot lives in its `RunStreams` object in 1.9 MB parts written in one transaction, and moves over RPC as a stream because it can pass 32 MiB. Without snapshots, the replay at 35,000 events took 80 s.
-- **An inline window for QuickJS.** The SDK runs steps inline in one invocation until its replay budget runs out, but that budget excludes step time, so a QuickJS invocation hit Workers' 300 s CPU limit first and never suspended or snapshotted. The SDK patch gives QuickJS the node engine's 2 minute inline window.
-- **No log rereads.** The SDK walked the whole event log once per step, so step cost grew with the log (13.6 ms per step at 30,000 events locally). The SDK patch memoizes those passes (`runtime/event-log-memo.ts`), and the SDK drops settled operations from QuickJS's pending list: 1.2 ms per step at 30,000 events.
+- **An inline window for QuickJS.** The SDK runs steps inline in one invocation until its replay budget runs out, but that budget excludes step time, so a QuickJS invocation hit Workers' 300 s CPU limit first and never suspended or snapshotted. The old SDK patch gave QuickJS the node engine's 2 minute inline window. The published SDK 5.5.0 does not have it, so a long QuickJS run can hit the CPU limit again (not re-measured on Workers); the change is prepared upstream.
+- **No log rereads.** The SDK walked the whole event log once per step, so step cost grew with the log (13.6 ms per step at 30,000 events locally). The SDK now drops settled operations from QuickJS's pending list, and QuickJS on 5.5.0 stays at 1.6 to 2.3 ms per step to 27,000 events. The node engine on 5.5.0 still rereads the log: 7.0 ms per step at 3,000 events and 15.8 ms at 27,000, against 6.2 and 6.9 ms with the old patch's memo (`runtime/event-log-memo.ts`), which is prepared upstream ([isolate engine](isolate-engine.md#measurements)).
 
 The SDK takes the per-run event ceiling from the World's `run_started` result, and this World returns none, so runs are not stopped at 25,000 events.
 
@@ -124,7 +124,7 @@ zstd compression in workerd throws on incompressible input from 64 KiB, so the t
 | --- | --- |
 | Worker CPU per invocation | 30 s default, 300 s maximum on Workers Paid |
 | Worker memory | 128 MB per isolate |
-| Worker startup | 1 s; the main Worker with the workflow bundle measured 518 to 720 ms and was rejected once, and `src/dispatcher.ts` without it 279 to 298 ms |
+| Worker startup | 1 s; with the old SDK patch the main Worker with the workflow bundle measured 518 to 720 ms and was rejected once, and `src/dispatcher.ts` without it 279 to 298 ms. The workflow bundle now loads on the first delivery, and `wrangler check startup` measures about 40 ms of CPU locally for either |
 | Subrequests per invocation | 10,000 default; the templates raise it to 1,000,000 because the SDK makes about one Durable Object call per event |
 | RPC message | 32 MiB serialized |
 | Durable Object alarm | 15 minutes wall time; a flow delivery may run 14 minutes |
