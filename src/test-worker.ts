@@ -20,6 +20,7 @@ export class Sink extends DurableObject<Env> {
   async logged() { return await this.ctx.storage.get<DeliveryLog[]>('log') ?? []; }
 }
 export class QueueConsumer extends WorkerEntrypoint<Env> {
+  latestDeploymentId() { return 'test-v1'; }
   async consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {
     const wake: DeliveryOutcome = { kind: DeliveryResult.Wake, seconds: 0.1 };
     if (deliveries.some((delivery) => delivery.body.queueName.endsWith('_poison'))) return deliveries.map(() => wake);

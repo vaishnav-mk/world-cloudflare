@@ -17,6 +17,11 @@ export function createQueueConsumer(flow: FlowHandler) {
      * Runs a batch of deliveries side by side (the shard hands over at most 10) and returns each
      * one's outcome, so a slow or failing flow holds up and retries only itself.
      */
+    /** This Worker's deployment: the latest, since every executor's `CONSUMER` binding reaches it. */
+    latestDeploymentId(): string {
+      return this.env.DEPLOYMENT_ID;
+    }
+
     consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {
       const startedAt = Date.now();
       return Promise.all(deliveries.map((delivery) => this.#consumeOne(delivery, startedAt)));
@@ -41,7 +46,7 @@ export function createQueueConsumer(flow: FlowHandler) {
       const { EXECUTORS: executors, DEPLOYMENT_ID: current } = this.env;
       if (!executors) {
         if (deployment !== current) throw new Error(`Deployment ${deployment} is unavailable`);
-        return withRequestContext(this.ctx, () => flow(request));
+        return withRequestContext(this.ctx, () => flow(request), request);
       }
       const script = executorFor(this.env, deployment);
       if (!script) throw new Error(`Deployment ${deployment} is unavailable`);

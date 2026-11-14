@@ -1,6 +1,7 @@
 import { env as platformEnv } from 'cloudflare:workers';
 import type { World } from '@workflow/world';
 import { createGetEncryptionKeyForRun } from './lib/encryption.js';
+import { currentDeadline } from './lib/request-context.js';
 import { mintSpecVersion } from './lib/spec.js';
 import { createQueue } from './queue/queue.js';
 import { createStorage } from './store/storage.js';
@@ -30,6 +31,10 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       // `WorldStore.claimHookTokenForced`.
       hookForceClaim: true,
     },
+    // The queue gives up on a delivery after FLOW_ATTEMPT_TIMEOUT_MS, so the SDK hands off before then.
+    getRuntimeDeadline: async () => currentDeadline(),
+    // `start({ deploymentId: 'latest' })`: the main Worker's deployment, also from a retained executor.
+    resolveLatestDeploymentId: () => env.CONSUMER.latestDeploymentId(),
     ...createStorage(env),
     ...createQueue(env),
     ...createStreamer(env),

@@ -15,7 +15,7 @@ export function createExecutor(flow: FlowHandler) {
       if (this.ctx.props.targetDeployment !== this.env.DEPLOYMENT_ID) {
         return new Response('Deployment mismatch', { status: 409 });
       }
-      return withRequestContext(this.ctx, () => flow(request));
+      return withRequestContext(this.ctx, () => flow(request), request);
     }
   };
 }

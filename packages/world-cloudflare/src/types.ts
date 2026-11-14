@@ -9,8 +9,8 @@ export type WorldEnv = {
   WORLD_STORE: DurableObjectNamespace<WorldStore>;
   QUEUE_SHARD: DurableObjectNamespace<QueueShard>;
   RUN_STREAMS: DurableObjectNamespace<RunStreams>;
-  /** Service binding to the Worker's own `QueueConsumer` entrypoint. */
-  CONSUMER: { consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> };
+  /** Service binding to the main Worker's `QueueConsumer` entrypoint, from it and from its retained executors. */
+  CONSUMER: { consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]>; latestDeploymentId(): Promise<string> };
   DLQ: R2Bucket;
   /** Payloads and stream chunks too large to keep in a Durable Object, keyed `runs/<runId>/<id>`. */
   PAYLOADS: R2Bucket;
