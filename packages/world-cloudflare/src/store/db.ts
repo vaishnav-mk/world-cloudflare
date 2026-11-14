@@ -11,7 +11,7 @@ import type { StoreSchema } from './tables.js';
 export type RecordTable = 'runs' | 'steps' | 'hooks' | 'index_runs' | 'index_hooks';
 
 /** A hook another run took over: its token, the hook that took it, and what the takeover answered. */
-export type ForcedDisposal = { token: string; claimedBy: { runId: string; hookId: string }; claimedFrom: HookClaimedFrom };
+type ForcedDisposal = { token: string; claimedBy: { runId: string; hookId: string }; claimedFrom: HookClaimedFrom };
 
 /** Upserts replace the encoded entity and keep the row's identity columns. */
 const replaceData = { data: new Raw('excluded.data') };

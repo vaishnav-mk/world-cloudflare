@@ -4,7 +4,7 @@ import { DeliveryResult, type Delivery, type DeliveryOutcome } from '@workflow/w
 export { QueueShard, Runner, RunStreams, WorldStore } from '@workflow/world-cloudflare';
 
 /** One delivery as a `_timed` or `_handoff` queue saw it. */
-export type DeliveryLog = { id: string; runId: string; attempt: number; deliveryCount?: number; start: number; end: number };
+type DeliveryLog = { id: string; runId: string; attempt: number; deliveryCount?: number; start: number; end: number };
 
 type Env = { SINK: DurableObjectNamespace<Sink> };
 export class Sink extends DurableObject<Env> {

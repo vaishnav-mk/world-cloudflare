@@ -136,15 +136,15 @@ export type EventOf<T extends EventType> = Extract<AnyEventRequest, { eventType:
  * name it. `@workflow/world` 5.2.0 declares none of it, and its runtime never asks for a hold.
  */
 export type QueueHandler = Parameters<Queue['createQueueHandler']>[1];
-export type QueueHoldOptions = { visibilityTimeoutSeconds?: number };
-export type HeldQueueMessage = {
+type QueueHoldOptions = { visibilityTimeoutSeconds?: number };
+type HeldQueueMessage = {
   readonly status: 'held';
   readonly messageId: MessageId;
   readonly leaseExpiresAt: Date;
   consume(handler: QueueHandler): Promise<void>;
   release(delaySeconds?: number): Promise<void>;
 };
-export type QueueHoldResult = HeldQueueMessage | { readonly status: 'not_held'; readonly reason: 'unsupported' | 'duplicate' };
+type QueueHoldResult = HeldQueueMessage | { readonly status: 'not_held'; readonly reason: 'unsupported' | 'duplicate' };
 export type QueueResult = { messageId: MessageId | null; experimental_hold?: QueueHoldResult };
 /** The World's `Queue`, whose `queue()` also takes `experimental_hold`. */
 export type HoldingQueue = Omit<Queue, 'queue'> & {
