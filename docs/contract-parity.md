@@ -1,23 +1,19 @@
 # Workflow SDK v5 contract parity
 
-The gap list below is taken from the contract itself, the published `@workflow/world` 5.2.0 (`dist/*.d.ts`) run by `workflow` 5.5.0: every method, option, capability and spec-version rule in its interfaces, capabilities, spec versions, events, queue and start Hooks that Vercel's World implements or the runtime uses.
+Every method, option, capability and spec-version rule of the contract, the published `@workflow/world` 5.2.0 run by `workflow` 5.5.0, that Vercel's World implements or the runtime uses. The target is the behaviour the SDK sees: where a row names something of Vercel's platform (OIDC, billing, regions), it says what this World does instead.
 
-- **Before** is `main` at `3f24570`; **After** is this branch.
+- **Before** is `3f24570`, the World before this contract work; **After** is the current code.
 - **Built**: implemented as the contract describes. **Partly**: implemented with a stated gap. **Missing**: not implemented. **N/A**: the contract says a World like this one omits it.
-- **Tests** names where it is checked. `pnpm test` runs the workerd tests; `pnpm run test:e2e` runs real SDK runs in workerd on four lanes: QuickJS at spec 8, the native engine, encrypted, and QuickJS at spec 9 (`WORKFLOW_SPEC_VERSION=9`).
-
-The target is the behaviour the SDK sees. Vercel's OIDC, billing, dashboard and regions are out of scope; where a contract item names one, the row says what this World does instead.
+- **Tests** names where it is checked. `pnpm test` runs the workerd tests; `pnpm run test:e2e` runs real SDK runs in workerd on four lanes: QuickJS at spec 8, the node engine, encrypted, and QuickJS at spec 9.
 
 ## Summary
-
-Rows of the tables below, by status:
 
 | | Built | Partly | Missing | N/A |
 | --- | ---: | ---: | ---: | ---: |
 | Before | 33 | 7 | 35 | 9 |
 | After | 69 | 2 | 4 | 9 |
 
-What is still missing is optional and outside the runtime's path: `describeRun`, `analytics`, `telemetry` and stream write sessions. The partial rows are message retention, which the attempt cap bounds rather than age, and the queue hold, which `@workflow/world` 5.2.0 has no capability for. The SDK's world-testing suite cannot be pointed at this World, so its scenarios are ported ([Conformance](#conformance)).
+What is missing is optional and off the runtime's path: `describeRun`, `analytics`, `telemetry` and stream write sessions. The partial rows are message retention, which the attempt cap bounds rather than age, and the queue hold, which 5.2.0 has no capability for.
 
 ## Spec versions and capabilities
 
@@ -86,20 +82,11 @@ What is still missing is optional and outside the runtime's path: `describeRun`,
 
 ## Forced hook claims
 
-The token's shard coordinates a takeover across three stores: the claimer's, the token's and the holder's.
-
-1. The claimer's store asks the token's shard (`claimHookTokenForced`). The shard records the takeover in `token_takeovers`, with its alarm armed first.
-2. The shard asks the holder's store (`disposeForcedHook`), which journals `hook_disposed{forceClaimedBy}` while the run is live, removes the hook and records the takeover in `forced_disposals`. A running holder below spec 8 is refused: the claimer journals `hook_conflict` with `forceRefusedReason: 'victim-spec-version'`. A finished holder with a retained token loses it without a write to its log.
-3. Only then does the token move to the claimer, whose hook names what it took in `claimedFrom`. The claimer journals `hook_created{force, forceClaimedFrom}`, and the runtime wakes the holder.
-4. A resume that found the holder before the move is refused there with `HookForceClaimedError` naming the claimer, after the holder's store asks the token's shard to finish the move. A hook taken before its own creation committed is created and disposed in one write.
-
-A failed call leaves the takeover row, and the token's shard retries it from its alarm. `force-claim.test.ts` covers each step; the e2e lanes take a real run's token over and resume the claimer.
+The token's shard records the takeover in `token_takeovers`, asks the holder's store to journal `hook_disposed{forceClaimedBy}` and drop the hook (`forced_disposals`), and only then gives the token to the claimer, whose `hook_created` names what it took in `forceClaimedFrom`. A running holder below spec 8 is refused, and the claimer journals `hook_conflict` with `forceRefusedReason: 'victim-spec-version'`. A resume that found the holder before the move is refused with `HookForceClaimedError` naming the claimer. The shard's alarm retries a takeover a failed call left. `force-claim.test.ts` covers each step, and the e2e lanes take a real run's token over.
 
 ## Start Hooks
 
-`start({ experimental_hook })` is admitted by the run's store: it claims the token on its shard, then creates the run with the start Hook `startHookId(runId)`, so the run and its Hook commit together. A refusal is recorded in `start_hook_refusals`, so every later copy of the candidate, through `run_created` or `run_started`, is refused naming the same run. The SDK's atomic start Hook suite passes, 25 tests; its 7 orphan-bound cases skip because this World reads the Durable Objects' clock, and `start-hook.test.ts` crosses the 24-hour bound with a candidate minted in the past instead. Retention is limited to 30 days, as world-local's default.
-
-A candidate whose token claim succeeded but whose run never committed, because both of its copies died, keeps its token. The SDK retries a start with the same candidate, so this needs both the direct write and the queued copy to be lost.
+The run's store admits `start({ experimental_hook })`: it claims the token on its shard, then creates the run with the start Hook `startHookId(runId)`, so the two commit together. A refusal is recorded in `start_hook_refusals`, so every later copy of the candidate is refused naming the same run. The SDK's atomic start Hook suite passes (25 tests); its 7 orphan-bound cases skip because this World reads the Durable Objects' clock, and `start-hook.test.ts` crosses the 24-hour bound with a candidate minted in the past instead. Retention is limited to 30 days, as world-local's default. A candidate whose token claim succeeded but whose run never committed, because both its direct write and its queued copy were lost, keeps its token.
 
 ## Queue
 
@@ -140,7 +127,7 @@ A candidate whose token claim succeeded but whose run never committed, because b
 | Item | Before | After | Tests | Notes |
 | --- | --- | --- | --- | --- |
 | `getEncryptionKeyForRun` | Built | Built | encryption, encrypted lane | Per-run HKDF keys from `WORKFLOW_ENCRYPTION_SECRET`; no rotation |
-| `getRuntimeDeadline` | Missing | Built | request-context | `FLOW_ATTEMPT_TIMEOUT_MS` (14 minutes) after the consumer took the delivery, when the queue gives up on it. This raises the runtime's inline budget from 2 to 5 minutes, and lets spec 9 stop starting inline steps a minute before |
+| `getRuntimeDeadline` | Missing | Built | request-context | `FLOW_DELIVERY_BUDGET_MS` (2 minutes) after the consumer took the delivery, well inside the CPU limit, so spec 9 stops starting inline steps in time |
 | `resolveLatestDeploymentId` | Missing | Built | request-context | The main Worker's `DEPLOYMENT_ID`, asked through `CONSUMER`, so a retained executor gets the latest release rather than its own |
 | `uploadDynamicWorkflowCode` | Missing | Built | contract, e2e | To R2 at `runs/<runId>/dynamic-code/<uuid>`; a run accepts a ref only under its own prefix |
 | `validateRunExecutionContext` | Missing | Built | contract | 64 KiB of JSON, which the run's row and `run_created` both hold |
@@ -153,10 +140,7 @@ A candidate whose token claim succeeded but whose run never committed, because b
 
 ## Conformance
 
-`@workflow/world-testing` starts the World in a Node server, which cannot host a World bound to Durable Objects, so it cannot be pointed at this one. Instead:
-
-- `test/conformance.test.ts` runs the SDK's own `in-band-fence-conformance` (13 tests) and `atomic-start-hook-conformance` (25 tests, 7 orphan-bound cases skipped), imported by path from `@workflow/world`.
-- `test/world-testing.test.ts` ports the world-testing scenarios with their workflows (`workflows/world-testing.ts`) and runs them on the QuickJS, native-engine and spec 9 lanes: addition, slot IDs, parallel steps, the fence counters, hook token release, hook collection, null bytes, retryable and fatal errors, the inline-execution workflows and `skip-step-inputs`. Left out: flow-invocation counts, which read world-local's queue, and the lineage workflows, whose body-level `start()` does not load in the workerd test bundle.
+`@workflow/world-testing` starts the World in a Node server, which cannot host a World bound to Durable Objects. Instead `test/conformance.test.ts` runs the SDK's `in-band-fence-conformance` (13 tests) and `atomic-start-hook-conformance` suites, imported by path from `@workflow/world`, and `test/world-testing.test.ts` ports the world-testing scenarios with their workflows (`workflows/world-testing.ts`) to the QuickJS, node engine and spec 9 lanes. Left out: flow-invocation counts, which read world-local's queue, and the lineage workflows, whose body-level `start()` does not load in the workerd test bundle.
 
 ## Operations
 
@@ -167,24 +151,20 @@ A candidate whose token claim succeeded but whose run never committed, because b
 | Versioned schema migrations | ✓ | Drizzle Kit, additive, applied by each Durable Object on start |
 | Published to npm | ✗ | The `@workflow` scope belongs to Vercel |
 | Listed in `worlds-manifest.json` | ✗ | |
-| Runs on the published SDK | ✓ | `workflow` 5.5.0 unpatched; two performance changes are prepared upstream (the spec 8 event-log memo, and QuickJS's inline window) |
+| Runs on the published SDK | ✓ | `workflow` 5.5.0 as published; two performance changes are prepared upstream (the spec 8 event-log memo, and QuickJS's inline window) |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World; its scenarios are ported ([Conformance](#conformance)) |
 | Retention and cleanup of finished runs | ✗ | Runs, outbox, dedup and takeover rows, and R2 payloads, are kept forever |
 | Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers with QuickJS, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |
 | Cleanup of orphaned R2 payloads | ✗ | A write that fails after its payload reached R2 leaves the object behind |
 | Store shards, no single object per run or token | ✓ | Store shards hold runs and hook tokens, 128 by default, and `SHARD_EPOCHS` adds more for new runs; runs created before them stay in the legacy store |
-| Sharding beyond one queue shard | ✓ | 64 queue shards |
+| Sharding beyond one queue shard | ✓ | 256 queue shards by default |
 | Multi-region placement | ✗ | |
 
-## Rollout
+## Upgrading
 
-- **Spec 9 is opt-in.** Nothing changes for new runs until `WORKFLOW_SPEC_VERSION=9` is set on the Worker and every retained executor. Runs created before keep spec 8.
-- **Schema.** Store migrations `0003` and `0004` add `runs.seq_in_band`, `forced_disposals`, `token_takeovers` and `start_hook_refusals`; queue migrations `0002` and `0003` add `delivery_counts` and `holds`. All additive. Existing runs have no in-band count, so an in-band write to one is a 400; the spec 8 runtime never sends one.
-- **Queue accounting.** In-flight messages start counting deliveries from 0 when the new code reaches their shard, so each gets up to `QUEUE_MAX_ATTEMPTS` more deliveries. The fanout's own attempt cap no longer dead-letters; the shard does. The longer backoff applies to every failing message.
-- **Routing.** Every run's workflow messages, keyed timers included, already go to the run's queue shard on `main`; this branch adds delivery counts and spec 9 handoffs to that shard's serialization rather than a second one.
-- **List index.** Store migration `0005` adds the index outbox and the index shards' tables, all additive. Each store backfills the index on its first wake after the deploy, and lists and `hooks.get` ask every store until all have; the first such list wakes every store. A store that took writes on a version without the index after it backfilled (a rollback) leaves those changes out: delete its `index-backfill` storage key and its `index_sources` rows to backfill it again.
-- **Token release.** A write that frees a token now waits for the token's shard to apply the release, so it is free when the write returns. That adds one RPC to a run's last write when it held hooks.
-- **Inline budget.** `getRuntimeDeadline` raises the runtime's inline budget from 2 to 5 minutes per delivery on spec 8 runs too. A CPU-bound workflow near the 300 s CPU limit can set `WORKFLOW_V2_TIMEOUT_MS` to keep the old budget.
-- **`CONSUMER`.** Retained executors call `latestDeploymentId` on the main Worker's consumer, so deploy the main Worker first.
-- **Runners.** The `Runner` class needs a `v2` migration (`new_sqlite_classes`) and a `RUNNER` binding, so deploy the main Worker at once, not gradually. Queue shards hand deliveries to runners once the new code reaches them; a delivery in flight on the old code is cut off by the deploy and delivered again. The current deployment's executor needs the `RUNNER` binding too, and `EXECUTOR_ROUTES` must name it, because invocations run there.
-- **Retained executors built before runners** keep working: their runs' deliveries reach them through runners. Their World does not declare `invoke`, so their spec 8 step deliveries still read the whole log and the last ones replay inline, beside the run's runner, as on `main`, until those runs drain. A hook resume for such a run from the main Worker is an invocation, which the current deployment handles, and its wake reaches the old executor.
+- **Spec 9 is opt-in.** Nothing changes for new runs until `WORKFLOW_SPEC_VERSION=9` is set on the Worker and every retained executor. Existing runs keep their spec version.
+- **Schema changes are additive** and each Durable Object applies them on start. An existing run has no in-band count, so an in-band write to one is a 400; the spec 8 runtime never sends one.
+- **List index.** Each store backfills the index on its first wake after the upgrade, and lists and `hooks.get` ask every store until all have. A store that took writes on a version without the index after it backfilled (a rollback) leaves those changes out: delete its `index-backfill` storage key and its `index_sources` rows to backfill it again.
+- **Runners.** The `Runner` class needs its own Wrangler migration (`new_sqlite_classes`) and a `RUNNER` binding, so deploy the main Worker at once, not gradually. The current deployment's executor needs `RUNNER` too, and `EXECUTOR_ROUTES` must name it, because invocations run there.
+- **Deploy the main Worker first.** Retained executors call `latestDeploymentId` on its `CONSUMER`.
+- **Executors built before runners** keep working: their deliveries reach them through runners. Their World does not declare `invoke`, so their spec 8 step deliveries still read the whole log until those runs drain.
