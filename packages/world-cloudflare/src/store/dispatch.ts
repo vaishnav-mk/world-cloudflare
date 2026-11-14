@@ -11,6 +11,12 @@ import type { Db } from './db.js';
 import type { Outbox } from './outbox.js';
 import type { OutboxRow } from './rows.js';
 
+/**
+ * The dispatch outbox: the queue messages a store owes for committed events (`Outbox`). The queue
+ * client claims and settles rows as it publishes, the alarm publishes the rows still due, and a
+ * dead-lettered message reopens its row.
+ */
+
 type Message = { key: string; body: unknown };
 type ShardFor = (runId: string, payload: unknown, key: string) => DurableObjectStub<QueueShard>;
 
@@ -110,12 +116,14 @@ export async function reopenHookWakes(store: StoreContext, runId: string): Promi
   return reopen(store, runId, Date.now() + REDRIVE_DELAY_MS, kind);
 }
 
+/** After a step's message dead-lettered: reopens its row while the step still waits for a delivery. */
 export async function reopenStepDispatch(store: StoreContext, runId: string, stepId: string, stepName: string): Promise<number> {
   store.own(runId);
   if (!isPendingStep(store.db, runId, stepId, stepName)) return 0;
   return reopen(store, runId, Date.now() + REDRIVE_DELAY_MS, EventType.StepCreated, stepId);
 }
 
+/** After a wait's wake dead-lettered: reopens its row, due no earlier than the wait's `resumeAt`. */
 export async function reopenWaitDispatch(store: StoreContext, runId: string, correlationId: string): Promise<number> {
   store.own(runId);
   const wait = store.db.findWait(runId, correlationId);
