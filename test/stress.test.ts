@@ -6,22 +6,20 @@ import { stressWorkflows, workflows as appWorkflows } from '../src/workflows.js'
 
 const workflows = { ...appWorkflows, ...stressWorkflows };
 
-// Runs under vitest.isolate.config.ts. Each parity test starts the same workflow on QuickJS and on
-// the isolate engine, the SDK's node engine on vm.ts (a run keeps the engine `start()` stamped from
-// WORKFLOW_VM) and compares the
-// outcome and a normalized event log. `it.fails` marks a known engine bug or divergence: flip it to
+// Runs under vitest.node.config.ts. Each parity test starts the same workflow on QuickJS and on the
+// SDK's node engine on vm.ts (a run keeps the engine `start()` stamped from WORKFLOW_VM) and compares
+// the outcome and a normalized event log. `it.fails` marks a known engine bug or divergence: flip it to
 // `it` once fixed.
 
-type Engine = 'quickjs' | 'isolate';
+type Engine = 'quickjs' | 'node';
 type Name = keyof typeof workflows;
-const ENGINES: Engine[] = ['quickjs', 'isolate'];
-const WORKFLOW_VM = { quickjs: 'quickjs', isolate: 'node' } as const;
+const ENGINES: Engine[] = ['quickjs', 'node'];
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Starts runs on one engine. Never overlap two calls: `start()` reads WORKFLOW_VM. */
 async function startOn(engine: Engine, name: Name, values: number[]): Promise<string[]> {
   const previous = process.env.WORKFLOW_VM;
-  process.env.WORKFLOW_VM = WORKFLOW_VM[engine];
+  process.env.WORKFLOW_VM = engine;
   try {
     const workflow = workflows[name] as (value: number) => Promise<unknown>;
     return await Promise.all(values.map(async (value) => (await start(workflow, [value])).runId));
@@ -89,19 +87,19 @@ type Result = Outcome & { events: string[] };
 
 /** Runs `name(value)` on both engines; `drive` feeds a run while it executes, such as resuming its hook. */
 async function onBoth(name: Name, value = 0, drive?: (runId: string) => Promise<void>, timeout = 50_000) {
-  const ids = { quickjs: (await startOn('quickjs', name, [value]))[0], isolate: (await startOn('isolate', name, [value]))[0] };
-  const [quickjs, isolate] = await Promise.all(ENGINES.map(async (engine): Promise<Result> => {
+  const ids = { quickjs: (await startOn('quickjs', name, [value]))[0], node: (await startOn('node', name, [value]))[0] };
+  const [quickjs, node] = await Promise.all(ENGINES.map(async (engine): Promise<Result> => {
     await drive?.(ids[engine]);
     const outcome = await settle(ids[engine], timeout);
     return { ...outcome, events: await eventLog(ids[engine]) };
   }));
-  return { quickjs, isolate, ids };
+  return { quickjs, node, ids };
 }
 
 async function expectParity(name: Name, value = 0, drive?: (runId: string) => Promise<void>, timeout?: number) {
-  const { quickjs, isolate } = await onBoth(name, value, drive, timeout);
+  const { quickjs, node } = await onBoth(name, value, drive, timeout);
   expect(quickjs.status).toBe('completed');
-  expect(isolate).toEqual(quickjs);
+  expect(node).toEqual(quickjs);
 }
 
 // Events that move a run's clock when they reach the workflow.
@@ -117,17 +115,17 @@ async function clockSources(runId: string, clocks: number[]): Promise<string[][]
 
 describe('determinism', () => {
   it('replays Date, Math.random and crypto identically after steps, sleeps and hooks', async () => {
-    const { quickjs, isolate, ids } = await onBoth('clocks');
+    const { quickjs, node, ids } = await onBoth('clocks');
     // The clock starts at the run's creation and then reads the time of the last delivery.
     const expected = ['run id', 'step_completed step#2 echo', 'wait_completed wait#1', 'step_completed step#5 resume', 'wait_completed wait#2'];
-    for (const [engine, result] of [['quickjs', quickjs], ['isolate', isolate]] as const) {
+    for (const [engine, result] of [['quickjs', quickjs], ['node', node]] as const) {
       expect(result.status).toBe('completed');
       const { drift, clocks } = result.value as { drift: string[]; clocks: number[] };
       expect(drift).toEqual([]);
       expect(await clockSources(ids[engine], clocks)).toEqual(expected.map((source) => expect.arrayContaining([source])));
       result.value = undefined;
     }
-    expect(isolate).toEqual(quickjs);
+    expect(node).toEqual(quickjs);
   });
 
   // One clockEscapes run per engine, shared by the tests below.
@@ -149,16 +147,16 @@ describe('determinism', () => {
     expect(await drift('quickjs')).toEqual([]);
   });
 
-  it('isolate: new (new Date().constructor)() is replay-stable', async () => {
-    expect((await drift('isolate')).filter((key) => key.endsWith('.dateConstructor'))).toEqual([]);
+  it('node: new (new Date().constructor)() is replay-stable', async () => {
+    expect((await drift('node')).filter((key) => key.endsWith('.dateConstructor'))).toEqual([]);
   });
 
-  it('isolate: Object.getPrototypeOf(Math).random() is replay-stable', async () => {
-    expect((await drift('isolate')).filter((key) => key.endsWith('.mathPrototype'))).toEqual([]);
+  it('node: Object.getPrototypeOf(Math).random() is replay-stable', async () => {
+    expect((await drift('node')).filter((key) => key.endsWith('.mathPrototype'))).toEqual([]);
   });
 
-  it('isolate: Intl.DateTimeFormat().format() is replay-stable', async () => {
-    expect((await drift('isolate')).filter((key) => key.endsWith('.intlNow'))).toEqual([]);
+  it('node: Intl.DateTimeFormat().format() is replay-stable', async () => {
+    expect((await drift('node')).filter((key) => key.endsWith('.intlNow'))).toEqual([]);
   });
 
   it('branching on new (new Date().constructor)() replays', () => expectParity('clockBranch'));
@@ -175,11 +173,11 @@ describe('leaks through shared built-ins', () => {
   const MARK = '__stressLeak';
   const own = (object: object) => String(Object.getOwnPropertyDescriptor(object, MARK)?.value);
   const seen = new Map<Engine, { host: string[]; otherRuns: string[]; outcomes: string[] }>();
-  // Divergence: the isolate engine freezes the built-ins runs share, so marking one throws and fails the
+  // Divergence: the node engine freezes the built-ins runs share, so marking one throws and fails the
   // run before its hook. The namespaces (JSON, Reflect, console, crypto, Math), Date and globalThis are
   // each run's own, and take the mark as on QuickJS.
-  const frozenOnIsolate = new Set(['Array.prototype', 'Object.prototype', 'Promise', 'Promise.prototype', 'Uint8Array.prototype', 'TextEncoder.prototype']);
-  const expectedOutcome = (engine: Engine, name: string) => (engine === 'isolate' && frozenOnIsolate.has(name) ? 'failed' : 'done');
+  const frozenOnNode = new Set(['Array.prototype', 'Object.prototype', 'Promise', 'Promise.prototype', 'Uint8Array.prototype', 'TextEncoder.prototype']);
+  const expectedOutcome = (engine: Engine, name: string) => (engine === 'node' && frozenOnNode.has(name) ? 'failed' : 'done');
 
   // Per engine: every target marked by a run waiting on its hook, while the host and other runs look.
   beforeAll(async () => {
@@ -201,7 +199,7 @@ describe('leaks through shared built-ins', () => {
   }, 60_000);
 
   for (const engine of ENGINES) {
-    it(`${engine}: marking each built-in ${engine === 'isolate' ? 'fails the run where it is shared' : 'completes'}`, () => {
+    it(`${engine}: marking each built-in ${engine === 'node' ? 'fails the run where it is shared' : 'completes'}`, () => {
       expect(seen.get(engine)?.outcomes).toEqual(targets.map(([name]) => expectedOutcome(engine, name)));
     });
     for (const [index, [name]] of targets.entries()) {
@@ -256,16 +254,16 @@ describe('leaks through shared built-ins', () => {
 });
 
 describe('concurrency', () => {
-  it('replays 60 isolate runs and 10 QuickJS runs at once', async () => {
+  it('replays 60 node runs and 10 QuickJS runs at once', async () => {
     const values = Array.from({ length: 60 }, (_, index) => index * 7919);
-    const isolateIds = await startOn('isolate', 'interleaved', values);
+    const nodeIds = await startOn('node', 'interleaved', values);
     const quickjsIds = await startOn('quickjs', 'interleaved', values.slice(0, 10));
     const expected = (value: number) => {
       let acc = value;
       for (let round = 0; round < 4; round++) acc = ((acc * 31 + round) % 1_000_003 + (round % 2 ? 0 : round + 1)) % 1_000_003;
       return { status: 'completed', value: { acc, stable: true } };
     };
-    const outcomes = await Promise.all([...isolateIds, ...quickjsIds].map((runId) => settle(runId, 50_000)));
+    const outcomes = await Promise.all([...nodeIds, ...quickjsIds].map((runId) => settle(runId, 50_000)));
     expect(outcomes).toEqual([...values, ...values.slice(0, 10)].map(expected));
   }, 60_000);
 });
@@ -278,25 +276,25 @@ describe('control flow and values', () => {
   it('2,000 sequential steps', () => expectParity('manySteps', 2000), 60_000);
   it('recursion 1,000 frames deep', () => expectParity('recursion', 1000));
   it('recursion through 50 awaited steps', () => expectParity('asyncRecursion', 50));
-  it('isolate: catches a stack overflow in workflow code', async () => {
-    const [runId] = await startOn('isolate', 'recursion', [100_000]);
+  it('node: catches a stack overflow in workflow code', async () => {
+    const [runId] = await startOn('node', 'recursion', [100_000]);
     expect(await settle(runId)).toEqual({ status: 'completed', value: 'caught:RangeError' });
   });
 
   // Divergence (QuickJS bug): BigInts outside the int64 range wrap modulo 2^64 when they cross a step boundary.
   it.fails('BigInts outside the int64 range across steps', () => expectParity('bigints'));
-  // Divergence (QuickJS bug): QuickJS overflows the host stack at ~2,000 frames and fails the run; isolate recurses.
+  // Divergence (QuickJS bug): QuickJS overflows the host stack at ~2,000 frames and fails the run; the node engine recurses.
   it.fails('recursion 5,000 frames deep', () => expectParity('recursion', 5000));
 });
 
 describe('hooks, sleeps, streams and child runs', () => {
   it('hook payloads, a stream, a sleep and a child run started from a step', async () => {
-    const { quickjs, isolate, ids } = await onBoth('hooksStreamsChild', 4, async (runId) => {
+    const { quickjs, node, ids } = await onBoth('hooksStreamsChild', 4, async (runId) => {
       const token = await hookToken(runId);
       for (const payload of [1, 2, 3]) await resumeHook(token, payload);
     });
     for (const engine of ENGINES) {
-      const result = { quickjs, isolate }[engine];
+      const result = { quickjs, node }[engine];
       const { childRunId, ...value } = result.value as { childRunId: string };
       expect(value).toEqual({ payloads: [1, 2, 3], childResult: 5 });
       // A child takes the starting Worker's WORKFLOW_VM, not its parent's engine.
@@ -305,7 +303,7 @@ describe('hooks, sleeps, streams and child runs', () => {
       expect(await new Response(stream).text()).toBe('1\n2\n3\n');
       result.value = value;
     }
-    expect(isolate).toEqual(quickjs);
+    expect(node).toEqual(quickjs);
   });
 
   const resumeOnce = async (runId: string) => { await resumeHook(await hookToken(runId), 9); };
@@ -315,49 +313,49 @@ describe('hooks, sleeps, streams and child runs', () => {
 
 describe('forbidden and host APIs', () => {
   it('an uncaught setTimeout fails the run on both engines', async () => {
-    const { quickjs, isolate } = await onBoth('uncaught', 0);
+    const { quickjs, node } = await onBoth('uncaught', 0);
     expect(quickjs.status).toBe('failed');
-    expect(isolate).toEqual(quickjs);
+    expect(node).toEqual(quickjs);
   });
 
   // Divergence: QuickJS runs the bundle as a sloppy script, so the SDK's bundled `var fetch` (its fetch step)
-  // becomes globalThis.fetch and the call starts a step; the isolate bundle keeps it local and throws.
+  // becomes globalThis.fetch and the call starts a step; the node engine's bundle keeps it local and throws.
   it.fails('an uncaught fetch fails the run on both engines', async () => {
-    const { quickjs, isolate } = await onBoth('uncaught', 1);
+    const { quickjs, node } = await onBoth('uncaught', 1);
     expect(quickjs.status).toBe('failed');
-    expect(isolate).toEqual(quickjs);
+    expect(node).toEqual(quickjs);
   });
 });
 
 describe('global surface', () => {
   // Each probe in the `surface` workflow, and why the engines disagree on it.
   const divergences: Record<string, string | undefined> = {
-    // Timers: isolate throws the SDK's WorkflowRuntimeError; QuickJS has no such global (TypeError).
+    // Timers: the node engine throws the SDK's WorkflowRuntimeError; QuickJS has no such global (TypeError).
     'setTimeout()': 'error class', 'setInterval()': 'error class', 'setImmediate()': 'error class',
-    // Isolate throws the SDK's fetch error; on QuickJS globalThis.fetch is the bundle's `var fetch` step, or absent
+    // The node engine throws the SDK's fetch error; on QuickJS globalThis.fetch is the bundle's `var fetch` step, or absent
     // (TypeError) when some workflow names `fetch` bare and esbuild renames the var.
     'fetch()': 'bundle var on QuickJS',
-    // QuickJS has queueMicrotask and performance (with a replay-stable clock); the isolate sandbox has neither.
-    'queueMicrotask()': 'missing on isolate', 'performance.now()': 'missing on isolate',
+    // QuickJS has queueMicrotask and performance (with a replay-stable clock); the node engine's sandbox has neither.
+    'queueMicrotask()': 'missing on node', 'performance.now()': 'missing on node',
     // Workers forbid code generation; QuickJS evaluates strings. The probe takes Function from a function, because
     // vitest-pool-workers proxies the global Function to allow `new Function`, which production rejects too.
-    'indirect eval()': 'EvalError on isolate', 'Function constructor': 'EvalError on isolate',
-    // Both reject import(): QuickJS finds no module, and the isolate build lowers import() to a throwing call.
+    'indirect eval()': 'EvalError on node', 'Function constructor': 'EvalError on node',
+    // Both reject import(): QuickJS finds no module, and the node engine's build lowers import() to a throwing call.
     'import(cloudflare:workers)': undefined, 'import(node:timers)': undefined,
-    // The SDK hides WeakRef and FinalizationRegistry on isolate (as on node:vm) but not on QuickJS.
-    'typeof WeakRef': 'hidden on isolate', 'typeof FinalizationRegistry': 'hidden on isolate',
+    // The SDK hides WeakRef and FinalizationRegistry on node (as on node:vm) but not on QuickJS.
+    'typeof WeakRef': 'hidden on node', 'typeof FinalizationRegistry': 'hidden on node',
     // QuickJS has no WebAssembly or Atomics.
     'typeof WebAssembly': 'missing on QuickJS', 'typeof Atomics': 'missing on QuickJS',
     // QuickJS has no ICU, so it throws on explicit locales and formats differently without one.
     'Intl.NumberFormat': 'no ICU on QuickJS', 'toLocaleString(locale)': 'no ICU on QuickJS',
     'toLocaleString()': 'no ICU on QuickJS', 'Date#toString': 'no ICU on QuickJS',
-    // QuickJS throws on crypto.subtle.digest; isolate computes it as node:vm does.
+    // QuickJS throws on crypto.subtle.digest; the node engine computes it as node:vm does.
     'crypto.subtle.digest': 'missing on QuickJS',
-    // Strict mode: the isolate bundle runs strict, QuickJS sloppy.
+    // Strict mode: the node engine's bundle runs strict, QuickJS sloppy.
     'undeclared assignment': 'strict mode', 'this in plain call': 'strict mode', 'arguments.callee': 'strict mode',
     'frozen write': 'strict mode', 'process.env write': 'strict mode', 'delete non-configurable': 'strict mode',
     'primitive property write': 'strict mode',
-    // Isolate binds bare globals once and keeps top-level declarations local to the factory.
+    // The node engine binds bare globals once and keeps top-level declarations local to the factory.
     'globalThis write then bare read': 'globals resolve once', 'top-level function on globalThis': 'module scope',
     // Bug in QuickJS: URL has no searchParams.
     'URL#searchParams': 'missing on QuickJS',
@@ -383,7 +381,7 @@ describe('global surface', () => {
 
   for (const [probe, divergence] of Object.entries(divergences)) {
     (divergence === undefined ? it : it.fails)(`${probe}${divergence === undefined ? '' : ` (${divergence})`}`, () => {
-      expect(results.get('isolate')?.[probe]).toBe(results.get('quickjs')?.[probe]);
+      expect(results.get('node')?.[probe]).toBe(results.get('quickjs')?.[probe]);
     });
   }
 });
@@ -395,14 +393,14 @@ describe('scale', () => {
   });
 
   // Step deliveries must not exhaust Workers' 10,000 active timeouts or reject unhandled.
-  it('isolate: Promise.all over 200 steps', async () => {
+  it('node: Promise.all over 200 steps', async () => {
     // Muted: the failed deliveries log tens of thousands of errors, which overflow the test pool's socket.
     using errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     // Some also reject unhandled. A listener stops vitest failing the file on them; it stays installed
     // because a hung run keeps rejecting after this test ends.
     let unhandled = 0;
     process.on('unhandledRejection', () => { unhandled++; });
-    const [runId] = await startOn('isolate', 'parallelSteps', [200]);
+    const [runId] = await startOn('node', 'parallelSteps', [200]);
     const outcome = await settle(runId, 15_000);
     const quotaErrors = errors.mock.calls.filter((args) => String(args[0]).includes('QuotaExceededError')).length;
     expect({ outcome, quotaErrors, unhandled }).toEqual({ outcome: { status: 'completed', value: 200 }, quotaErrors: 0, unhandled: 0 });

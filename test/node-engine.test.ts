@@ -1,7 +1,7 @@
 import { SELF } from 'cloudflare:test';
 import { afterEach, beforeAll, expect, it } from 'vitest';
 
-// Runs under vitest.isolate.config.ts, where WORKFLOW_VM=node. The flow handler runs in this isolate, so
+// Runs under vitest.node.config.ts, where WORKFLOW_VM=node. The flow handler runs in this isolate, so
 // wrapping the workflow factory the build registers with vm.ts counts node-engine replays.
 type Bundle = { names: readonly string[]; evaluate: (...args: unknown[]) => void };
 let replays = 0;

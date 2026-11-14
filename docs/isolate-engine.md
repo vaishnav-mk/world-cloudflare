@@ -51,7 +51,7 @@ Spec 8's node engine rereads the whole log at every step, so its step cost grows
 
 ## Stress suite
 
-`test/stress.test.ts` runs each workflow in `workflows/stress.ts` on QuickJS and on the isolate engine in one process (a run keeps the engine `start()` stamped) and compares the outcome and the event log, grouped by step, wait and hook so queue timing drops out. Run it with `pnpm exec vitest run --config vitest.isolate.config.ts test/stress.test.ts`. Each known bug or divergence is an `it.fails` test; flip it to `it` once fixed.
+`test/stress.test.ts` runs each workflow in `workflows/stress.ts` on QuickJS and on the isolate engine in one process (a run keeps the engine `start()` stamped) and compares the outcome and the event log, grouped by step, wait and hook so queue timing drops out. Run it with `pnpm exec vitest run --config vitest.node.config.ts test/stress.test.ts`. Each known bug or divergence is an `it.fails` test; flip it to `it` once fixed.
 
 Fixed: shared built-ins leaking to the host and other runs (now per-run copies or frozen), assignments to `crypto` reaching the host, `import()` of host modules, and the clock and random escapes (`new (new Date().constructor)()`, `Object.getPrototypeOf(Math).random()`, `Intl.DateTimeFormat().format()`). A wide `Promise.all` (200 steps) and the hook event-log differences were fixed in the SDK.
 

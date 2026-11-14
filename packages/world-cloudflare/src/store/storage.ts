@@ -146,7 +146,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
 
   /**
    * Fails a spec 8 step whose result is over the payload limit, then rejects its completion as a
-   * conflict. The SDK redelivers any other rejected completion, and on the native engine the
+   * conflict. The SDK redelivers any other rejected completion, and on the node engine the
    * redelivery re-runs the step until it exceeds its retries, hiding why. A conflict it skips, then
    * replays the step's failure, on the first attempt with either engine. A spec 9 orchestrator
    * fails the run on the payload error itself, and fences writes it did not make.

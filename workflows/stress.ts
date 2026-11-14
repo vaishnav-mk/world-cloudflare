@@ -3,7 +3,7 @@ import { getRun, resumeHook, start } from 'workflow/api';
 
 /**
  * Workflows that stress the workflow engines; `test/stress.test.ts` runs each on QuickJS and on the
- * isolate engine and compares them. Each takes one number from `POST /runs`, and every input is
+ * node engine and compares them. Each takes one number from `POST /runs`, and every input is
  * capped, because the example API is public. The ones that patch built-ins undo it before returning.
  */
 
