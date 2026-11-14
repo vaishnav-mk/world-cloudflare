@@ -1,6 +1,6 @@
 import { WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  isTerminalWorkflowRunStatus, SPEC_VERSION_LEGACY, SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM, type Hook, type HookClaimedFrom,
+  isStartHookId, isTerminalWorkflowRunStatus, SPEC_VERSION_LEGACY, SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM, type Hook, type HookClaimedFrom,
 } from '@workflow/world';
 import { DISPATCH_RECOVERY_DELAY_MS, STORE_NAME } from '../constants.js';
 import { EventType, TokenClaim } from '../enums.js';
@@ -212,15 +212,25 @@ async function onRun<T>(store: StoreContext, runId: string, call: (peer: Peer) =
 export async function disposeForcedHook(
   store: StoreContext, runId: string, hookId: string, token: string, claimedBy: { runId: string; hookId: string },
 ): Promise<HookClaimedFrom | null> {
-  store.own(runId);
   const { db } = store;
   if (store.isLegacy) refuseRunCopy(db, runId);
   const outcome = store.ctx.storage.transactionSync(() => {
+    const run = db.findRun(runId);
+    if (run === undefined) {
+      const pending = store.intents.find(runId);
+      const candidate = pending?.expiresAt === undefined ? undefined : pending.operation.hook;
+      // SAFETY: complete retains only an admitted start candidate's token at this key.
+      const completed = store.ctx.storage.kv.get<true | string>(`hook-completed:${hookId}`);
+      if ((!store.isLegacy && storeShardFor(runId) !== store.name) || !isStartHookId(runId, hookId)
+        || (!(candidate?.runId === runId && candidate.hookId === hookId && candidate.token === token) && completed !== token)) {
+        throw new WorkflowRunNotFoundError(runId);
+      }
+      if (candidate !== undefined && (candidate.specVersion ?? SPEC_VERSION_LEGACY) < SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM) return null;
+    }
     const prior = db.findForcedDisposal(hookId);
     if (prior !== undefined) return { claimedFrom: prior.claimedFrom, journaled: false };
-    const run = db.getRun(runId);
-    const running = !isTerminalWorkflowRunStatus(run.status);
-    const specVersion = run.specVersion ?? SPEC_VERSION_LEGACY;
+    const running = run !== undefined && !isTerminalWorkflowRunStatus(run.status);
+    const specVersion = run?.specVersion ?? SPEC_VERSION_LEGACY;
     if (running && specVersion < SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM) return null;
     // A finished run has nothing to wake, so its takeover names no wake target.
     const claimedFrom: HookClaimedFrom = running

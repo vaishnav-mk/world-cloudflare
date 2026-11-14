@@ -133,21 +133,9 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change, ru
     case ChangeKind.StepAppend:
       db.putStep(change.step);
       break;
-    case ChangeKind.HookCreated: {
-      const taken = db.findForcedDisposal(change.hook.hookId);
-      if (taken !== undefined) {
-        // Another run's forced claim took the token before this creation committed: it is disposed at once.
-        appendEvent(db, runId, {
-          eventType: EventType.HookDisposed, correlationId: change.hook.hookId, specVersion: tx.specVersion,
-          eventData: { token: change.hook.token, forceClaimedBy: taken.claimedBy },
-        }, now);
-        // Conditional release is harmless if the next owner already holds it, and closes replayed grants.
-        releases.owe(change.hook, true);
-        break;
-      }
+    case ChangeKind.HookCreated:
       insertHook(tx, change.hook);
       break;
-    }
     case ChangeKind.HookDisposed:
       db.deleteRunHook(runId, change.hook.hookId);
       releases.owe(change.hook, true);
@@ -168,8 +156,19 @@ function persist(tx: Tx, data: AnyEventRequest, event: Event, change: Change, ru
   }
 }
 
-/** Stores a hook whose token its shard granted, and owes the index its row. */
-function insertHook({ db, index, runId }: Tx, hook: Hook): void {
+/** Stores a granted hook, unless a forced claim already disposed of it before materialization. */
+function insertHook({ db, index, releases, runId, specVersion, now }: Tx, hook: Hook): void {
+  const taken = db.findForcedDisposal(hook.hookId);
+  if (taken !== undefined) {
+    // The forced disposal is out of band, including when the hook materializes with run_created.
+    appendEvent(db, runId, {
+      eventType: EventType.HookDisposed, correlationId: hook.hookId, specVersion,
+      eventData: { token: hook.token, forceClaimedBy: taken.claimedBy },
+    }, now);
+    // Conditional release cannot free the next owner's token, and closes replayed grants.
+    releases.owe(hook, true);
+    return;
+  }
   // A hook here that still has the token belongs to a finished run past its retention.
   for (const gone of db.deleteHookByToken(hook.token)) index.oweHook(gone.run_id, gone.id);
   db.insertHook(hook);

@@ -1,11 +1,12 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import { createWorld, type WorldEnv, type WorldStore } from '@workflow/world-cloudflare';
-import { START_HOOK_CANDIDATE_MAX_AGE_MS } from '@workflow/world';
+import { START_HOOK_CANDIDATE_MAX_AGE_MS, startHookId } from '@workflow/world';
 import { newRunId } from './ids.js';
 import { HookNotFoundError } from '@workflow/errors';
 import type { HookClaimOperation } from '../packages/world-cloudflare/src/types.js';
 import { StoreContext } from '../packages/world-cloudflare/src/store/context.js';
+import { STORE_NAME } from '../packages/world-cloudflare/src/constants.js';
 import { storeShardFor, tokenShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 
 const world = createWorld(env);
@@ -337,7 +338,9 @@ describe('durable hook ownership', () => {
     const stub = () => env.WORLD_STORE.getByName(storeShardFor(requester));
     await runInDurableObject(stub(), async (store) => {
       const restore = intercept(store, 'claimAcceptedHook', async (peer, args) => {
-        await peer.claimAcceptedHook(args[0] as HookClaimOperation);
+        const operation = args[0] as HookClaimOperation;
+        if (operation.hook.runId !== requester) return peer.claimAcceptedHook(operation);
+        await peer.claimAcceptedHook(operation);
         await world.events.create(thief, hookCreated(token, true));
         throw new Error('lost forced grant');
       });
@@ -380,26 +383,114 @@ describe('durable hook ownership', () => {
     expect(await free(token)).toBe(true);
     expect((await world.events.list({ runId })).data.filter((event) => event.eventType === 'hook_created')).toHaveLength(1);
   });
-  it('can take a start Hook whose accepted run creation has not committed yet', async () => {
+  for (const specVersion of [8, 9]) for (const eventType of ['run_created', 'run_started'] as const) {
+    it(`can take a start Hook whose accepted run creation has not committed yet (${eventType}, spec ${specVersion})`, async () => {
+      const candidate = newRunId();
+      const thief = await newRun();
+      const token = awayFrom(candidate, thief);
+      const claiming = hookCreated(token, true);
+      await runInDurableObject(env.WORLD_STORE.getByName(storeShardFor(candidate)), async (store, state) => {
+        const restore = intercept(store, 'claimAcceptedHook', async (peer, args) => {
+          const operation = args[0] as HookClaimOperation;
+          const answer = await peer.claimAcceptedHook(operation);
+          if (operation.hook.runId !== candidate) return answer;
+          const taken = await world.events.create(thief, claiming);
+          expect(taken.hook?.claimedFrom).toEqual({ runId: candidate, hookId: startHookId(candidate) });
+          return answer;
+        });
+        try {
+          const result = await store.createEvent(candidate, { eventType, specVersion, eventData: {
+            deploymentId: 'test-v1', workflowName: 'precommit-start', input: bytes, startHook: { token },
+          } }, { inBand: true, expectedSeqInBand: 1 });
+          expect(result.allocated).toBe(1);
+          if (specVersion === 9) {
+            expect(state.storage.sql.exec('SELECT seq_in_band FROM runs WHERE id = ?', candidate).one().seq_in_band)
+              .toBe(eventType === 'run_created' ? 1 : 2);
+          }
+        } finally { restore(); }
+      });
+      await env.WORLD_STORE.getByName(storeShardFor(candidate)).drainOutbox();
+      expect(await world.hooks.getByToken(token)).toMatchObject({ runId: thief });
+      expect((await world.hooks.list({ runId: candidate })).data).toEqual([]);
+      const events = (await world.events.list({ runId: candidate })).data;
+      expect(events.map((event) => event.eventType))
+        .toEqual(eventType === 'run_created' ? ['run_created', 'hook_disposed'] : ['run_created', 'run_started', 'hook_disposed']);
+      expect(events.at(-1)).toMatchObject({ correlationId: startHookId(candidate), eventData: {
+        token, forceClaimedBy: { runId: thief, hookId: claiming.correlationId },
+      } });
+    });
+  }
+
+  it('finishes a paused takeover after its start candidate expires and removes its intent', async () => {
     const candidate = newRunId();
     const thief = await newRun();
     const token = awayFrom(candidate, thief);
-    await runInDurableObject(env.WORLD_STORE.getByName(storeShardFor(candidate)), async (store) => {
+    const stub = () => env.WORLD_STORE.getByName(storeShardFor(candidate));
+    let operation: HookClaimOperation | undefined;
+    await runInDurableObject(stub(), async (store) => {
       const restore = intercept(store, 'claimAcceptedHook', async (peer, args) => {
-        const answer = await peer.claimAcceptedHook(args[0] as HookClaimOperation);
-        await world.events.create(thief, hookCreated(token, true));
-        return answer;
+        operation = args[0] as HookClaimOperation;
+        await peer.claimAcceptedHook(operation);
+        throw new Error('lost start grant');
       });
       try {
-        await store.createEvent(candidate, { eventType: 'run_created', specVersion: 8, eventData: {
-          deploymentId: 'test-v1', workflowName: 'precommit-start', input: bytes, startHook: { token },
-        } });
+        expect(await store.createEvent(candidate, { eventType: 'run_created', specVersion: 9, eventData: {
+          deploymentId: 'test-v1', workflowName: 'expiry-during-takeover', input: bytes, startHook: { token },
+        } }).catch((error: unknown) => error)).toMatchObject({ message: 'lost start grant' });
       } finally { restore(); }
     });
+    const claiming = hookCreated(token, true);
+    const checkIdentity = async () => {
+      const claimedBy = { runId: thief, hookId: claiming.correlationId };
+      const unknown = newRunId();
+      for (const [runId, hookId, otherToken] of [
+        [candidate, crypto.randomUUID(), token],
+        [candidate, startHookId(candidate), crypto.randomUUID()],
+        [unknown, startHookId(unknown), token],
+      ]) {
+        expect(await stub().disposeForcedHook(runId, hookId, otherToken, claimedBy).catch((error: unknown) => error))
+          .toMatchObject({ name: 'WorkflowRunNotFoundError' });
+      }
+      expect(await env.WORLD_STORE.getByName(STORE_NAME).disposeForcedHook(candidate, startHookId(candidate), token, claimedBy)
+        .catch((error: unknown) => error)).toMatchObject({ name: 'WorkflowRunNotFoundError' });
+    };
+    await checkIdentity();
+    const entered = barrier();
+    const resume = barrier();
+    await runInDurableObject(env.WORLD_STORE.getByName(tokenShardFor(token)), async (registry, state) => {
+      const restore = intercept(registry, 'disposeForcedHook', async (peer, args) => {
+        entered.open();
+        await resume.reached;
+        return peer.disposeForcedHook(args[0] as string, args[1] as string, args[2] as string, args[3] as { runId: string; hookId: string });
+      });
+      const taking = world.events.create(thief, claiming).catch((error: unknown) => error);
+      try {
+        await entered.reached;
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + START_HOOK_CANDIDATE_MAX_AGE_MS + 1_000);
+        try { await stub().drainOutbox(); } finally { clock.mockRestore(); }
+        await runInDurableObject(stub(), (_store, source) => {
+          expect(source.storage.sql.exec('SELECT run_id FROM hook_claim_intents WHERE run_id = ?', candidate).toArray()).toEqual([]);
+        });
+        await runInDurableObject(stub(), (_store, source) => source.abort('expired candidate reset')).catch(() => {});
+        await checkIdentity();
+        expect(state.storage.sql.exec('SELECT token FROM tokens WHERE token = ?', token).toArray()).toEqual([]);
+        expect(state.storage.sql.exec('SELECT token FROM token_takeovers WHERE token = ?', token).toArray()).toHaveLength(1);
+        resume.open();
+        expect(await taking).toMatchObject({ hook: { claimedFrom: { runId: candidate, hookId: startHookId(candidate) } } });
+        expect(state.storage.sql.exec('SELECT token FROM token_takeovers WHERE token = ?', token).toArray()).toEqual([]);
+      } finally { resume.open(); restore(); }
+    });
+    if (operation === undefined) throw new Error('Expected a start operation');
+    expect(await env.WORLD_STORE.getByName(tokenShardFor(token)).claimAcceptedHook(operation)
+      .catch((error: unknown) => error)).toMatchObject({ status: 503 });
     expect(await world.hooks.getByToken(token)).toMatchObject({ runId: thief });
-    expect((await world.hooks.list({ runId: candidate })).data).toEqual([]);
-    expect((await world.events.list({ runId: candidate })).data.map((event) => event.eventType))
-      .toEqual(['run_created', 'hook_disposed']);
+    expect(await Promise.resolve(stub().getRun(candidate)).catch((error: unknown) => error))
+      .toMatchObject({ name: 'WorkflowRunNotFoundError' });
+    await runInDurableObject(stub(), (_store, state) => {
+      expect(state.storage.sql.exec('SELECT id FROM hooks WHERE run_id = ?', candidate).toArray()).toEqual([]);
+      expect(state.storage.sql.exec('SELECT run_id FROM forced_disposals WHERE hook_id = ?', startHookId(candidate)).toArray())
+        .toEqual([{ run_id: candidate }]);
+    });
   });
 
   for (const grant of [false, true]) it(`cancels an expired start candidate ${grant ? 'after grant' : 'before delayed grant'}`, async () => {
