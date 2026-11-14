@@ -1,5 +1,5 @@
 // Times workflow replay on a deployed (or `wrangler dev`) example Worker.
-//   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-bench.mjs [probe:value ...]
+//   WORKFLOW_BASE_URL=https://<worker>.<subdomain>.workers.dev node scripts/remote-bench.mjs [probe:value ...]
 // The engine is the Worker's WORKFLOW_VM when each run starts. Every probe runs one workflow from
 // `workflows/limits.ts` and reports, from the run's event timestamps:
 // - seconds: run_created to run_completed;

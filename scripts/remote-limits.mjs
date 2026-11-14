@@ -1,5 +1,5 @@
 // Measures the World's limits against a deployed example Worker.
-//   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-limits.mjs [probe:value ...]
+//   WORKFLOW_BASE_URL=https://<worker>.<subdomain>.workers.dev node scripts/remote-limits.mjs [probe:value ...]
 // With no arguments it runs the default matrix below. Each probe starts one run of a
 // `workflows/limits.ts` workflow and reports how it ended. A value such as `1024x64` passes
 // several numbers: `streamBytes:1024x64` moves 1024 MiB in 64 MiB chunks.

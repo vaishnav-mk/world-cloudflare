@@ -1,6 +1,6 @@
 // End-to-end checks against a deployed (or `wrangler dev`) example Worker: input validation, results,
 // event subscriptions, retries, sleeps, hooks and streams.
-//   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-e2e.mjs
+//   WORKFLOW_BASE_URL=https://<worker>.<subdomain>.workers.dev node scripts/remote-e2e.mjs
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 

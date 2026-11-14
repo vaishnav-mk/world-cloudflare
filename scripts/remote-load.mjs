@@ -1,5 +1,5 @@
 // Load test against a deployed (or `wrangler dev`) example Worker. POSTs /runs straight from this machine.
-//   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-load.mjs [count] [concurrency] [--wait] [--verify] [--name=<workflow>]
+//   WORKFLOW_BASE_URL=https://<worker>.<subdomain>.workers.dev node scripts/remote-load.mjs [count] [concurrency] [--wait] [--verify] [--name=<workflow>]
 // Starts `count` runs (default 50), `concurrency` requests at a time (default 10), of `demo` or the
 // workflow `--name` names, and prints one JSON line: creation throughput, latency percentiles and
 // errors by status. `--wait` then polls every run until it finishes and adds end-to-end throughput.
