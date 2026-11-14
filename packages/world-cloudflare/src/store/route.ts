@@ -25,6 +25,9 @@ export function tokenShard(namespace: Namespace, token: string): Store {
   return transientAsWorldError(namespace.getByName(tokenShardFor(token), objectOptions()));
 }
 
+/** `onRun`'s option for a call the legacy store answers even for a run it lacks, such as a list. */
+export const answersUnknown = { answersUnknown: true };
+
 /**
  * Makes a run-scoped call on the run's shard, or on the legacy store for a run created before store
  * shards: a shard throws `WorkflowRunNotFoundError` for a run it does not hold. Remembers a run the

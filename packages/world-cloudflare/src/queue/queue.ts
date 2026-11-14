@@ -10,7 +10,7 @@ import { currentRequest, type FlowRequest } from '../lib/request-context.js';
 import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import { gatherTurns } from '../lib/turns.js';
-import { onRun } from '../store/route.js';
+import { answersUnknown, onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
 import { createQueueHandler } from './handler.js';
 import { holdMessage } from './hold.js';
@@ -39,6 +39,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
     await Promise.all([
       push(direct).then((pushed) => direct.forEach((entry, index) => results.set(entry, pushed[index]))),
       ...[...groupBy(claimed, (entry) => entry.claim.runId)].map(async ([runId, group]) => {
+        // The legacy store answers for a run it lacks, such as one whose `run_created` is still in flight.
         const pushed = await onRun(env.WORLD_STORE, runId, (store) => store.dispatch(group), answersUnknown);
         group.forEach((entry, index) => results.set(entry, pushed[index] ?? { error: 'Incomplete enqueue response' }));
       }),
@@ -150,9 +151,6 @@ const DEPLOYMENT_UNAVAILABLE = 'DEPLOYMENT_UNAVAILABLE';
 function reachable(env: Pick<QueueEnv, 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>, deploymentId: string): boolean {
   return deploymentId === env.DEPLOYMENT_ID || executorFor(env, deploymentId) !== undefined;
 }
-
-/** The legacy store answers outbox calls for a run it lacks, such as one whose `run_created` is still in flight. */
-const answersUnknown = { answersUnknown: true };
 
 /** Validates one message and computes what the shard stores, or why it cannot be queued. */
 async function prepare(

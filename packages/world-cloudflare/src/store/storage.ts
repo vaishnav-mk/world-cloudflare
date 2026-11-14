@@ -33,7 +33,7 @@ import { gatherTurns } from '../lib/turns.js';
 import type { EventOf, IndexAnswer, IndexPage, WorldEnv } from '../types.js';
 import { cancelMany } from './cancel-many.js';
 import { mergePages } from './pages.js';
-import { legacyStore, onEveryStore, onRun, onStores, storeShard, tokenShard, type Store } from './route.js';
+import { answersUnknown, legacyStore, onEveryStore, onRun, onStores, storeShard, tokenShard, type Store } from './route.js';
 
 type AnyRun = WorkflowRun | WorkflowRunWithoutData;
 type AnyStep = Step | StepWithoutData;
@@ -54,7 +54,6 @@ const isComplete = <T>(answer: IndexAnswer<T>): answer is { complete: true; valu
 export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): Storage {
   // A stub belongs to one request, so the route helpers make one per call; never cache it in the World singleton.
   const stores = env.WORLD_STORE;
-  const answersUnknown = { answersUnknown: true };
   const { offloadEvent, resolveAll } = createPayloads(env.PAYLOADS);
 
   // A replay that starts thousands of steps creates them all at once, which as a call each

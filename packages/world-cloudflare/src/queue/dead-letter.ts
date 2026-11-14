@@ -3,7 +3,7 @@ import type { StoredMessage } from 'durability';
 import { MessageKind } from '../enums.js';
 import { isRecord } from '../lib/is-record.js';
 import { unreachable } from '../lib/unreachable.js';
-import { onRun } from '../store/route.js';
+import { answersUnknown, onRun } from '../store/route.js';
 import type { Envelope, WorldEnv } from '../types.js';
 
 /** The run wake a dead-lettered message carried, so the store can reopen its outbox row. */
@@ -13,7 +13,6 @@ type DeadLetter =
   | { kind: MessageKind.HookWake; runId: string };
 
 /** The legacy store answers for a run it lacks, with nothing to reopen. */
-const answersUnknown = { answersUnknown: true };
 
 /** Saves an exhausted message to R2 and reopens the outbox row whose wake it was. */
 export async function deadLetter(env: Pick<WorldEnv, 'DLQ' | 'WORLD_STORE'>, message: StoredMessage<Envelope>): Promise<void> {
