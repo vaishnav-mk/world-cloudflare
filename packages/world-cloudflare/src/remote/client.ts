@@ -3,6 +3,8 @@ import { mintedSpecVersion, parseWorldCapabilities, type World, type WorkflowRun
 import { isRecord } from '../lib/is-record.js';
 import { decodeResult, encode, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcError } from './protocol.js';
 
+type RemoteWorld = World & { start(): Promise<void> };
+
 /**
  * A World for Node that forwards every call to a deployed Cloudflare World. Point the SDK's tools
  * at it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, plus:
@@ -12,7 +14,7 @@ import { decodeResult, encode, RPC_CONTENT_TYPE, RPC_PATH, RpcMethod, type RpcEr
  * It cannot receive queue deliveries; workflows still run on Cloudflare. This synchronous factory
  * advertises no capabilities until `await world.start()`. Use `connectWorld()` for SDK starts.
  */
-export function createWorld(options: { url?: string; token?: string } = {}): World {
+export function createWorld(options: { url?: string; token?: string } = {}): RemoteWorld {
   const url = options.url ?? process.env.WORKFLOW_CLOUDFLARE_URL;
   const token = options.token ?? process.env.WORKFLOW_CLOUDFLARE_TOKEN;
   if (!url || !token) throw new Error('Set WORKFLOW_CLOUDFLARE_URL and WORKFLOW_CLOUDFLARE_TOKEN');
@@ -98,7 +100,7 @@ export function createWorld(options: { url?: string; token?: string } = {}): Wor
   };
   // SAFETY: each method forwards to the deployed World's method of the same name, which returns
   // the World's own types. The overloaded signatures cannot be expressed by `call`.
-  return world as unknown as World;
+  return world as unknown as RemoteWorld;
 }
 
 /** Drops values that only mean something in this process, such as an `AbortSignal` or a callback. */
@@ -117,9 +119,9 @@ function rebuild({ name, message, props }: RpcError): Error {
 }
 
 /** Discovers the deployed World's contract before exposing it to the SDK. */
-export async function connectWorld(options: Parameters<typeof createWorld>[0] = {}): Promise<World> {
+export async function connectWorld(options: Parameters<typeof createWorld>[0] = {}): Promise<RemoteWorld> {
   const world = createWorld(options);
-  await world.start?.();
+  await world.start();
   return world;
 }
 

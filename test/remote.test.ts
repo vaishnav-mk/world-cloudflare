@@ -27,7 +27,7 @@ it('discovers the backend fence before SDK start creates a spec 9 run', async ()
   vi.stubEnv('WORKFLOW_SPEC_VERSION', '9');
   const backend = createWorld(env);
   const remote = remoteWorld(TOKEN, backend);
-  await remote.start?.();
+  await remote.start();
   const run = await start({ workflowId: 'workflow//remote//spec9' }, [], { world: remote });
   expect((await backend.runs.get(run.runId)).specVersion).toBe(9);
   expect(remote.specVersion).toBe(backend.specVersion);
@@ -51,7 +51,7 @@ it('connects with the server version rather than the local environment, without 
   const fetch = vi.fn(globalThis.fetch);
   vi.stubGlobal('fetch', fetch);
   const remote = await connectWorld({ url: 'https://world.test', token: TOKEN });
-  await Promise.all([remote.start?.(), remote.start?.()]);
+  await Promise.all([remote.start(), remote.start()]);
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(remote.specVersion).toBe(9);
   const { invoke: _invoke, ...capabilities } = backend.capabilities ?? {};
@@ -61,7 +61,7 @@ it('connects with the server version rather than the local environment, without 
 
 it('does not infer missing backend capabilities', async () => {
   const remote = remoteWorld(TOKEN, { ...world, capabilities: undefined });
-  await remote.start?.();
+  await remote.start();
   expect(remote.capabilities).toEqual({});
   await expect(start({ workflowId: 'workflow//remote//hook' }, [], {
     world: remote, experimental_hook: { token: crypto.randomUUID() },
@@ -73,23 +73,23 @@ it('rejects malformed discovery and retries initialization without keeping parti
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(encode({
     ok: true, value: { specVersion: '9', capabilities: { inBandFence: true } },
   }))));
-  await expect(remote.start?.()).rejects.toThrow('Invalid World RPC discovery response');
+  await expect(remote.start()).rejects.toThrow('Invalid World RPC discovery response');
   expect(remote.capabilities).toBeUndefined();
   vi.stubGlobal('fetch', (input: string | URL, init?: RequestInit) => handleWorldRpc(new Request(input, init), world, TOKEN));
-  await Promise.all([remote.start?.(), remote.start?.()]);
+  await Promise.all([remote.start(), remote.start()]);
   expect(remote.capabilities?.inBandFence).toBe(true);
 });
 
 it('refuses discovery on an older RPC server without guessing capabilities', async () => {
   const remote = remoteWorld();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Invalid World RPC request', { status: 400 })));
-  await expect(remote.start?.()).rejects.toThrow('HTTP 400');
+  await expect(remote.start()).rejects.toThrow('HTTP 400');
   expect(remote.capabilities).toBeUndefined();
 });
 
 it('round-trips SDK atomic start Hook admission and rejects a duplicate with its owning run', async () => {
   const remote = remoteWorld();
-  await remote.start?.();
+  await remote.start();
   const token = crypto.randomUUID();
   const workflow = { workflowId: 'workflow//remote//hook' };
   const options = { world: remote, experimental_hook: { token } };
@@ -108,7 +108,7 @@ it('does not exist without a token and rejects a wrong one', async () => {
   expect((await handleWorldRpc(request(), world, TOKEN)).status).toBe(401);
   const unauthorized = remoteWorld('wrong');
   await expect(unauthorized.runs.get('wrun_x')).rejects.toThrow('HTTP 401');
-  await expect(unauthorized.start?.()).rejects.toThrow('HTTP 401');
+  await expect(unauthorized.start()).rejects.toThrow('HTTP 401');
 });
 
 it('round-trips World calls with dates, bytes and SDK errors intact', async () => {
