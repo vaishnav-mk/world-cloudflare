@@ -73,19 +73,19 @@ export function pendingSlotFor(store: StoreContext, claim: OutboxClaim): number 
   }
 }
 
-/** Settles the outbox rows of a message the queue accepted: a start or hook wake every row up to `slot`, a step or wait its own. */
+/** Settles the outbox rows of a message the queue accepted (`Outbox.publish`). */
 export function markPublished(store: StoreContext, kind: MessageKind, runId: string, slot: number): void {
   const { outbox } = store;
   if (kind !== MessageKind.Start) store.own(runId);
   switch (kind) {
     case MessageKind.Start:
-      return outbox.publishThrough(runId, slot, EventType.RunCreated);
+      return outbox.publish(runId, slot, EventType.RunCreated);
     case MessageKind.HookWake:
-      return outbox.publishThrough(runId, slot, EventType.HookReceived);
+      return outbox.publish(runId, slot, EventType.HookReceived);
     case MessageKind.Step:
-      return outbox.publishSlot(runId, slot, EventType.StepCreated);
+      return outbox.publish(runId, slot, EventType.StepCreated);
     case MessageKind.WaitContinuation:
-      return outbox.publishSlot(runId, slot, EventType.WaitCreated);
+      return outbox.publish(runId, slot, EventType.WaitCreated);
     default:
       return unreachable(kind);
   }
@@ -160,7 +160,7 @@ export async function drainOutbox(store: StoreContext): Promise<number> {
     const plan = planFor(db, outbox, row);
     switch (plan.action) {
       case DispatchAction.Settle:
-        outbox.publishRow(row);
+        outbox.publish(row.run_id, row.slot, row.kind);
         break;
       case DispatchAction.Postpone:
         outbox.postpone(row, Date.now() + WAIT_RETRY_DELAY_MS);
@@ -232,7 +232,7 @@ async function publish(store: StoreContext, sends: Send[]): Promise<void> {
   for (const [index, { row }] of owed.entries()) {
     const result = results[index];
     if ('id' in result) {
-      store.outbox.publishRow(row);
+      store.outbox.publish(row.run_id, row.slot, row.kind);
       continue;
     }
     console.error('Workflow dispatch recovery failed', { runId: row.run_id, slot: row.slot, error: result.error });

@@ -69,15 +69,15 @@ export class Outbox {
     }).execute();
   }
 
-  /** Starts and wakes settle every earlier row too; steps and waits settle only their own row. */
-  publishRow(row: OutboxRow): void {
-    switch (row.kind) {
+  /** Settles what a published message covers: a start or wake every row up to `slot`, a step or wait its own row. */
+  publish(runId: string, slot: number, kind: DispatchKind): void {
+    switch (kind) {
       case EventType.RunCreated:
       case EventType.HookReceived:
-        return this.publishThrough(row.run_id, row.slot, row.kind);
+        return this.publishThrough(runId, slot, kind);
       case EventType.StepCreated:
       case EventType.WaitCreated:
-        return this.publishSlot(row.run_id, row.slot, row.kind);
+        return this.publishSlot(runId, slot, kind);
     }
   }
 
