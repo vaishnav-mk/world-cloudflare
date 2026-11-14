@@ -15,6 +15,8 @@ export const RUNNER_NAME = 'runner';
 export const FLOW_TARGET = 'flow';
 /** The queue shard's fanout channel for messages that replay no run, such as steps. */
 export const STEPS_CHANNEL = 'steps';
+/** How often a queue shard may bring its alarm forward to make fresh runner stubs (`QueueShard`). */
+export const FRESH_RUNNER_ARM_INTERVAL_MS = 1_000;
 export const FLOW_PATH = '/.well-known/workflow/v1/flow';
 export const FLOW_URL = `https://internal${FLOW_PATH}`;
 

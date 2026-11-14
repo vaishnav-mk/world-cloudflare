@@ -2,16 +2,17 @@ import { DurableObject } from 'cloudflare:workers';
 import { DurabilityFanout, DurabilityScheduler, type FanoutTarget } from 'durability';
 import { DurabilityRouting, type EnqueueResult as RoutedResult } from 'durability/routing';
 import migrations from '../../drizzle/queue/migrations.js';
-import { FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, STEPS_CHANNEL } from '../constants.js';
+import { FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, FRESH_RUNNER_ARM_INTERVAL_MS, STEPS_CHANNEL } from '../constants.js';
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { readPayload, replayOf } from '../lib/messages.js';
+import { objectOptions, stepRunnerFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
 import type { EnqueueRequest, EnqueueResult, Envelope, WorldEnv } from '../types.js';
 import { deadLetter } from './dead-letter.js';
 import { DedupTable, type OutgoingMessage } from './dedup.js';
-import { Deliverer, retryDelayMs } from './deliver.js';
+import { Deliverer, retryDelayMs, type RunnerStubs } from './deliver.js';
 import { DeliveryCounts, type Counts } from './delivery-counts.js';
 import { Holds } from './holds.js';
 import { InflightTable } from './inflight.js';
@@ -34,7 +35,33 @@ export class QueueShard extends DurableObject<WorldEnv> {
   readonly #inflight = new InflightTable(this.ctx.storage.sql);
   readonly #counts = new DeliveryCounts(this.ctx.storage.sql);
   readonly #holds = new Holds(this.ctx.storage.sql);
-  readonly #deliverer = new Deliverer(this.env, this.#counts, this.#holds, this.#inflight);
+  /**
+   * Runner stubs first called from this object's alarm. A stub's calls spend the subrequest depth
+   * of the request that made its first call, and an alarm starts a new chain, so a delivery through
+   * one starts a new chain too, however deep the enqueue behind it was. Without them, a flow
+   * enqueues through a store into a queue shard that delivers to a runner that runs a flow, and so
+   * on, each cycle spending about five of the platform's few levels.
+   */
+  readonly #fresh = new Map<string, ReturnType<WorldEnv['RUNNER']['getByName']>>();
+  /** Runners a delivery asked for before this object had a fresh stub to them. */
+  readonly #wanted = new Set<string>();
+  #armedAt = 0;
+  readonly #runners: RunnerStubs = {
+    get: (name) => {
+      const fresh = this.#fresh.get(name);
+      if (fresh !== undefined) return fresh;
+      this.#wanted.add(name);
+      if (Date.now() - this.#armedAt >= FRESH_RUNNER_ARM_INTERVAL_MS) {
+        this.#armedAt = Date.now();
+        this.ctx.waitUntil(this.#armSoon());
+      }
+      return this.env.RUNNER.getByName(name, objectOptions());
+    },
+    forget: (name) => {
+      this.#fresh.delete(name);
+    },
+  };
+  readonly #deliverer: Deliverer;
   readonly #scheduler = new DurabilityScheduler({ context: this.ctx });
   // Feeds the load snapshots `push` returns to the routing client.
   readonly #routing = new DurabilityRouting();
@@ -48,6 +75,9 @@ export class QueueShard extends DurableObject<WorldEnv> {
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     super(ctx, env);
+    const name = ctx.id.name;
+    if (name === undefined) throw new Error('Queue shards are reached by name');
+    this.#deliverer = new Deliverer(env, this.#runners, stepRunnerFor(name), this.#counts, this.#holds, this.#inflight);
     migrateOnStart(ctx, migrations);
     ctx.blockConcurrencyWhile(() => this.#redeliverOrphans());
   }
@@ -181,8 +211,33 @@ export class QueueShard extends DurableObject<WorldEnv> {
     }
   }
 
-  alarm(info?: AlarmInvocationInfo) {
-    return this.#scheduler.alarm(info);
+  async alarm(info?: AlarmInvocationInfo): Promise<void> {
+    await this.#freshen();
+    await this.#scheduler.alarm(info);
+  }
+
+  /** Makes the runner stubs deliveries asked for, first calling each from here, the alarm. */
+  async #freshen(): Promise<void> {
+    await Promise.all([...this.#wanted].map(async (name) => {
+      const stub = this.env.RUNNER.getByName(name, objectOptions());
+      try {
+        await stub.wake();
+        this.#fresh.set(name, stub);
+        this.#wanted.delete(name);
+      } catch (error) {
+        console.error('Could not reach a runner from the alarm', { runner: name, error });
+      }
+    }));
+  }
+
+  /** Brings the alarm forward, so it makes the wanted stubs. The scheduler may move it later, which only delays them. */
+  async #armSoon(): Promise<void> {
+    try {
+      const at = await this.ctx.storage.getAlarm();
+      if (at === null || at > Date.now()) await this.ctx.storage.setAlarm(Date.now());
+    } catch (error) {
+      console.error('Could not arm the alarm for fresh runner stubs', error);
+    }
   }
 
   /**

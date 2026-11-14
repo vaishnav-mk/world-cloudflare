@@ -3,9 +3,8 @@ import type { DurabilityFanoutMessage } from 'durability';
 import { DEFAULT_QUEUE_MAX_ATTEMPTS, DELIVERY_COUNT_RETENTION_MS, MAX_QUEUE_RETRY_DELAY_MS, REPLAY_MARKS_MAX } from '../constants.js';
 import { DeliveryResult } from '../enums.js';
 import { groupBy } from '../lib/group.js';
-import { isRecord } from '../lib/is-record.js';
 import { readPayload, replayOf } from '../lib/messages.js';
-import { objectOptions, runnerShardFor } from '../lib/shards.js';
+import { runnerShardFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
 import type { Delivery, DeliveryOutcome, Envelope, WorldEnv } from '../types.js';
 import type { DeliveryCounts } from './delivery-counts.js';
@@ -16,6 +15,12 @@ type FanoutMessage = DurabilityFanoutMessage<Envelope>;
 
 /** A due delivery and the runner it goes to: its run's, in the run's turn, for a replay of `run`. */
 type HandOff = { delivery: Delivery; runner: string; run?: string };
+
+/** Where a queue shard gets its runner stubs. `forget` drops one whose call threw, so the next call makes a new one. */
+export type RunnerStubs = {
+  get(name: string): ReturnType<WorldEnv['RUNNER']['getByName']>;
+  forget(name: string): void;
+};
 
 /**
  * Backoff after a failed delivery, by attempt: quadratic up to five minutes, so the default 64
@@ -36,15 +41,22 @@ export function retryDelayMs(attempt: number): number {
  * delays are not deliveries: only `DeliveryCounts` feeds `attempt`.
  */
 export class Deliverer {
-  readonly #env: Pick<WorldEnv, 'QUEUE_MAX_ATTEMPTS' | 'RUNNER'>;
+  readonly #env: Pick<WorldEnv, 'QUEUE_MAX_ATTEMPTS'>;
+  readonly #runners: RunnerStubs;
+  /** The runner for this shard's messages that replay no run (`stepRunnerFor`). */
+  readonly #stepRunner: string;
   readonly #counts: DeliveryCounts;
   readonly #holds: Holds;
   readonly #inflight: InflightTable;
   /** When each run's latest successful replay started, for the newest `REPLAY_MARKS_MAX` runs. */
   readonly #replayed = new Map<string, number>();
 
-  constructor(env: Pick<WorldEnv, 'QUEUE_MAX_ATTEMPTS' | 'RUNNER'>, counts: DeliveryCounts, holds: Holds, inflight: InflightTable) {
+  constructor(
+    env: Pick<WorldEnv, 'QUEUE_MAX_ATTEMPTS'>, runners: RunnerStubs, stepRunner: string, counts: DeliveryCounts, holds: Holds, inflight: InflightTable,
+  ) {
     this.#env = env;
+    this.#runners = runners;
+    this.#stepRunner = stepRunner;
     this.#counts = counts;
     this.#holds = holds;
     this.#inflight = inflight;
@@ -96,8 +108,8 @@ export class Deliverer {
         // A start may skip reading the log, so its replay covers no other message.
         replays: replay?.start === false ? runId : undefined,
         delivery: { id, attempt: deliveries - handoffs, deliveryCount: deliveries, enqueuedAt: message.enqueuedAt, body: message.body },
-        // Other messages spread over the run's epoch by ID; a health check names no run.
-        ...(runId === undefined ? { runner: runnerShardFor(runIdOf(payload), id) } : { runner: runnerShardFor(runId), run: runId }),
+        // Other messages, such as steps and health checks, go to this shard's step runner.
+        ...(runId === undefined ? { runner: this.#stepRunner } : { runner: runnerShardFor(runId), run: runId }),
       });
     }
     if (!due.length) return;
@@ -135,20 +147,24 @@ export class Deliverer {
    */
   async #handOff(due: HandOff[]): Promise<DeliveryOutcome[]> {
     const outcomes: DeliveryOutcome[] = [];
-    const failed = (error: unknown): DeliveryOutcome => ({ kind: DeliveryResult.Failed, error: String(error) });
+    // A stub whose call threw may stay broken, so the next call gets a new one.
+    const failedAt = (runner: string) => (error: unknown): DeliveryOutcome => {
+      this.#runners.forget(runner);
+      return { kind: DeliveryResult.Failed, error: String(error) };
+    };
     const batches = groupBy(due.flatMap((entry, index) => entry.run === undefined ? [{ ...entry, index }] : []), ({ runner }) => runner);
     await Promise.all([
       ...due.map(async ({ delivery, runner, run }, index) => {
         if (run === undefined) return;
-        outcomes[index] = await this.#env.RUNNER.getByName(runner, objectOptions()).replay(run, delivery).catch(failed);
+        outcomes[index] = await this.#runners.get(runner).replay(run, delivery).catch(failedAt(runner));
       }),
       ...[...batches].map(async ([runner, batch]) => {
-        const results = await this.#env.RUNNER.getByName(runner, objectOptions()).consume(batch.map(({ delivery }) => delivery))
+        const results = await this.#runners.get(runner).consume(batch.map(({ delivery }) => delivery))
           .then((settled) => {
             if (settled.length !== batch.length) throw new Error('Incomplete queue delivery response');
             return settled;
           })
-          .catch((error: unknown) => batch.map(() => failed(error)));
+          .catch((error: unknown) => batch.map(() => failedAt(runner)(error)));
         for (const [position, { index }] of batch.entries()) outcomes[index] = results[position];
       }),
     ]);
@@ -164,9 +180,4 @@ export class Deliverer {
       this.#replayed.delete(oldest);
     }
   }
-}
-
-/** The run a message names, or `''` for one that names none, such as a health check. */
-function runIdOf(payload: unknown): string {
-  return isRecord(payload) && typeof payload.runId === 'string' ? payload.runId : '';
 }
