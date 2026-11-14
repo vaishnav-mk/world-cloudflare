@@ -194,7 +194,8 @@ export class Db {
       conditions.push('correlation_id = ?');
       params.push(correlationId);
     }
-    // DOQB's lazy execute returns the SQLite cursor itself, not the `{ results }` its `lazy: true` types declare.
+    // SAFETY: the rows of a SELECT on `events` are event rows. DOQB's lazy execute returns the SQLite
+    // cursor itself, typed as rows of any shape, not the `{ results }` its `lazy: true` types declare.
     return this.#qb.lazyExecute(this.#qb.fetchAll<'events'>({
       tableName: 'events', where: { conditions, params },
       orderBy: { slot: descending ? OrderTypes.DESC : OrderTypes.ASC }, limit,

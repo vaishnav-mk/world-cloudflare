@@ -141,7 +141,9 @@ export function listEvents(db: Db, params: ListEventsParams | ListEventsByCorrel
  * `listEvents`, read `EVENT_READ_BYTES` at a time with a pause between reads, so the object serves
  * other requests while it reads a long page.
  */
-export async function readEventPage(db: Db, params: ListEventsParams | ListEventsByCorrelationIdParams): Promise<PaginatedResponse<Event>> {
+export async function readEventPage(
+  db: Db, params: ListEventsParams | ListEventsByCorrelationIdParams,
+): Promise<PaginatedResponse<Event>> {
   const query = eventQuery(params);
   const page: Event[] = [];
   let bytes = 0;
