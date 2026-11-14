@@ -65,16 +65,49 @@ pnpm run build      # the workflow build and a Wrangler dry run
 
 ## Deploy
 
-1. Create the R2 buckets for dead letters and payloads, then deploy with your copy of `wrangler.jsonc`. To encrypt payloads at rest, set a secret before the first run: `openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET`.
-2. Optional: to keep in-flight runs on the code that started them, give each release a [retained executor](packages/world-cloudflare/README.md#retained-executors). Deploy a copy of `wrangler.executor.jsonc` to a Workers for Platforms dispatch namespace bound as `EXECUTORS`, add its deployment ID to `EXECUTOR_ROUTES`, and point the main Worker's `main` at `src/dispatcher.ts`, which leaves the workflow bundle out. Keep old executors until their runs drain.
-3. Run the remote checks:
+1. Edit `wrangler.jsonc`. Pick a Worker `name` and set the `CONSUMER` service to the same name: the Worker calls itself. Pick names for the two R2 buckets. Change `DEPLOYMENT_ID` on every release.
+2. Create the buckets, build, and deploy:
 
    ```sh
-   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-e2e.mjs
-   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-load.mjs 50 10 --verify
+   pnpm exec wrangler r2 bucket create <dlq-bucket>
+   pnpm exec wrangler r2 bucket create <payloads-bucket>
+   pnpm run build:workflow
+   pnpm exec wrangler deploy
    ```
 
-To browse runs in the SDK's web UI, set `WORLD_RPC_TOKEN` on the Worker (`wrangler secret put WORLD_RPC_TOKEN`), put `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, `WORKFLOW_CLOUDFLARE_URL=https://<worker>.workers.dev` and `WORKFLOW_CLOUDFLARE_TOKEN=<the token>` in `.dev.vars.remote-ui`, and run `pnpm ui` ([remote client](packages/world-cloudflare/README.md#remote-client)).
+   Wrangler prints the Worker's URL, `https://<worker>.<subdomain>.workers.dev`.
+3. Optional: to encrypt payloads at rest, set a secret before the first run: `openssl rand -base64 32 | pnpm exec wrangler secret put WORKFLOW_ENCRYPTION_SECRET`.
+4. Run the remote checks:
+
+   ```sh
+   export WORKFLOW_BASE_URL=https://<worker>.<subdomain>.workers.dev
+   node scripts/remote-e2e.mjs
+   node scripts/remote-load.mjs 50 10 --verify
+   node scripts/remote-limits.mjs streamBytes:64x8   # a 64 MiB byte stream through R2
+   ```
+
+### Retained executors
+
+Optional. A [retained executor](packages/world-cloudflare/README.md#retained-executors) keeps in-flight runs on the code that started them. Each release gets one, in a Workers for Platforms dispatch namespace, and the main Worker only routes deliveries to them.
+
+1. Create the namespace once: `pnpm exec wrangler dispatch-namespace create <namespace>`.
+2. Copy `wrangler.executor.jsonc` for the release. Give the copy its own `name` and the release's `DEPLOYMENT_ID`. Point every `script_name` and the `CONSUMER` service at the main Worker, and use the main Worker's buckets.
+3. Build and upload it: `pnpm run build:workflow && pnpm exec wrangler deploy --config <copy> --dispatch-namespace <namespace>`. If the main Worker has an encryption secret, pass the same one with `--secrets-file`.
+4. In `wrangler.jsonc`, set `main` to `src/dispatcher.ts`, which leaves the workflow bundle out, and bind the namespace. Set `DEPLOYMENT_ID` to the new executor's, and add the executor to `EXECUTOR_ROUTES`. Then `pnpm exec wrangler deploy`.
+
+   ```jsonc
+   "main": "src/dispatcher.ts",
+   "dispatch_namespaces": [{ "binding": "EXECUTORS", "namespace": "<namespace>" }],
+   // in "vars":
+   "DEPLOYMENT_ID": "v2",
+   "EXECUTOR_ROUTES": "{\"v1\":\"<executor-v1>\",\"v2\":\"<executor-v2>\"}"
+   ```
+
+Every deployment ID that still has runs needs a route. A run whose deployment has none stays `pending`, and its deliveries fail with `Deployment <id> is unavailable`. That includes runs the main Worker started before it used executors: upload an executor with their `DEPLOYMENT_ID` too, or let them finish first. Keep old executors and their routes until their runs drain.
+
+### Web UI
+
+To browse runs in the SDK's web UI, set `WORLD_RPC_TOKEN` on the Worker (`wrangler secret put WORLD_RPC_TOKEN`), put `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, `WORKFLOW_CLOUDFLARE_URL=https://<worker>.<subdomain>.workers.dev` and `WORKFLOW_CLOUDFLARE_TOKEN=<the token>` in `.dev.vars.remote-ui`, and run `pnpm ui` ([remote client](packages/world-cloudflare/README.md#remote-client)).
 
 ## Limits
 
