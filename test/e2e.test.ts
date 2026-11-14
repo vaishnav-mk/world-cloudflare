@@ -166,6 +166,15 @@ it('starts a v5 run, executes a real step, returns its result, and replays the s
   expect(resumedEvents).not.toContain('event: run_created');
 });
 
+it('runs 200 parallel steps to completion', async () => {
+  const started = Date.now();
+  const runId = await startRun('parallelSteps', 200);
+  await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${runId}`, { headers })).json() as { status: string }).status,
+    { interval: 250, timeout: 60_000 }).toBe('completed');
+  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 200 });
+  expect(Date.now() - started).toBeLessThan(30_000);
+}, 90_000);
+
 it('stores incompressible step output larger than 64 KiB', async () => {
   const response = await SELF.fetch('https://local/runs', {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
