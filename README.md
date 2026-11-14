@@ -1,38 +1,49 @@
 # Workflow SDK World for Cloudflare
 
-A [Workflow SDK](https://workflow-sdk.dev) v5 World that runs on Cloudflare Workers. The SDK compiles and replays workflows; this World stores their state in Durable Objects and delivers their queue messages. It is not a wrapper around native Cloudflare Workflows.
+A [Workflow SDK](https://workflow-sdk.dev) v5 World that runs on Cloudflare Workers. The SDK compiles and replays your workflows; this World stores their state in Durable Objects, keeps large payloads in R2, and delivers their queue messages. It runs the published SDK (`workflow` 5.5.0), and it is not a wrapper around Cloudflare Workflows.
 
-## Layout
+The World is the package in [`packages/world-cloudflare`](packages/world-cloudflare/README.md). The rest of the repo is an example Worker that uses it.
 
-| Path | Contents |
-| --- | --- |
-| [`packages/world-cloudflare`](packages/world-cloudflare/README.md) | The World package |
-| [`packages/world-cloudflare/drizzle`](packages/world-cloudflare/drizzle/README.md) | Drizzle migrations, one set per Durable Object |
-| `src/` | Example Worker: HTTP API, queue consumer, retained executor |
-| `workflows/demo.ts` | Sample workflows |
-| `test/` | workerd tests and SDK end-to-end tests |
-| [`docs/contract-parity.md`](docs/contract-parity.md) | What is implemented and what is tested |
-| [`docs/limits.md`](docs/limits.md) | Measured payload, step, CPU and concurrency limits |
-| [`docs/isolate-engine.md`](docs/isolate-engine.md) | The native V8 workflow engine (the SDK's node engine, `WORKFLOW_VM=node`), measured against QuickJS |
+## How it works
 
-## Run it
+```mermaid
+flowchart LR
+  app["Your app"] -- "start()" --> client["World client<br/>(main Worker)"]
+  client -- "runs, events, hooks" --> store["Store shards"]
+  client -- "messages" --> queue["Queue shards"]
+  client -- "payloads, big stream chunks" --> r2["R2"]
+  store -- "list rows" --> index["Index shards"]
+  client -- "cross-run lists" --> index
+  queue -- "deliveries" --> runner["Runners"]
+  runner --> code["Workflow code<br/>(main Worker or retained executor,<br/>QuickJS or node engine)"]
+  code -- "steps, events" --> client
+```
 
-Requires Node 24 and pnpm. The SDK is the published `workflow` 5.5.0, unpatched.
+- `start()` and every other SDK call go through the World client, which runs in the calling Worker.
+- A run lives on one store shard, picked by hashing its ID; each write commits its event, state and owed messages in one transaction. Store shards also register hook tokens.
+- Queue shards hold delayed and retried messages. A run's workflow messages share one queue shard, which delivers them one at a time.
+- Queue shards hand deliveries to runners, and a run always reaches the same runner, which runs its workflow code in the main Worker or in the retained executor of the run's release.
+- Payloads and stream chunks over 1 MiB go to R2. Index shards hold a list row per run and hook, so cross-run lists do not ask every store.
+
+The [package README](packages/world-cloudflare/README.md) has the details and the configuration.
+
+## Quick start
+
+Requires Node 24 and pnpm.
 
 ```sh
 pnpm install
 pnpm run build:workflow   # compiles workflows/ with @workflow/world-cloudflare/build
-pnpm run typecheck
-pnpm test                 # workerd storage, queue, stream and contract tests
-pnpm run test:e2e         # real SDK runs in workerd: QuickJS, the native engine, encrypted, and spec 9
-pnpm build                # the workflow build and a Wrangler dry run
+pnpm exec wrangler dev
+curl -X POST localhost:8787/runs -H 'content-type: application/json' -d '{"name":"demo","value":21}'
+curl localhost:8787/runs/<runId>/result   # {"value":42}
 ```
 
-## Example API
+The example API:
 
 | Method | Path | Does |
 | --- | --- | --- |
-| `POST` | `/runs` | Starts a run: `{"name":"demo","value":21}`; an array value, such as `{"name":"streamBytes","value":[1024,64]}`, passes several arguments |
+| `POST` | `/runs` | Starts a workflow from `workflows/demo.ts` or `workflows/limits.ts`: `{"name":"demo","value":21}`; an array value passes several arguments |
 | `GET` | `/runs/:id` | Run status |
 | `GET` | `/runs/:id/result` | Waits for and returns the result |
 | `GET` | `/runs/:id/events` | Server-sent events; resume with `?cursor=` or `Last-Event-ID`, filter with `?types=` |
@@ -41,45 +52,47 @@ pnpm build                # the workflow build and a Wrangler dry run
 | `GET` | `/runs/:id/streams/:namespace` | Reads a stream, following live writes |
 | `POST` | `/hooks/:token` | Resumes a hook with the JSON body |
 
-The example has no authentication. Anyone who can reach it can start runs, and with a run ID or hook token can read or resume them. Don't deploy it with real data.
+The example has no authentication: anyone who can reach it can start runs, and with a run ID or hook token can read or resume them. Don't deploy it with real data.
+
+## Tests
+
+```sh
+pnpm run typecheck
+pnpm test           # workerd tests of storage, queue, streams and the contract
+pnpm run test:e2e   # real SDK runs in workerd: QuickJS, the node engine, encrypted, and spec 9
+pnpm run build      # the workflow build and a Wrangler dry run
+```
 
 ## Deploy
 
-1. Create the R2 dead-letter and payload buckets, then deploy the Worker with your copy of `wrangler.jsonc`. To encrypt payloads at rest, set a secret before the first run: `openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)).
-2. Optional: to keep in-flight runs on the code that started them, give each release its own executor.
-   1. Deploy a copy of `wrangler.executor.jsonc` into a Workers for Platforms dispatch namespace, bound as `EXECUTORS`, and point the main Worker's `main` at `src/dispatcher.ts`, which leaves the workflow bundle out so the Worker starts faster.
-   2. Give it the main Worker's `WORKFLOW_ENCRYPTION_SECRET`, if set, and add its deployment ID to `EXECUTOR_ROUTES`, keeping the old entries.
-   3. Move `DEPLOYMENT_ID` to the new release. Keep old executors until their runs drain.
-3. Run the remote tests:
-
-```sh
-WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-e2e.mjs
-WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-load.mjs 50 10 --verify
-```
-
-## Web UI
-
-The SDK's web UI (`workflow web`) runs locally against a deployed World through `@workflow/world-cloudflare/remote`, a Node client for the Worker's `/world/rpc` endpoint.
-
-1. Set a token on the Worker: `wrangler secret put WORLD_RPC_TOKEN`. Without it the endpoint does not exist. It can write events, so treat the token like a credential.
-2. Create `.dev.vars.remote-ui` (gitignored):
+1. Create the R2 buckets for dead letters and payloads, then deploy with your copy of `wrangler.jsonc`. To encrypt payloads at rest, set a secret before the first run: `openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET`.
+2. Optional: to keep in-flight runs on the code that started them, give each release a [retained executor](packages/world-cloudflare/README.md#retained-executors). Deploy a copy of `wrangler.executor.jsonc` to a Workers for Platforms dispatch namespace bound as `EXECUTORS`, add its deployment ID to `EXECUTOR_ROUTES`, and point the main Worker's `main` at `src/dispatcher.ts`, which leaves the workflow bundle out. Keep old executors until their runs drain.
+3. Run the remote checks:
 
    ```sh
-   WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote
-   WORKFLOW_CLOUDFLARE_URL=https://<worker>.workers.dev
-   WORKFLOW_CLOUDFLARE_TOKEN=<the same token>
+   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-e2e.mjs
+   WORKFLOW_BASE_URL=https://<worker>.workers.dev node scripts/remote-load.mjs 50 10 --verify
    ```
 
-3. Run `pnpm ui` and open http://localhost:3456.
+To browse runs in the SDK's web UI, set `WORLD_RPC_TOKEN` on the Worker (`wrangler secret put WORLD_RPC_TOKEN`), put `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, `WORKFLOW_CLOUDFLARE_URL=https://<worker>.workers.dev` and `WORKFLOW_CLOUDFLARE_TOKEN=<the token>` in `.dev.vars.remote-ui`, and run `pnpm ui` ([remote client](packages/world-cloudflare/README.md#remote-client)).
 
 ## Limits
 
-- Runs, hook tokens and messages hash onto store and queue shards, 128 and 256 by default, and `SHARD_EPOCHS` adds shards for new runs without moving old ones. `runs.list`, global `hooks.list` and `hooks.get` read index shards, 16 per epoch by default, which every store keeps up to date, so they do not grow with the store shard count.
-- Payloads and stream chunks over 1 MiB go to R2. On Workers with QuickJS a 16 MiB step output works and 20 MiB does not, because the workflow VM runs out of memory, so the World rejects any serialized payload over 18 MiB with a 413 and the step or run fails on its first attempt instead of retrying. HTTP bodies are capped at 100 MB. Larger data goes from step to step in a byte stream, in chunks of at most 16 MiB, because 64 MiB chunks ran out of memory on Workers ([streams](docs/limits.md#streams)). A flow request waits for the stream writes its steps left running before it answers, and a stream whose writer is gone ends its readers with an error. Measurements are in [limits](docs/limits.md#payloads).
-- R2 payload objects are never deleted, including ones left by writes that failed.
-- A step that exceeds the CPU limit is retried until the queue gives up, and holds up its delivery lane meanwhile. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
-- Payloads and VM snapshots are stored in plaintext unless the Worker has a `WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)), and that secret cannot be rotated. Finished runs are kept forever. See [contract parity](docs/contract-parity.md).
-- Steps run at least once, so give their side effects idempotency keys.
-- `@workflow/world-cloudflare/build` relies on a few internals of `@workflow/builders` and `@workflow/core` 5.5.0 (see its comments); check it when upgrading the SDK.
-- QuickJS probably needs more CPU than the Free plan's 10 ms limit.
-- Workflow code runs in QuickJS by default, with VM snapshots so a new invocation does not replay the whole log. The SDK's node engine (`WORKFLOW_VM=node`) runs it natively in V8 on the World's `node:vm` replacement; see [isolate engine](docs/isolate-engine.md).
+Measured on Workers; [limits](docs/limits.md) has every number with the build it was measured on.
+
+- **Long runs.** 30,000 sequential steps (90,003 events) in one run, in 23 minutes. The World sets no event cap.
+- **Payloads.** 16 MiB step outputs; the World rejects serialized payloads over 18 MiB. Larger data goes in byte streams, in chunks of up to 16 MiB: 1 GiB streams worked on Workers, 4 GiB locally ([streams](docs/limits.md#streams)).
+- **Throughput.** 321 runs created per second, 82 per second end to end, with 512 store and 1,024 queue shards ([run creation](docs/limits.md#run-creation)). 1,000 parallel steps in 66 to 74 s.
+- **CPU.** A step that exceeds the CPU limit is retried until the queue gives up. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
+- **Not done.** Finished runs and R2 payloads are kept forever, the encryption secret cannot be rotated, and steps run at least once, so give their side effects idempotency keys. [Contract parity](docs/contract-parity.md) lists what else is missing.
+- **SDK internals.** `@workflow/world-cloudflare/build` relies on a few internals of `@workflow/builders` and `@workflow/core` 5.5.0 (see its comments); check it when upgrading the SDK.
+
+## Docs
+
+| Doc | Contents |
+| --- | --- |
+| [`packages/world-cloudflare`](packages/world-cloudflare/README.md) | Setup, configuration and design of the World |
+| [`packages/world-cloudflare/drizzle`](packages/world-cloudflare/drizzle/README.md) | Schema migrations |
+| [`docs/contract-parity.md`](docs/contract-parity.md) | What of the SDK's World contract is built and tested |
+| [`docs/limits.md`](docs/limits.md) | Measured limits, compared with Vercel's |
+| [`docs/native-engine.md`](docs/native-engine.md) | The SDK's node engine on Workers, against QuickJS |
