@@ -59,6 +59,6 @@ export class DedupTable {
   }
 
   markAccepted(key: string): void {
-    this.#qb.update({ tableName: 'queue_dedup', data: { accepted: 1 }, where: { conditions: 'key = ?', params: [key] } }).execute();
+    this.#qb.update({ tableName: 'queue_dedup', data: { accepted: 1, encoded: null }, where: { conditions: 'key = ?', params: [key] } }).execute();
   }
 }
