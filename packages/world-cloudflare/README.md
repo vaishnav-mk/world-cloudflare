@@ -99,7 +99,7 @@ Runs created before keep spec 8, which the World still serves.
 
 ## Runners
 
-A call from a Durable Object to a service binding or a dispatch namespace Worker runs on the caller's thread. So a queue shard runs no workflow code: it hands each due message to a `Runner`, which calls the `CONSUMER` entrypoint with it, and the flow handler, or the retained executor, runs on the runner's thread.
+A queue shard runs no workflow code: flows it invoked itself competed with it for CPU, and run creation was 3 times faster with flows switched off. It hands each due message to a `Runner`, which calls the `CONSUMER` entrypoint with it, and the flow handler, or the retained executor, runs there.
 - **Sharding.** An epoch has as many runners as queue shards. A run's workflow messages go to runner `hash(runId) % queue` of its epoch, the index of its queue shard, so a run has one runner and a busy one stays warm. Other messages, such as steps, spread over the epoch's runners by message ID.
 - **One at a time.** A runner runs a run's workflow deliveries one after another, even when two queue shards deliver for it, as the legacy `flow` shard may, or when a reset queue shard delivers again a message the runner still runs. A Durable Object has one live instance, and a reset ends every delivery in it, so two replays of a run never share an isolate: the SDK's in-process step single-flight would make one request wait on a promise another settles.
 - **Recovery.** A runner keeps nothing. A delivery it was running when it reset fails on its queue shard, which delivers it again.

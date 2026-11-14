@@ -8,7 +8,7 @@ import { executorFor } from './routes.js';
 type ConsumerEnv = WorldEnv & { EXECUTORS?: DispatchNamespace };
 
 /**
- * The entrypoint a runner hands each delivery to, so it runs on the runner's thread. With an
+ * The entrypoint a runner hands each delivery to. With an
  * `EXECUTORS` dispatch namespace, each message runs on the retained executor for its deployment.
  * Without one, it runs on this Worker's flow route.
  */

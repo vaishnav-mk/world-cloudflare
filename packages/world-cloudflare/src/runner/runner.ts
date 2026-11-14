@@ -9,10 +9,9 @@ import type { Delivery, DeliveryOutcome, WorldEnv } from '../types.js';
 import { createWorld } from '../world.js';
 
 /**
- * A runner (`runnerShardFor`): where workflow code runs. A call from a Durable Object to a service
- * binding or a dispatch namespace Worker runs on the caller's thread, so queue shards hand every
- * delivery to a runner, which calls the `CONSUMER` entrypoint with it, and flows and steps use the
- * runner's CPU instead of the queue shard's. A run's workflow deliveries and invocations all reach
+ * A runner (`runnerShardFor`): where workflow code runs. Flow code a queue shard invoked itself
+ * competed with the shard for CPU (run creation was 3 times faster with flows switched off), so
+ * queue shards hand every delivery to a runner, which calls the `CONSUMER` entrypoint with it. A run's workflow deliveries and invocations all reach
  * its one runner, which runs the deliveries one at a time and the invocations beside them: the
  * single active runner per run `capabilities.invoke` asks for. It keeps nothing durable: a
  * delivery cut off by a reset fails on its queue shard, which delivers it again.

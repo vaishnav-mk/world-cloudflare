@@ -28,7 +28,7 @@ Run creation is the open gap. Measured on Workers with `POST /runs` from one mac
 
 What limits it:
 - **Cold shards.** A new Durable Object costs about 1.7 s on its first call, so one store per run made every creation pay it. Too many shards for the load does the same, which is why 2,048 shards did worse than 512.
-- **Flow CPU.** With flows switched off, creation reached 358 per second. A call from a Durable Object to a service binding or a dispatch namespace runs on the caller's thread, so flows started by a queue shard used that shard's CPU. They now run on runners ([runners](../packages/world-cloudflare/README.md#runners)); not re-measured on Workers.
+- **Flow CPU.** With flows switched off, creation reached 358 per second. Flows started by a queue shard competed with it for CPU. They now run on runners ([runners](../packages/world-cloudflare/README.md#runners)); not re-measured on Workers.
 - **Distance.** Each Durable Object call from the test colo took about 150 ms, because shards live where they were first called.
 - **The test.** One machine and one colo may cap it before the World does.
 - **Lists.** `runs.list` and a global `hooks.list` ask every store, so their cost grows with the shard count, and a large `limit` with `resolveData: 'all'` costs memory. `hooks.get` asks every store too.
