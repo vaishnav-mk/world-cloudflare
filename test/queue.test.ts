@@ -3,6 +3,7 @@ import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import type { WorldEnv } from '@workflow/world-cloudflare';
+import type { EnqueueRequest } from '../packages/world-cloudflare/src/types.js';
 import { PAYLOAD_MAX_BYTES, TURN_BATCH_MAX, TURN_CALLS_IN_FLIGHT } from '../packages/world-cloudflare/src/constants.js';
 import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
@@ -184,6 +185,35 @@ describe('durability fanout', () => {
     const retryName = `${getQueueTopicPrefix('workflow')}retry` as ValidQueueName;
     const id = (await queue.queue(retryName, { runId: 'run-retry' })).messageId;
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 6_000 }).toContain(id);
+  });
+
+  it('pins delayed messages to their sending deployment when a newer deployment delivers them', async () => {
+    const persisted: EnqueueRequest[] = [];
+    // SAFETY: The queue only calls dispatch on the store for these step messages.
+    const stores = { getByName: () => ({
+      dispatch: async (entries: { request: EnqueueRequest }[]) => entries.map(({ request }) => {
+        persisted.push(request);
+        return { id: request.id, fresh: true };
+      }),
+    }) } as unknown as WorldEnv['WORLD_STORE'];
+    const sender = createQueue({ ...env, WORLD_STORE: stores, DEPLOYMENT_ID: 'A', EXECUTOR_ROUTES: '{"B":"executor-B"}' });
+    const runId = `wrun_${'0'.repeat(26)}`;
+    await sender.queue(queueName, { runId, stepId: 'default', stepName: 'work' }, { delaySeconds: 60 });
+    await sender.queue(queueName, { runId, stepId: 'explicit', stepName: 'work' }, { delaySeconds: 60, deploymentId: 'B' });
+    const targets: string[] = [];
+    // SAFETY: The consumer only gets an executor by script name and calls fetch.
+    const executors = { get: (script: string) => ({ fetch: async () => {
+      targets.push(script);
+      return Response.json({});
+    } }) } as unknown as DispatchNamespace;
+    const Consumer = createQueueConsumer(async () => { throw new Error('must use retained executor'); });
+    const consumer = new Consumer(createExecutionContext(), {
+      ...env, DEPLOYMENT_ID: 'B', EXECUTOR_ROUTES: '{"A":"executor-A","B":"executor-B"}', EXECUTORS: executors,
+    });
+    expect(await consumer.consume(persisted.map(({ id, ...body }) => ({ id, body, attempt: 1, enqueuedAt: Date.now() })))).toEqual([
+      { kind: 'done' }, { kind: 'done' },
+    ]);
+    expect(targets).toEqual(['executor-A', 'executor-B']);
   });
 
   it('accepts a retained executor but refuses unregistered and prototype names', async () => {

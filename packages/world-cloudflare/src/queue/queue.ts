@@ -161,7 +161,7 @@ function reachable(env: Pick<QueueEnv, 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>, dep
 /** Validates one message and computes what the shard stores, or why it cannot be queued. */
 async function prepare(
   env: QueueEnv, queueName: string, message: QueuePayload,
-  { deploymentId: target, delaySeconds: delay = 0, idempotencyKey }: QueueOptions,
+  { deploymentId: target = env.DEPLOYMENT_ID, delaySeconds: delay = 0, idempotencyKey }: QueueOptions,
 ): Promise<Ready | { error: string }> {
   if (target && !reachable(env, target)) return { error: `Deployment ${target} is unavailable` };
   if (!Number.isFinite(delay) || delay < 0) return { error: 'Invalid queue delay' };
