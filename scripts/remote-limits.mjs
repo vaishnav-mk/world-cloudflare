@@ -17,14 +17,16 @@ const DEFAULT_MATRIX = [
   ...[4 * MiB, 8 * MiB, 20 * MiB, 32 * MiB, 50 * MiB, 64 * MiB].map((bytes) => ['stepOutput', bytes]),
   ...[8 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['stepInput', bytes]),
   ...[8 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['runOutput', bytes]),
-  ...[8 * MiB, 10 * MiB, 20 * MiB, 50 * MiB, 70 * MiB].map((bytes) => ['streamChunk', bytes]),
+  // `getWritable()` sends bytes as base64, so 16 MiB of them pass the 16 MiB chunk limit.
+  ...[8 * MiB, 10 * MiB, 12 * MiB, 16 * MiB].map((bytes) => ['streamChunk', bytes]),
   ...[100, 500, 1000].map((count) => ['sequentialSteps', count]),
   ...[50, 200, 500].map((count) => ['parallelSteps', count]),
   ...[100, 1000, 3000].map((mega) => ['cpuStep', mega]),
   ...[MiB, 10 * MiB, 20 * MiB, 50 * MiB].map((bytes) => ['hookPayload', bytes]),
-  // [total MiB, chunk MiB]: the largest chunk, then throughput by chunk size, then total size.
-  ...[[32, 32], [48, 48], [64, 64], [96, 96], [1024, 1], [1024, 8], [1024, 32], [1024, 64], [4096, 32]]
-    .map((args) => ['streamBytes', args]),
+  // [total MiB, chunk MiB]: the chunk limit and past it, then throughput by chunk size, then total size.
+  ...[[16, 16], [32, 32], [1024, 1], [1024, 8], [1024, 16], [4096, 16]].map((args) => ['streamBytes', args]),
+  // A stream written for two minutes after its step returns, past Workers' 30 s for background work.
+  ['streamSlowly', 120],
 ];
 
 const matrix = process.argv.length > 2
@@ -90,7 +92,7 @@ function describe(error) {
   return [...new Set(messages)].slice(0, 3).join(' | ') || text.replace(/\s+/g, ' ').slice(0, 200);
 }
 
-const timeouts = { cpuStep: 300_000, sequentialSteps: 600_000, parallelSteps: 300_000, streamBytes: 900_000 };
+const timeouts = { cpuStep: 300_000, sequentialSteps: 600_000, parallelSteps: 300_000, streamBytes: 900_000, streamSlowly: 900_000 };
 const results = [];
 for (const [name, value] of matrix) {
   const startedAt = Date.now();
@@ -107,7 +109,7 @@ for (const [name, value] of matrix) {
     if (run?.status === 'failed') row.error = describe(run.error);
     if (name === 'sequentialSteps' || name === 'parallelSteps') row.events = await eventCount(runId);
     // Bytes read, the first wrong byte (-1 for none), and the reading step's seconds and MiB/s.
-    if (name === 'streamBytes' && run?.status === 'completed') row.result = JSON.parse((await call(`/runs/${runId}/result`)).text).value;
+    if ((name === 'streamBytes' || name === 'streamSlowly') && run?.status === 'completed') row.result = JSON.parse((await call(`/runs/${runId}/result`)).text).value;
     if (name === 'streamChunk' && run?.status === 'completed') {
       const response = await fetch(`${base}/runs/${runId}/streams/limits`, { signal: AbortSignal.timeout(60_000) });
       row.streamed = (await response.arrayBuffer()).byteLength;

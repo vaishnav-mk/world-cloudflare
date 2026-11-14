@@ -131,7 +131,7 @@ A candidate whose token claim succeeded but whose run never committed, because b
 
 | Item | Before | After | Tests | Notes |
 | --- | --- | --- | --- | --- |
-| `write`, `writeMulti`, `close`, `get`, `list`, `getChunks`, `getInfo` | Built | Built | contract, streams, e2e | Chunks over 1 MiB in R2 |
+| `write`, `writeMulti`, `close`, `get`, `list`, `getChunks`, `getInfo` | Built | Built | contract, streams, e2e | Chunks over 1 MiB in R2, up to 16 MiB each. A reader of a step's stream whose writer is gone ends with a `StreamError` ([streams](limits.md#streams)) |
 | `createWriteSession`, `streamFlushIntervalMs` | Missing | Missing | | Optional. Each write is one RPC to the run's `RunStreams`, and the runtime falls back to the stateless methods |
 
 ## World methods

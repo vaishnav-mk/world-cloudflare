@@ -63,6 +63,7 @@ Bindings, as in the repo's `wrangler.jsonc`:
 | `PAYLOADS` | R2 bucket for payloads and stream chunks over 1 MiB |
 | `DEPLOYMENT_ID` | A new ID per release |
 | `WORKFLOW_ENCRYPTION_SECRET` | Optional secret that turns on [encryption](#encryption) |
+| `FLOW_BACKGROUND_BUDGET_MS` | Optional: how long after its delivery starts a flow request waits for its background work, 13.5 minutes by default. The tests shorten it |
 | `EXECUTORS`, `EXECUTOR_ROUTES` | Optional retained executors, below |
 
 Add a `* * * * *` cron so `drainOutbox` can recover the legacy store's dispatches whose alarm was lost, and wake the queue shards.
@@ -98,14 +99,14 @@ Runs created before keep spec 8, which the World still serves.
 ## Large payloads
 
 Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 MiB message limit, so the World client keeps large values in R2. It runs in the calling Worker:
-- **Writes.** Before a write reaches its Durable Object, each binary `eventData` field and stream chunk over 1 MiB goes to `PAYLOADS` at `runs/<runId>/<uuid>`, and the object stores a ref. The R2 write finishes first, so a committed ref always has its object. A serialized payload over 18 MiB is rejected with a 413, because reading it back would run the workflow out of memory.
+- **Writes.** Before a write reaches its Durable Object, each binary `eventData` field and stream chunk over 1 MiB goes to `PAYLOADS` at `runs/<runId>/<uuid>`, and the object stores a ref. The R2 write finishes first, so a committed ref always has its object. A serialized payload over 18 MiB is rejected with a 413 marked `fatal`, because reading it back would run the workflow out of memory, and a stream chunk over 16 MiB likewise, because the writing step's isolate holds a few chunks at once.
 - **Reads.** Every read swaps refs back for their bytes, as the SDK expects; `resolveData: 'none'` reads nothing from R2. Stream reads instead pipe each chunk from R2 as the reader takes it, so no chunk is held whole, and `getChunks` pages stop at 4 MiB.
 
 Every Worker that runs World client code needs the `PAYLOADS` binding, including retained executors. [Limits](../../docs/limits.md#payloads) has the measured sizes and the open costs.
 
 ## Large data
 
-A payload over 18 MiB is rejected, and the SDK reads each payload whole. For more, have a step return a `ReadableStream` of `type: 'bytes'` and pass it to the next step. The workflow holds only a handle, each chunk over 1 MiB goes to R2 on its own, and the reading step gets the bytes as they come out of R2. Locally 4 GiB moved this way in 64 MiB chunks:
+A payload over 18 MiB is rejected, and the SDK reads each payload whole. For more, have a step return a `ReadableStream` of `type: 'bytes'` and pass it to the next step. The workflow holds only a handle, each chunk over 1 MiB goes to R2 on its own, and the reading step gets the bytes as they come out of R2. A chunk may be up to 16 MiB:
 
 ```ts
 const CHUNK = 16 * 1024 * 1024;
@@ -144,7 +145,7 @@ async function countBytes(stream: ReadableStream<Uint8Array>) {
 }
 ```
 
-The writing step holds the chunk it is writing, the SDK stores byte streams unencrypted, and a returned stream is written in the background after its step completes. [Limits](../../docs/limits.md#streams) has the measurements and the rest.
+The writing step holds the chunks it is writing, and the SDK stores byte streams unencrypted. A returned stream is written in the background after its step completes; the flow request waits for that before it answers, and if the writer stops first, the stream's readers end with an error. [Limits](../../docs/limits.md#streams) has the measurements and the rest.
 
 ## Encryption
 
