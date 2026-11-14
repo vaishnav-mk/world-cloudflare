@@ -3,7 +3,7 @@ import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
 import type { WorldEnv } from '@workflow/world-cloudflare';
-import { PUBLISH_BATCH_MAX } from '../packages/world-cloudflare/src/constants.js';
+import { TURN_BATCH_MAX } from '../packages/world-cloudflare/src/constants.js';
 import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
 import { queueShardFor, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
@@ -45,14 +45,14 @@ describe('durability fanout', () => {
     const gathering = createQueue({ ...env, WORLD_STORE: stores });
     const runId = `wrun_${'0'.repeat(26)}`;
     const step = (stepId: string) => gathering.queue(queueName, { runId, stepId, stepName: 'work' }, { idempotencyKey: stepId });
-    const count = PUBLISH_BATCH_MAX + 1;
+    const count = TURN_BATCH_MAX + 1;
     const published = await withRequestContext(createExecutionContext(), {}, () =>
       Promise.all(Array.from({ length: count }, (_, index) => step(`step-${index}`))));
     expect(new Set(published.map(({ messageId }) => messageId)).size).toBe(count);
-    expect(calls).toEqual([PUBLISH_BATCH_MAX, 1]);
+    expect(calls).toEqual([TURN_BATCH_MAX, 1]);
     // Outside a flow request, each publish is its own call.
     await Promise.all([step('alone-1'), step('alone-2')]);
-    expect(calls).toEqual([PUBLISH_BATCH_MAX, 1, 1, 1]);
+    expect(calls).toEqual([TURN_BATCH_MAX, 1, 1, 1]);
   });
 
   it("answers a flow request's publish of a dispatched step itself, reading the run's dispatched steps once", async () => {

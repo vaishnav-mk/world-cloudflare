@@ -122,6 +122,10 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return writes.createEvent(this.#store, runId, request, params);
   }
 
+  async createEvents(runId: string, events: { request: AnyEventRequest; params?: CreateEventParams }[]): Promise<(EventResult | Error)[]> {
+    return writes.createEvents(this.#store, runId, events);
+  }
+
   async createEventBatch(runId: string, events: BatchEventRequest[], params: CreateEventBatchParams = {}): Promise<EventBatchResult> {
     return writes.createEventBatch(this.#store, runId, events, params);
   }

@@ -12,7 +12,7 @@ import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDis
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
-import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS, PUBLISH_BATCH_MAX } from '../constants.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS, TURN_BATCH_MAX } from '../constants.js';
 import { createQueueHandler } from './handler.js';
 import { holdMessage } from './hold.js';
 
@@ -54,7 +54,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
     });
   };
 
-  // A flow request's single publishes in the same turn go out together, PUBLISH_BATCH_MAX to a
+  // A flow request's single publishes in the same turn go out together, TURN_BATCH_MAX to a
   // `queueBatch`: a replay that starts thousands of steps at once then makes a few calls to the
   // run's store instead of one per step, which overloaded it.
   const turns = new WeakMap<FlowRequest, Map<string, Waiting[]>>();
@@ -68,8 +68,8 @@ export function createQueue(env: QueueEnv): HoldingQueue {
       queues.set(queueName, batch);
       setTimeout(() => {
         queues.delete(queueName);
-        for (let start = 0; start < batch.length; start += PUBLISH_BATCH_MAX) {
-          const chunk = batch.slice(start, start + PUBLISH_BATCH_MAX);
+        for (let start = 0; start < batch.length; start += TURN_BATCH_MAX) {
+          const chunk = batch.slice(start, start + TURN_BATCH_MAX);
           queueBatch(queueName, chunk).then(
             (results) => chunk.forEach(({ resolve }, index) => resolve(results[index])),
             (error: unknown) => chunk.forEach(({ reject }) => reject(error)),

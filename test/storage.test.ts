@@ -1,8 +1,12 @@
-import { env, runInDurableObject } from 'cloudflare:test';
+import { createExecutionContext, env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { queueShardFor, storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { parse } from 'devalue';
+import { EntityConflictError } from '@workflow/errors';
 import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY } from '@workflow/world';
+import type { WorldEnv } from '@workflow/world-cloudflare';
+import { TURN_BATCH_MAX } from '../packages/world-cloudflare/src/constants.js';
+import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
 import { OutboxStatus } from '../packages/world-cloudflare/src/enums.js';
@@ -22,6 +26,40 @@ async function newRun(id: string) {
 }
 
 describe('v5 event storage in SQLite DO', () => {
+  it("writes a flow request's step creations in one turn together, each with its own outcome", async () => {
+    const runId = crypto.randomUUID();
+    await newRun(runId);
+    await store.events.create(runId, { eventType: 'run_started' });
+    const step = (correlationId: string) => store.events.create(runId, {
+      eventType: 'step_created', correlationId, eventData: { stepName: 'double', input: bytes('2') },
+    });
+    await step('first');
+    const [second, again, third] = await withRequestContext(createExecutionContext(), {}, () =>
+      Promise.allSettled([step('second'), step('first'), step('third')]));
+    expect(second).toMatchObject({ status: 'fulfilled', value: { event: { correlationId: 'second' }, step: { stepId: 'second' } } });
+    expect(again.status === 'rejected' && EntityConflictError.is(again.reason)).toBe(true);
+    expect(third).toMatchObject({ status: 'fulfilled', value: { event: { correlationId: 'third' } } });
+    expect((await store.events.list({ runId })).data.map((event) => event.correlationId)).toEqual([undefined, undefined, 'first', 'second', 'third']);
+  });
+
+  it("sends a flow request's step creations in one turn in a few calls", async () => {
+    const calls: number[] = [];
+    const stores = { getByName: () => ({
+      createEvents: async (_runId: string, events: unknown[]) => {
+        calls.push(events.length);
+        return events.map(() => ({ event: undefined }));
+      },
+    }) } as unknown as WorldEnv['WORLD_STORE'];
+    const gathering = createStorage({ ...env, WORLD_STORE: stores });
+    const runId = `wrun_${'0'.repeat(26)}`;
+    const step = (correlationId: string) => gathering.events.create(runId, {
+      eventType: 'step_created', correlationId, eventData: { stepName: 'double', input: bytes('2') },
+    });
+    await withRequestContext(createExecutionContext(), {}, () =>
+      Promise.all(Array.from({ length: TURN_BATCH_MAX + 1 }, (_, index) => step(`step-${index}`))));
+    expect(calls).toEqual([TURN_BATCH_MAX, 1]);
+  });
+
   it('publishes every due step of a run in one drain', async () => {
     const runId = crypto.randomUUID();
     await newRun(runId);

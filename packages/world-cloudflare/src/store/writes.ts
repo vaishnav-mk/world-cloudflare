@@ -51,6 +51,22 @@ export async function createEvent(
 }
 
 /**
+ * Writes events a flow request created at once, in order, each as its own `createEvent`, and
+ * answers each with its result or its error: one call for a replay's thousands of `step_created`.
+ */
+export async function createEvents(
+  store: StoreContext, runId: string, events: readonly { request: AnyEventRequest; params?: CreateEventParams }[],
+): Promise<(EventResult | Error)[]> {
+  // A shard that does not hold the run refuses the whole call, so the caller asks the legacy store.
+  store.own(runId);
+  const results: (EventResult | Error)[] = [];
+  for (const { request, params } of events) {
+    results.push(await createEvent(store, runId, request, params).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error)))));
+  }
+  return results;
+}
+
+/**
  * Appends events in order in one transaction. Each event commits or is rejected on its own, with
  * the outcome its single `createEvent` would have had; a conflict is a 409 item.
  */
