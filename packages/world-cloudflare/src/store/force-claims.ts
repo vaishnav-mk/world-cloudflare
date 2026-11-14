@@ -38,7 +38,8 @@ export async function claimHookTokenForced(store: StoreContext, hook: Hook): Pro
     if (holder !== undefined && holder.hook.hookId === hook.hookId && holder.hook.runId === hook.runId) {
       return { kind: TokenClaim.Granted, hook: holder.hook };
     }
-    if (holder === undefined || tokens.claim(hook, new Date()) === null) return { kind: TokenClaim.Granted, hook };
+    if (tokens.claim(hook, new Date()) === null) return { kind: TokenClaim.Granted, hook };
+    if (holder === undefined) throw new Error('A conflicting token needs a holder');
     const pending = takeovers.find(hook.token);
     if (pending !== undefined && pending.claimer.hookId !== hook.hookId) {
       throw new WorkflowWorldError(`Hook token ${hook.token} is being taken over by another run; retry`, { status: 503 });
