@@ -183,7 +183,7 @@ describe('durability fanout', () => {
 
   it('redelivers after the consumer requests a retry', async () => {
     const retryName = `${getQueueTopicPrefix('workflow')}retry` as ValidQueueName;
-    const id = (await queue.queue(retryName, { runId: 'run-retry' })).messageId;
+    const id = (await queue.queue(retryName, { runId: 'run-retry', runSpecVersion: 9 })).messageId;
     await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 6_000 }).toContain(id);
   });
 
@@ -318,8 +318,36 @@ describe('durability fanout', () => {
     const counts = async (runId: string) => (await env.SINK.getByName('sink').logged())
       .filter((entry) => entry.runId === runId).map(({ deliveryCount, attempt }) => [deliveryCount, attempt]);
     await expect.poll(() => counts(spec9), { timeout: 5_000 }).toEqual([[1, 1], [2, 1]]);
-    // An earlier run's `{ timeoutSeconds: 0 }` continues it and counts as an attempt.
-    await expect.poll(() => counts(spec8), { timeout: 5_000 }).toEqual([[1, 1], [2, 2]]);
+    // An earlier run's successful timeout starts a new message, with fresh counts.
+    await expect.poll(() => counts(spec8), { timeout: 5_000 }).toEqual([[1, 1], [1, 1]]);
+  });
+
+  it.each([false, true])('continues spec 8 successful wakes beyond the cap with hold=%s', async (held) => {
+    const sink = env.SINK.getByName('sink');
+    const runId = `continuation-${crypto.randomUUID()}`;
+    const name = `${getQueueTopicPrefix('workflow')}fresh_continuation` as ValidQueueName;
+    const payload = { runId, runSpecVersion: 8, requestedAt: new Date(42) };
+    const opts = { idempotencyKey: crypto.randomUUID(), deploymentId: 'test-v1', ...(held ? { experimental_hold: true as const } : {}) };
+    const first = await queue.queue(name, payload, opts);
+    if (held) {
+      if (first.experimental_hold?.status !== 'held') throw new Error('expected a held message');
+      await first.experimental_hold.consume(async (_payload, meta) => {
+        expect(meta).toMatchObject({ messageId: first.messageId, attempt: 1, deliveryCount: 1 });
+        return { timeoutSeconds: 0.05 };
+      });
+    }
+    const logged = async () => (await sink.logged()).filter((entry) => entry.runId === runId);
+    await expect.poll(async () => (await logged()).length, { timeout: 4_000 }).toBe(5);
+    const entries = await logged();
+    expect(new Set(entries.map(({ id }) => id)).size).toBe(5);
+    expect(entries[0].id === first.messageId).toBe(!held);
+    expect(entries.map(({ attempt, deliveryCount }) => [attempt, deliveryCount])).toEqual(Array(5).fill([1, 1]));
+    for (const { body } of entries) expect(body).toMatchObject({ queueName: name, encoded: stringify(payload), targetDeployment: 'test-v1' });
+    for (const [index, entry] of entries.entries()) {
+      if (index > 0) expect(entry.start - entries[index - 1].end).toBeGreaterThanOrEqual(45);
+    }
+    // The original dedup key still names the first message, never a continuation.
+    expect((await queue.queue(name, payload, opts)).messageId).toBe(first.messageId);
   });
 
   it('passes delivery counts and the invocation start to the handler, and bounds an unbounded wake', async () => {

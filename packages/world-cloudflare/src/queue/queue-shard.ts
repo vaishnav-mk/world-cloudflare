@@ -53,7 +53,8 @@ export class QueueShard extends DurableObject<WorldEnv> {
     super(ctx, env);
     const name = ctx.id.name;
     if (name === undefined) throw new Error('Queue shards are reached by name');
-    this.#deliverer = new Deliverer(env, this.#runners, stepRunnerFor(name), this.#counts, this.#holds, this.#inflight);
+    this.#deliverer = new Deliverer(env, this.#runners, stepRunnerFor(name), this.#counts, this.#holds, this.#inflight,
+      (request) => this.#enqueueOne(request));
     migrateOnStart(ctx, migrations);
     ctx.blockConcurrencyWhile(() => this.#redeliverOrphans());
   }
@@ -153,14 +154,15 @@ export class QueueShard extends DurableObject<WorldEnv> {
 
   /**
    * Settles a held message: done (`delayMs` null), or delivered again after `delayMs`, as a copy
-   * that keeps its ID, which a handoff leaves out of the attempt.
+   * that keeps its ID, which a handoff leaves out of the attempt. A successful spec 8 timeout
+   * continues under a fresh ID instead.
    */
-  async settleHold(id: string, delayMs: number | null, handoff: boolean): Promise<void> {
+  async settleHold(id: string, delayMs: number | null, handoff: boolean, continuation = false): Promise<void> {
     const message = this.#holds.message(id);
     if (message === undefined) return;
     if (delayMs !== null) {
       if (handoff) this.#counts.handoff(id);
-      await this.#enqueueOne({ ...message, id: crypto.randomUUID(), delayMs, messageId: id });
+      await this.#enqueueOne({ ...message, id: crypto.randomUUID(), delayMs, ...(continuation ? {} : { messageId: id }) });
     }
     this.#holds.settle(id);
   }

@@ -48,8 +48,9 @@ export async function holdMessage(
           return;
         }
         const seconds = wakeSeconds(outcome, payload);
+        const appends = isSingleOrchestratorMessage(payload);
         await shard().settleHold(messageId, seconds === undefined ? null : seconds * 1000,
-          seconds === 0 && isSingleOrchestratorMessage(payload));
+          seconds === 0 && appends, seconds !== undefined && !appends);
       } finally {
         clearInterval(renewal);
       }

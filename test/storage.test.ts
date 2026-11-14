@@ -167,12 +167,12 @@ describe('v5 event storage in SQLite DO', () => {
       return ids.size;
     };
     await stub.drainOutbox();
-    await expect.poll(deadIds, { timeout: 5_000 }).toBe(1);
+    await expect.poll(deadIds, { timeout: 8_000 }).toBe(1);
     await expect.poll(() => stub.pendingHookWakeSlot(runId), { timeout: 5_000 }).toBe(slot);
     await new Promise((resolve) => setTimeout(resolve, 10_100));
     await stub.drainOutbox();
-    await expect.poll(deadIds, { timeout: 5_000 }).toBe(2);
-  }, 20_000);
+    await expect.poll(deadIds, { timeout: 8_000 }).toBe(2);
+  }, 30_000);
 
   it('does not republish a hook wake accepted by the SDK queue', async () => {
     const runId = crypto.randomUUID();

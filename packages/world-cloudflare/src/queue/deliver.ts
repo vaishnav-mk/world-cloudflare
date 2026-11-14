@@ -6,7 +6,7 @@ import { groupBy } from '../lib/group.js';
 import { readPayload, replayOf } from '../lib/messages.js';
 import { runnerShardFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
-import type { Delivery, DeliveryOutcome, Envelope, WorldEnv } from '../types.js';
+import type { Delivery, DeliveryOutcome, EnqueueRequest, Envelope, WorldEnv } from '../types.js';
 import type { DeliveryCounts } from './delivery-counts.js';
 import type { Holds } from './holds.js';
 import type { InflightTable } from './inflight.js';
@@ -49,11 +49,13 @@ export class Deliverer {
   readonly #counts: DeliveryCounts;
   readonly #holds: Holds;
   readonly #inflight: InflightTable;
+  readonly #enqueue: (request: EnqueueRequest) => Promise<unknown>;
   /** When each run's latest successful replay started, for the newest `REPLAY_MARKS_MAX` runs. */
   readonly #replayed = new Map<string, number>();
 
   constructor(
     env: Pick<WorldEnv, 'QUEUE_MAX_ATTEMPTS'>, runners: RunnerStubs, stepRunner: string, counts: DeliveryCounts, holds: Holds, inflight: InflightTable,
+    enqueue: (request: EnqueueRequest) => Promise<unknown>,
   ) {
     const maxAttempts = Number(env.QUEUE_MAX_ATTEMPTS ?? DEFAULT_QUEUE_MAX_ATTEMPTS);
     if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
@@ -65,6 +67,7 @@ export class Deliverer {
     this.#counts = counts;
     this.#holds = holds;
     this.#inflight = inflight;
+    this.#enqueue = enqueue;
   }
 
   async deliver(messages: FanoutMessage[]): Promise<void> {
@@ -120,9 +123,7 @@ export class Deliverer {
     const deliveries = due.map(({ delivery }) => delivery);
     this.#inflight.add(deliveries);
     const startedAt = Date.now();
-    const outcomes = await this.#handOff(due).finally(() => {
-      for (const { id } of deliveries) this.#inflight.remove(id);
-    });
+    const outcomes = await this.#handOff(due);
     for (const [index, outcome] of outcomes.entries()) {
       const { message, delivery, appends, replays } = due[index];
       switch (outcome.kind) {
@@ -130,6 +131,11 @@ export class Deliverer {
           if (replays !== undefined) this.#markReplayed(replays, startedAt);
           break;
         case DeliveryResult.Wake:
+          if (!appends) {
+            const { queueName, encoded, targetDeployment } = delivery.body;
+            await this.#enqueue({ id: crypto.randomUUID(), queueName, encoded, targetDeployment, delayMs: outcome.seconds * 1000 });
+            break;
+          }
           // A spec 9 run's `{ timeoutSeconds: 0 }` is a handoff: delivered again at once, not another attempt.
           if (appends && outcome.seconds === 0) this.#counts.handoff(delivery.id);
           await message.retry(outcome.seconds * 1000);
@@ -141,6 +147,7 @@ export class Deliverer {
         default:
           unreachable(outcome);
       }
+      this.#inflight.remove(delivery.id);
     }
   }
 
