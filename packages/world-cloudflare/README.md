@@ -1,43 +1,27 @@
 # @workflow/world-cloudflare
 
-A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for Cloudflare Workers.
+A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for Cloudflare Workers, built on SQLite Durable Objects and R2. It runs the published SDK (`workflow` 5.5.0). It creates spec 8 runs, or spec 9 (single-orchestrator) runs with `WORKFLOW_SPEC_VERSION=9`, and declares every capability Vercel's World does (`inBandFence`, `maxConcurrency`, `hookRetention`, `hookResumeDedup`, `resolvedHookResume`, `hookForceClaim`, `atomicStartHook`, `deploymentAffinity`, `dynamicWorkflowCode`) plus `invoke`. [Contract parity](../../docs/contract-parity.md) lists what is built and tested, and [limits](../../docs/limits.md) what was measured.
+
+The package is unpublished. The `@workflow` npm scope belongs to Vercel, so publishing it needs another name.
 
 | Durable Object | Holds |
 | --- | --- |
-| `WorldStore` | Store shards ([below](#store-shards)). Each holds the runs that hash to it, with their events, steps, hooks, waits and outboxes, and the registry for the hook tokens that hash to it. The one named `global` holds runs created before store shards |
-| `QueueShard` | Queue shards: queue messages, delays, retries and idempotency keys; dead letters go to R2 |
-| `Runner` | Runners ([below](#runners)): where flows and steps run. Holds nothing durable |
+| `WorldStore` | Store shards: the runs that hash to each, with their events, steps, hooks, waits and outboxes, and the registry for the hook tokens that hash to it. Also the index shards and the legacy store, [below](#shards-and-epochs) |
+| `QueueShard` | Queue shards: messages, delays, retries and idempotency keys. Dead letters go to R2 |
+| `Runner` | Where flows and steps run ([runners](#runners)). Holds nothing durable |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
-Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It creates spec 8 runs, or spec 9 (single-orchestrator) runs with `WORKFLOW_SPEC_VERSION=9`, and advertises every capability Vercel's World does: `inBandFence`, `maxConcurrency`, `hookRetention`, `hookResumeDedup`, `resolvedHookResume`, `hookForceClaim`, `atomicStartHook`, `deploymentAffinity` and `dynamicWorkflowCode`, and `invoke`, which Vercel's does not ([runners](#runners)). Its `queue()` also holds a message for its sender (`experimental_hold`), which `@workflow/world` 5.2.0 has no capability for. It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
+Tables are Drizzle definitions with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)); queries use [workers-qb](https://workers-qb.massadas.com/).
 
-## Requirements
+## Setup
 
-- The published Workflow SDK (`workflow` 5.5.0), with workflows built by `@workflow/world-cloudflare/build` (below).
-- The `nodejs_compat` flag. Workflow code runs on QuickJS (`WORKFLOW_VM=quickjs`) or natively on the SDK's node engine (`WORKFLOW_VM=node`, or unset), which the build gives a `node:vm` of its own; see [isolate engine](../../docs/isolate-engine.md).
-- Wrangler `alias` entries for the SDK packages that do not load on Workers, which the SDK imports to pick a default World and to hand off background work:
-
-  ```jsonc
-  "alias": {
-    "@workflow/world-local": "@workflow/world-cloudflare/stubs/world",
-    "@workflow/world-vercel": "@workflow/world-cloudflare/stubs/world",
-    "@vercel/functions": "@workflow/world-cloudflare/stubs/vercel-functions"
-  }
-  ```
-
-  In a vitest config for the Workers pool, pass `workerAliases` from `@workflow/world-cloudflare/build` as `resolve.alias`.
-- A Wrangler rule that bundles the migration SQL as text: `"rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]`.
-- For VM snapshots, either an [encryption secret](#encryption) or `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1`. With neither, the SDK replays each run's whole event log on every invocation. Without a secret, snapshots hold the run's memory in plaintext, as the store holds its payloads.
-
-## Add it to a Worker
-
-Build your workflows before `wrangler dev` or `wrangler deploy`:
+Build the workflows before `wrangler dev` or `wrangler deploy`. The command takes the directories to scan, `.` by default:
 
 ```sh
-node node_modules/@workflow/world-cloudflare/src/build.ts workflows   # the directories to scan; default .
+node node_modules/@workflow/world-cloudflare/src/build.ts workflows
 ```
 
-It writes `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handler, the steps module it loads, the QuickJS WebAssembly modules and `manifest.json`. `flow.mjs` loads the SDK on its first delivery, not at startup. Then:
+It writes `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handler, the steps module it loads, the QuickJS WebAssembly modules and `manifest.json`. `flow.mjs` loads the SDK on its first delivery, not at startup. The Worker then exports the Durable Objects and the queue consumer, and registers the World:
 
 ```ts
 import { createQueueConsumer, createWorld, drainOutbox, registerWorld, type WorldEnv } from '@workflow/world-cloudflare';
@@ -54,71 +38,85 @@ export default {
 };
 ```
 
-Bindings, as in the repo's `wrangler.jsonc`:
+`registerWorld()` does what `setWorld()` from `workflow/runtime` does, without importing it: `workflow/runtime` 5.5.0 draws a random ID as it loads, which Workers forbid at startup. `WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`.
+
+The Wrangler config, as in the repo's [`wrangler.jsonc`](../../wrangler.jsonc), needs:
+- the `nodejs_compat` flag;
+- `alias` entries for the SDK packages that do not load on Workers, which the SDK imports to pick a default World and to hand off background work. In a vitest config for the Workers pool, pass `workerAliases` from `@workflow/world-cloudflare/build` as `resolve.alias` instead:
+
+  ```jsonc
+  "alias": {
+    "@workflow/world-local": "@workflow/world-cloudflare/stubs/world",
+    "@workflow/world-vercel": "@workflow/world-cloudflare/stubs/world",
+    "@vercel/functions": "@workflow/world-cloudflare/stubs/vercel-functions"
+  }
+  ```
+
+- a rule that bundles the migration SQL as text: `"rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]`;
+- a `* * * * *` cron for `drainOutbox`, which recovers the legacy store's dispatches and wakes the queue shards;
+- `limits.cpu_ms` of 300,000 and a high `limits.subrequests`, because the SDK makes about one Durable Object call per event.
+
+## Configuration
 
 | Binding | Type |
 | --- | --- |
-| `WORLD_STORE`, `QUEUE_SHARD`, `RUN_STREAMS`, `RUNNER` | SQLite Durable Objects with those class names (`Runner` for `RUNNER`) |
-| `CONSUMER` | Service binding to the main Worker's `QueueConsumer` entrypoint, which runners call to run deliveries; executors use it to resolve the latest deployment |
+| `WORLD_STORE`, `QUEUE_SHARD`, `RUN_STREAMS`, `RUNNER` | SQLite Durable Objects of those classes (`Runner` for `RUNNER`) |
+| `CONSUMER` | Service binding to the main Worker's `QueueConsumer` entrypoint, which runners call to run deliveries |
 | `DLQ` | R2 bucket for dead letters |
 | `PAYLOADS` | R2 bucket for payloads and stream chunks over 1 MiB |
-| `DEPLOYMENT_ID` | A new ID per release |
+| `EXECUTORS` | Optional dispatch namespace of [retained executors](#retained-executors) |
+
+| Variable | Meaning |
+| --- | --- |
+| `DEPLOYMENT_ID` | Required. A new ID per release |
+| `SHARD_EPOCHS` | Shard counts per epoch ([below](#shards-and-epochs)). Default: one epoch of 128 store, 256 queue and 16 index shards |
+| `WORKFLOW_VM` | The SDK's engine for new runs: `quickjs`, or `node` (the default), which runs natively on the build's `node:vm` ([native engine](../../docs/native-engine.md)). The templates set `quickjs` |
 | `WORKFLOW_ENCRYPTION_SECRET` | Optional secret that turns on [encryption](#encryption) |
-| `FLOW_BACKGROUND_BUDGET_MS` | Optional: how long after its delivery starts a flow request waits for its background work, 13.5 minutes by default. The tests shorten it |
-| `EXECUTORS`, `EXECUTOR_ROUTES` | Optional retained executors, below |
+| `WORKFLOW_SPEC_VERSION` | `9` for spec 9 runs ([below](#spec-9)); spec 8 otherwise |
+| `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED` | `1` lets the SDK save QuickJS VM snapshots without a secret. With neither, it replays each run's whole log on every invocation |
+| `WORKFLOW_COMPRESSION_CODEC` | `gzip`: zstd in workerd throws on incompressible input |
+| `QUEUE_MAX_ATTEMPTS` | Deliveries before a message is dead-lettered, 64 by default |
+| `FLOW_BACKGROUND_BUDGET_MS` | How long after its delivery starts a flow request waits for its background work, 13.5 minutes by default |
+| `EXECUTOR_ROUTES` | JSON map from deployment ID to retained executor script name |
 
-Add a `* * * * *` cron so `drainOutbox` can recover the legacy store's dispatches whose alarm was lost, and wake the queue shards.
+Every Worker that runs World code, retained executors included, needs the same bindings, `SHARD_EPOCHS` and `WORKFLOW_ENCRYPTION_SECRET`.
 
-`WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`. Register the World instead. `registerWorld()` does what `setWorld()` from `workflow/runtime` does, without importing it: `workflow/runtime` 5.5.0 draws a random ID as it loads, which Workers forbid at startup. The SDK's `main` defers that ID, so `setWorld()` works again from its next release.
+## Shards and epochs
 
-## Store shards
+No single object sees every run. `WorldStore` objects play four roles, by name:
+- **Store shards** (`store-<n>`) hold the runs that hash to them, from a run's first event. A write commits its event, state changes and outbox rows in one transaction.
+- **Token shards** are store shards too: a hook token's registry row lives on shard `hash(token) % store` of the first epoch, which never changes. A run's store claims the token there before it journals `hook_created` or `hook_conflict`, and releases it when the hook is disposed of or the run finishes. A forced claim (`experimental_force`) moves a token only after the holder's store has disposed of its hook.
+- **Index shards** (`index-<n>`) hold list rows ([listing](#listing)).
+- **The legacy store** (`global`) holds the runs created before store shards, with their hooks. The World client tries a run's shard first and falls back to it.
 
-A run lives in one store shard from its first event, so no single object sees every run. The store named `global` is the legacy store: it holds the runs created before store shards, with their hooks.
-- **Epochs.** `SHARD_EPOCHS` is a JSON list of `{ "from": <ms>, "store": <count>, "queue": <count>, "index"?: <count> }`, oldest first, the first at 0. The default is one epoch of 128 store and 256 queue shards, and `index` defaults to 16. A run's ULID time picks its epoch, and the run lives in store shard `hash(runId) % store` of it; its workflow messages (start, wakes, hook resumes and timers) go to queue shard `hash(runId) % queue`, and other messages, such as steps, to `hash(key) % queue`. To add capacity, append an epoch whose `from` is later than the deploy: new runs spread over its shards and no existing run moves. Never change an existing epoch's counts, `index` included (leaving it unset means 16): its rows would hash elsewhere. Every Worker running World code, retained executors included, needs the same value. Size shards to load: a shard that sees too few runs stays cold, and each cold one costs about 1.7 s on Workers.
-- **Replays.** A run's queue shard delivers its workflow messages one at a time, to the run's runner. A wake that asks only for a replay, delivered for the first time, is settled without a delivery once a replay that started after it was due has succeeded; a start, a timer, a legacy hook resume or a message with a retry counter is always delivered.
-- **Event pages.** A page of events ends at its count limit or once its stored rows pass 4 MiB, and the SDK reads on with the cursor. A store reads at most two pages at once, 512 KiB at a time.
-- **Routing.** The World client sends a run-scoped call to the run's shard. A shard throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the legacy store and remembers, per isolate, that the run lives there.
-- **Index shards.** Each epoch has `index` index shards (`index-<n>`, `WorldStore` objects with their own tables). A run's list row, the run without its payloads, lives on index shard `hash(runId) % index` of its epoch, and each of its hooks on `hash(hookId) % index` of that epoch. A store owes its index shards the latest row of every run change and hook change, committed with the write in an outbox (latest state wins) and pushed right after it; the write answers once the push lands, or after 1 s while it goes on. A failed push stays owed and the store's alarm retries it with backoff.
-- **Lists.** `runs.list` and `hooks.list` without a run ID ask every index shard of every epoch, 32 at a time, merge their pages by `createdAt` then ID, and return the last row's sort key as the cursor. Filters apply on the index shards. With `resolveData: 'all'`, the page's runs then come whole from their stores, one call per store. `hooks.get` asks one index shard per epoch. `runs.getMany` makes one call per shard its IDs hash to, 32 at a time, then one to the legacy store for the rest.
-- **Backfill.** Runs and hooks written before the index reach it through a one-time backfill per store: on its first wake the store owes the index its runs and their hooks, 200 runs per alarm, then tells each index shard it feeds that it is done. A store that holds nothing reports at once. An index shard answers only once every store of its epoch and the legacy store has reported; until then lists and `hooks.get` ask every store, as before, which also wakes every store to backfill.
-- **Hook tokens.** A token's registry row lives on shard `hash(token) % store` of the first epoch, which never changes, a copy of the hook that holds it. Before a `hook_created` write, the run's shard claims the token there and journals `hook_created` or `hook_conflict`. `hooks.getByToken` reads that shard. A start Hook (`start({ experimental_hook })`) is claimed the same way before its run is created, and a refused candidate is recorded so every copy of it gets the same answer.
-- **Forced claims.** For `createHook({ experimental_force: true })` the token's shard records the takeover, asks the holder's store to journal `hook_disposed{forceClaimedBy}` and drop the hook, and only then gives the token to the claimer. A resume of the old hook is refused with `HookForceClaimedError`. The shard's alarm finishes a takeover a failed call left.
-- **Releases.** A disposal or the run finishing owes the token's shard a release, committed with the write and sent before the write returns, so a freed token is free when it does. A finished run's retained token stays held until its retention lapses. A failed release stays owed and the shard's alarm retries it with backoff. A claim whose write is rejected is released the same way; one cut off by a reset of the run's shard holds its token until the run retries the write.
-- **Legacy tokens.** Each token shard, the first time it answers, copies in the tokens that legacy hooks hold, so they still conflict. Legacy runs claim new tokens on the shards like any other run.
-- **Recovery.** Each shard drains its own outboxes from its alarm, armed before any write that owes a queue message or a release, and on a wake that finds index rows still owed. The cron reaches only the legacy store.
+`SHARD_EPOCHS` is a JSON list of `{ "from": <ms>, "store": <count>, "queue": <count>, "index"?: <count> }`, oldest first, the first at 0. A run's ULID time picks its epoch, and the run lives in store shard `hash(runId) % store` of it. Its workflow messages (start, wakes, hook resumes and timers) go to queue shard `hash(runId) % queue`, which delivers them one at a time; other messages, such as steps, go to `hash(key) % queue`. To add capacity, append an epoch whose `from` is later than the deploy: new runs spread over its shards and no run moves. Never change an existing epoch's counts, `index` included: its rows would hash elsewhere. Size shards to the load, because a cold Durable Object is slow on its first call ([run creation](../../docs/limits.md#run-creation)).
 
-Retained executors deployed before store shards talk only to the legacy store, so don't route new runs to them.
-
-## Spec 9
-
-With `WORKFLOW_SPEC_VERSION=9` on the Worker and its executors, new runs follow the SDK's single-orchestrator model:
-- **The in-band fence.** Each spec 9 run counts the positions its orchestrator's writes took (`runs.seq_in_band`). `events.list` returns `snapshot: { seq, seqInBand }`, and an in-band write whose count is stale is refused with `InBandSupersededError` before anything is written.
-- **Appends.** Step and wait events are not checked against step or wait state, and writes return no step or wait. An inline step's first `step_started` creates it.
-- **One orchestrator at a time.** A run's orchestrator messages go to its run's queue shard, which delivers one batch at a time and holds the run's second message in a batch until the batch ends. `{ timeoutSeconds: 0 }` hands the message off without counting an attempt, and `meta.deliveryCount` is 1 only on a message's first delivery.
-- **Live feed.** `events.subscribe` long-polls the run's store, which answers as each event commits.
-
-Runs created before keep spec 8, which the World still serves.
+Each store drains its own outboxes from its alarm, which it arms before any write that owes a queue message or a token release. A failed push, list rows included, stays owed and the alarm retries it with backoff. The cron reaches only the legacy store, and wakes queue shards so each redelivers what a reset cut off.
 
 ## Runners
 
-A queue shard runs no workflow code: flows it invoked itself competed with it for CPU, and run creation was 3 times faster with flows switched off. It hands each due message to a `Runner`, which calls the `CONSUMER` entrypoint with it, and the flow handler, or the retained executor, runs there.
-- **Sharding.** An epoch has as many runners as queue shards. A run's workflow messages go to runner `hash(runId) % queue` of its epoch, the index of its queue shard, so a run has one runner and a busy one stays warm. Other messages, such as steps, spread over the epoch's runners by message ID.
-- **One at a time.** A runner runs a run's workflow deliveries one after another, even when two queue shards deliver for it, as the legacy `flow` shard may, or when a reset queue shard delivers again a message the runner still runs. A Durable Object has one live instance, and a reset ends every delivery in it, so two replays of a run never share an isolate: the SDK's in-process step single-flight would make one request wait on a promise another settles.
-- **Recovery.** A runner keeps nothing. A delivery it was running when it reset fails on its queue shard, which delivers it again.
-- **`invoke`.** Because a run has one runner, the World declares `capabilities.invoke`. The SDK then has a step's delivery wake its run instead of replaying it, so a wide fan-out replays a few times on its runner instead of once per step, and `resumeHook()` hands the input to the run's runner (`Queue.invoke`). The runner runs it beside the run's delivery in progress, on this deployment's flow handler, which writes `hook_received` without the run's workflow code, then wakes the run under the event's outbox claim. The outcome comes back with its error classes; `timeoutMs` gives up waiting with a 408, the outcome unknown.
-- **One SDK route per request.** With `invoke` the SDK joins a later delivery of a run to the execution in progress in its route, across requests, and an execution a reset cut off never settles. So `flow.mjs` builds a route per request, and invocations reach the execution through the log and the wake instead.
+A queue shard runs no workflow code: it hands each due message to a `Runner`, which calls the `CONSUMER` entrypoint, where the flow handler or a retained executor runs it. Flows started by a queue shard itself competed with it for CPU ([run creation](../../docs/limits.md#run-creation)).
+- **One runner per run.** An epoch has as many runners as queue shards, and a run's workflow messages go to runner `hash(runId) % queue`, so a run has one runner and a busy one stays warm. Other messages spread over the epoch's runners by message ID.
+- **One replay at a time.** A runner runs a run's workflow deliveries one after another, even when a reset queue shard delivers again a message it still runs. Two replays of a run in one isolate would let the SDK's in-process step single-flight make one request wait on a promise another settles.
+- **`invoke`.** Because a run has one runner, the World declares `capabilities.invoke`. A step's delivery then wakes its run instead of replaying it, and `resumeHook()` hands its input to the run's runner, which writes `hook_received` beside the delivery in progress and wakes the run.
+- **Nothing durable.** A delivery a runner was running when it reset fails on its queue shard, which delivers it again.
 
-## Large payloads
+## Listing
 
-Durable Object SQLite documents a 2 MB value limit and Durable Object RPC a 32 MiB message limit, so the World client keeps large values in R2. It runs in the calling Worker:
-- **Writes.** Before a write reaches its Durable Object, each binary `eventData` field and stream chunk over 1 MiB goes to `PAYLOADS` at `runs/<runId>/<uuid>`, and the object stores a ref. The R2 write finishes first, so a committed ref always has its object. A serialized payload over 18 MiB is rejected with a 413 marked `fatal`, because reading it back would run the workflow out of memory, and a stream chunk over 16 MiB likewise, because the writing step's isolate holds a few chunks at once.
-- **Reads.** Every read swaps refs back for their bytes, as the SDK expects; `resolveData: 'none'` reads nothing from R2. Stream reads instead pipe each chunk from R2 as the reader takes it, so no chunk is held whole, and `getChunks` pages stop at 4 MiB.
+A run's list row, the run without its payloads, lives on index shard `hash(runId) % index` of its epoch, and each hook's on `hash(hookId) % index`. A store pushes the latest row of every run and hook change right after the write, from an outbox, and the write answers once the push lands or after 1 s.
 
-Every Worker that runs World client code needs the `PAYLOADS` binding, including retained executors. [Limits](../../docs/limits.md#payloads) has the measured sizes and the open costs.
+`runs.list` and `hooks.list` without a run ID ask every index shard, 32 at a time, and merge their pages by `createdAt`, then ID; filters apply on the index shards. With `resolveData: 'all'`, the page's runs then come whole from their stores. `hooks.get` asks one index shard per epoch, and `runs.getMany` one store per shard its IDs hash to.
 
-## Large data
+Runs written before the index reach it through a one-time backfill per store, 200 runs per alarm. An index shard answers only once every store that feeds it has reported its backfill; until then lists and `hooks.get` ask every store.
 
-A payload over 18 MiB is rejected, and the SDK reads each payload whole. For more, have a step return a `ReadableStream` of `type: 'bytes'` and pass it to the next step. The workflow holds only a handle, each chunk over 1 MiB goes to R2 on its own, and the reading step gets the bytes as they come out of R2. A chunk may be up to 16 MiB:
+## Payloads and streams
+
+Durable Object SQLite documents a 2 MB value limit and RPC a 32 MiB message limit, so the World client, in the calling Worker, keeps large values in R2:
+- **Writes.** Each binary `eventData` field and stream chunk over 1 MiB goes to `PAYLOADS` at `runs/<runId>/<uuid>` before the write, and the object stores a ref. A serialized payload over 18 MiB, or a stream chunk over 16 MiB, is rejected with a 413 marked `fatal`, so the step fails instead of running the workflow out of memory.
+- **Reads.** Every read swaps refs back for their bytes; `resolveData: 'none'` reads nothing from R2. Stream reads pipe each chunk from R2 as the reader takes it, and `getChunks` pages stop at 4 MiB.
+- **Not cleaned up.** R2 objects are never deleted, including ones left by writes that failed.
+
+For more than one payload holds, have a step return a `ReadableStream` of `type: 'bytes'` and pass it to the next step. The workflow holds only a handle, and each chunk goes to R2 on its own:
 
 ```ts
 const CHUNK = 16 * 1024 * 1024;
@@ -133,8 +131,7 @@ async function makeBytes(chunks: number) {
   let made = 0;
   return new ReadableStream({
     type: 'bytes',
-    // Each read hands `pull` one buffer of CHUNK bytes to fill. Without it, workerd reads the
-    // stream 4 KiB at a time and stores each read as its own chunk.
+    // Without it, workerd reads the stream 4 KiB at a time and stores each read as a chunk.
     autoAllocateChunkSize: CHUNK,
     pull(controller) {
       const request = controller.byobRequest!;
@@ -157,7 +154,7 @@ async function countBytes(stream: ReadableStream<Uint8Array>) {
 }
 ```
 
-The writing step holds the chunks it is writing, and the SDK stores byte streams unencrypted. A returned stream is written in the background after its step completes; the flow request waits for that before it answers, and if the writer stops first, the stream's readers end with an error. [Limits](../../docs/limits.md#streams) has the measurements and the rest.
+A returned stream is written in the background after its step completes. The flow request waits for that before it answers, up to `FLOW_BACKGROUND_BUDGET_MS`, and a stream whose writer stopped ends its readers with an error after a 30 s lease. The SDK stores byte streams unencrypted.
 
 ## Encryption
 
@@ -167,12 +164,11 @@ Set a secret of 32 random bytes and the SDK encrypts every payload before it rea
 openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET
 ```
 
-- **Keys.** `getEncryptionKeyForRun` derives each run's key with HKDF-SHA256 from the secret, with the run ID as info. The deployment ID is left out, so every release, and every retained executor, must have the same secret.
-- **What stays readable.** Names, statuses, event types, hook tokens, attributes and timestamps, and byte streams (`type: 'bytes'`), which the SDK stores as written. The example API's `/runs/:id` and `/runs/:id/events` show ciphertext; `/result` and stream reads decrypt through the SDK.
-- **Rotation.** Not supported. A changed or deleted secret leaves every encrypted run unreadable. Runs started before the secret was set keep their plaintext payloads.
-- **The remote client** fetches run keys from `/world/rpc`, so `workflow web` can decrypt. Anyone holding `WORLD_RPC_TOKEN` can read every run.
+- **Keys.** Each run's key is HKDF-SHA256 of the secret, with the run ID as info. The deployment ID is left out, so every release and every retained executor must have the same secret.
+- **What stays readable.** Names, statuses, event types, hook tokens, attributes, timestamps, and byte streams, which the SDK stores as written.
+- **No rotation.** A changed or deleted secret leaves every encrypted run unreadable. Runs started before the secret was set keep their plaintext payloads.
 
-Without the secret the World stores plaintext, as before.
+Without the secret the World stores plaintext, VM snapshots included when `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED=1`.
 
 ## Retained executors
 
@@ -183,31 +179,31 @@ registerWorld(createWorld());
 export default createExecutor(flow);
 ```
 
-Each executor binds the World's Durable Objects with `script_name` set to the main Worker, whose runners call it. See [`wrangler.executor.jsonc`](../../wrangler.executor.jsonc). The main Worker binds the namespace as `EXECUTORS`, and `EXECUTOR_ROUTES` maps each deployment ID to its executor script. It never runs a flow itself, so it can leave the workflow bundle out, as the example's `src/dispatcher.ts` does.
+Each executor binds the World's Durable Objects with `script_name` set to the main Worker, as in [`wrangler.executor.jsonc`](../../wrangler.executor.jsonc). The main Worker binds the namespace as `EXECUTORS`, and `EXECUTOR_ROUTES` maps each deployment ID to its executor script; keep old entries until their runs drain. Each delivery then runs on its run's deployment. The main Worker runs no flows itself, so it can leave the workflow bundle out, as the example's `src/dispatcher.ts` does. Deploy the main Worker before the executors: they call it through `CONSUMER`.
+
+## Spec 9
+
+With `WORKFLOW_SPEC_VERSION=9` on the Worker and its executors, new runs follow the SDK's single-orchestrator model. Each run counts the positions its orchestrator's writes took, `events.list` returns them as `snapshot: { seq, seqInBand }`, and a stale in-band write is refused with `InBandSupersededError` before anything is written. Step and wait events are appends, and `{ timeoutSeconds: 0 }` hands a message off without counting an attempt. Runs created before keep spec 8.
 
 ## Exports
 
 | Export | Use |
 | --- | --- |
-| `createWorld(env?)` | The World, including VM snapshot storage (`experimental_snapshots`) and `runs.cancelMany`; also the default export |
+| `createWorld(env?)` | The World; also the default export |
 | `registerWorld(world)` | Makes `world` the SDK's World, as `setWorld()` does |
 | `WorldStore`, `QueueShard`, `Runner`, `RunStreams` | Durable Object classes to re-export from the Worker |
 | `createQueueConsumer(flow)` | The `QueueConsumer` entrypoint class |
 | `createExecutor(flow)` | A retained executor's default export |
-| `drainOutbox(env)` | Cron handler body |
+| `drainOutbox(env)` | The cron handler |
 | `nextEvents(env, runId, cursor, types?)` | Long-polls a run's events, for a live subscription |
-| `EventType`, `RunStatus`, `StepStatus`, `WaitStatus`, `ResolveData` | Enums of the SDK's string values |
+| `EventType`, `RunStatus`, `StepStatus`, `WaitStatus`, `ResolveData`, `DeliveryResult` | Enums of the SDK's string values |
 | `handleWorldRpc(request, world, token)` | Serves the World over HTTP for the remote client |
-| `toJson(value)` | JSON with bytes as base64 and payload refs as `{ "$ref": key }`, for HTTP responses |
+| `toJson(value)` | JSON with bytes as base64 and payload refs as `{ "$ref": key }` |
 
-`@workflow/world-cloudflare/build` exports `buildWorkflows({ cwd?, dirs? })`, which the command above runs, and `workerAliases`, the replacements for the Wrangler `alias` and vitest `resolve.alias`.
+`@workflow/world-cloudflare/build` exports `buildWorkflows({ cwd?, dirs? })`, which the build command runs, and `workerAliases`.
 
 ## Remote client
 
-`@workflow/world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker. The SDK's tools load it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`.
+`@workflow/world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker's `handleWorldRpc` endpoint, so the SDK's tools, such as the web UI (`workflow web`), can read and write its runs. Load it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, and set `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`. Build it with `pnpm build` in this package: unlike the Worker entry, it ships as JavaScript (`dist/remote/client.js`), because Node loads it directly.
 
-- **Configure it** with `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`.
-- **The Worker side:** mount `handleWorldRpc` at `POST /world/rpc` and keep the token in a secret.
-- **Build it** with `pnpm build`. Unlike the Worker entry, this entry ships as compiled JavaScript (`dist/remote/client.js`), because Node loads it directly.
-
-It reads and writes runs, steps, events, hooks, streams and VM snapshots, cancels runs in bulk, and fetches run keys from a Worker with an encryption secret. It cannot receive queue deliveries; workflows still run on Cloudflare. Payloads travel as devalue base64 in one request or response, so the Worker's request body limit and memory bound the largest value it can write or read.
+The token can write events and, with an encryption secret, fetch every run's key, so keep it in a secret. The client cannot receive queue deliveries; workflows still run on Cloudflare. Payloads travel in one request or response, so the Worker's request body limit and memory bound the largest value it can move.
