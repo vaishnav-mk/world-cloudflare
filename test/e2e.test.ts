@@ -304,7 +304,9 @@ it('returns a 12 MiB run output', async () => {
   expect((await payloadObjects(runId)).length).toBeGreaterThanOrEqual(1);
 }, 60_000);
 
-it('fails a step whose output is over the payload limit on its first attempt', async () => {
+// A spec 9 orchestrator stops at any refused in-band write and asks for a redelivery, which runs the
+// step again, so there the run does not fail on the first attempt.
+it.skipIf(process.env.WORKFLOW_SPEC_VERSION === '9')('fails a step whose output is over the payload limit on its first attempt', async () => {
   const runId = await startRun('stepOutput', 20 * MiB);
   await expect.poll(() => runStatus(runId), { interval: 250, timeout: 30_000 }).toBe('failed');
   expect(await runError(runId)).toContain(`byte result is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`);

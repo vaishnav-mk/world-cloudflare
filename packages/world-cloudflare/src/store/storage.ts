@@ -23,6 +23,7 @@ import { ulid } from 'ulid';
 import { PAYLOAD_MAX_BYTES } from '../constants.js';
 import { EventType } from '../enums.js';
 import { groupBy } from '../lib/group.js';
+import { isSingleOrchestrator } from '../lib/spec.js';
 import { createPayloads } from '../lib/payloads.js';
 import type { EventOf, WorldEnv } from '../types.js';
 import { cancelMany } from './cancel-many.js';
@@ -113,7 +114,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
     // The store mints run IDs too, but a payload's R2 key needs the run ID before the write.
     const id = runId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
     if (id === null) throw new Error('runId is required');
-    if (data.eventType === EventType.StepCompleted) await failOversizedResult(id, data, params);
+    if (data.eventType === EventType.StepCompleted && !isSingleOrchestrator(data.specVersion)) await failOversizedResult(id, data, params);
     // Payloads reach R2 before the event commits, so a committed ref never points at nothing.
     const written = new Map<string, Uint8Array>();
     const request = await offloadEvent(id, data, written);
@@ -126,10 +127,11 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
   }
 
   /**
-   * Fails a step whose result is over the payload limit, then rejects its completion as a conflict.
-   * The SDK redelivers any other rejected completion, and on the native engine the redelivery
-   * re-runs the step until it exceeds its retries, hiding why. A conflict it skips, then replays
-   * the step's failure, on the first attempt with either engine.
+   * Fails a spec 8 step whose result is over the payload limit, then rejects its completion as a
+   * conflict. The SDK redelivers any other rejected completion, and on the native engine the
+   * redelivery re-runs the step until it exceeds its retries, hiding why. A conflict it skips, then
+   * replays the step's failure, on the first attempt with either engine. A spec 9 orchestrator
+   * fails the run on the payload error itself, and fences writes it did not make.
    */
   async function failOversizedResult(runId: string, data: EventOf<EventType.StepCompleted>, params?: CreateEventParams) {
     const { result, stepName } = data.eventData;
