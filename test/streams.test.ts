@@ -213,6 +213,17 @@ describe('stream memory', () => {
 });
 
 describe('abandoned streams', () => {
+  it('expires a registered writer even before its first chunk is stored', async () => {
+    const runId = crypto.randomUUID();
+    const name = stepStream();
+    const object = env.RUN_STREAMS.getByName(runId);
+    await object.lease([name], 0);
+    expect(await object.list()).toEqual([name]);
+    const reader = (await streams.streams.get(runId, name)).getReader();
+    await expect(reader.read()).rejects.toThrow('ended without being closed');
+    expect(await object.info(name)).toEqual({ tailIndex: -1, done: false });
+  });
+
   it('ends a reader once the request writing the stream ends with that work cut off', async () => {
     const runId = crypto.randomUUID();
     const name = stepStream();

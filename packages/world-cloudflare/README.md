@@ -179,7 +179,7 @@ async function countBytes(stream: ReadableStream<Uint8Array>) {
 }
 ```
 
-A returned stream is written in the background after its step completes. The flow request waits for that before it answers, up to `FLOW_BACKGROUND_BUDGET_MS`, and a stream whose writer stopped ends its readers with an error after a 30 s lease ([streams](../../docs/limits.md#streams)). The SDK stores byte streams unencrypted.
+A returned stream is written in the background after its step completes. The flow request waits for that before it answers, up to `FLOW_BACKGROUND_BUDGET_MS`, and a registered stream whose writer stopped ends its readers with an error after a 30 s lease ([streams](../../docs/limits.md#streams)). Registration starts when the producer attempts its first write; a producer that never attempts a write is not detected yet. The SDK stores byte streams unencrypted.
 
 ## Encryption
 

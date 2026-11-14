@@ -61,15 +61,18 @@ export class RunStreams extends DurableObject<WorldEnv> {
   }
 
   /**
-   * Extends the writer's lease on each open stream in `names` to `ms` from now; 0 ends it. Once a
-   * stream's lease has run out, a reader that has every chunk ends with an error instead of waiting.
+   * Registers or extends each open stream's writer lease to `ms` from now; 0 ends it. Registration
+   * can precede the first stored chunk, whose upload may still be pending when its request ends.
    */
   lease(names: string[], ms: number): void {
     if (!names.length) return;
-    this.#qb.update({
-      tableName: 'streams', data: { lease_until: Date.now() + ms },
-      where: { conditions: `closed = 0 AND name IN (${names.map(() => '?').join(', ')})`, params: names },
-    }).execute();
+    this.ctx.storage.transactionSync(() => {
+      for (const name of names) this.#ensureStream(name);
+      this.#qb.update({
+        tableName: 'streams', data: { lease_until: Date.now() + ms },
+        where: { conditions: `closed = 0 AND name IN (${names.map(() => '?').join(', ')})`, params: names },
+      }).execute();
+    });
     for (const name of names) this.#waiters.wake(name);
   }
 
