@@ -1,5 +1,5 @@
 import { createExecutionContext, env } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   PAYLOAD_INLINE_MAX_BYTES, STREAM_CHUNK_MAX_BYTES, STREAM_PAGE_MAX_BYTES, STREAM_READ_PIECE_BYTES,
 } from '../packages/world-cloudflare/src/constants.js';
@@ -239,6 +239,50 @@ describe('abandoned streams', () => {
     });
     await expect(late).rejects.toThrow('after its flow request ended');
     expect(await streams.streams.getInfo(runId, name)).toEqual({ tailIndex: -1, done: false });
+  });
+
+  it.each(['write', 'writeMulti'] as const)('refuses %s after an R2 upload outlives its request', async (method) => {
+    const runId = crypto.randomUUID();
+    const name = stepStream();
+    let uploaded = () => {};
+    let release = () => {};
+    const upload = new Promise<void>((resolve) => { uploaded = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const put = env.PAYLOADS.put.bind(env.PAYLOADS);
+    using uploads = vi.spyOn(env.PAYLOADS, 'put').mockImplementation(async (...args) => {
+      uploaded();
+      await gate;
+      return put(...args);
+    });
+    let late = Promise.resolve();
+    try {
+      await withRequestContext(createExecutionContext(), { FLOW_BACKGROUND_BUDGET_MS: '100' }, async () => {
+        await streams.streams.write(runId, name, 'first');
+        const chunk = new Uint8Array(PAYLOAD_INLINE_MAX_BYTES + 1);
+        if (method === 'write') late = streams.streams.write(runId, name, chunk);
+        else {
+          const writeMulti = streams.streams.writeMulti;
+          if (writeMulti === undefined) throw new Error('writeMulti is required');
+          late = writeMulti(runId, name, ['inline', chunk]);
+        }
+        currentRequest()?.waitUntil(late.catch(() => {}));
+        await upload;
+        return ok();
+      });
+      expect(uploads).toHaveBeenCalledTimes(1);
+      expect(await streams.streams.getInfo(runId, name)).toEqual({ tailIndex: 0, done: false });
+      release();
+      await expect(late).rejects.toThrow('after its flow request ended');
+      expect((await streams.streams.getChunks(runId, name)).data).toEqual([
+        { index: 0, data: new TextEncoder().encode('first') },
+      ]);
+      // The upload must not renew the abandoned writer's lease either.
+      const reader = (await streams.streams.get(runId, name, 1)).getReader();
+      await expect(reader.read()).rejects.toThrow('ended without being closed');
+    } finally {
+      release();
+      await late.catch(() => {});
+    }
   });
 
   it('ends a reader once the writer lease runs out unrenewed, as when the writer is killed', async () => {

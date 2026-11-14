@@ -74,13 +74,15 @@ export function createStreamer(env: Pick<WorldEnv, 'RUN_STREAMS' | 'PAYLOADS'>):
     streams: {
       write: async (runId, name, chunk) => {
         const bytes = toChunk(chunk);
-        const leaseMs = lease(runId, name);
-        await streamsOf(runId).write(name, await payloads.offload(runId, bytes), leaseMs);
+        lease(runId, name);
+        const stored = await payloads.offload(runId, bytes);
+        await streamsOf(runId).write(name, stored, lease(runId, name));
       },
       writeMulti: async (runId, name, chunks) => {
         const checked = chunks.map(toChunk);
-        const leaseMs = lease(runId, name);
-        await streamsOf(runId).writeMulti(name, await Promise.all(checked.map((bytes) => payloads.offload(runId, bytes))), leaseMs);
+        lease(runId, name);
+        const stored = await Promise.all(checked.map((bytes) => payloads.offload(runId, bytes)));
+        await streamsOf(runId).writeMulti(name, stored, lease(runId, name));
       },
       close: (runId, name) => {
         const request = currentRequest();
