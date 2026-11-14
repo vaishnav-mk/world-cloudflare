@@ -1,9 +1,12 @@
 import { isTerminalWorkflowRunStatus, type Step } from '@workflow/world';
 import { stringify } from 'devalue';
-import { MAX_PUBLISH_BACKOFF_MS, OUTBOX_DRAIN_BATCH, WAIT_RETRY_DELAY_MS } from '../constants.js';
-import { DispatchAction, EventType, RunStatus, StepStatus, WaitStatus } from '../enums.js';
+import { MAX_PUBLISH_BACKOFF_MS, OUTBOX_DRAIN_BATCH, REDRIVE_DELAY_MS, WAIT_RETRY_DELAY_MS } from '../constants.js';
+import { DispatchAction, EventType, MessageKind, RunStatus, StepStatus, WaitStatus } from '../enums.js';
 import { fnv1a32Hex, messageIdFor, sha256Hex } from '../lib/hash.js';
+import { unreachable } from '../lib/unreachable.js';
 import type { QueueShard } from '../queue/queue-shard.js';
+import type { DispatchKind, EnqueueResult, OutboxClaim, QueueDispatch } from '../types.js';
+import type { StoreContext } from './context.js';
 import type { Db } from './db.js';
 import type { Outbox } from './outbox.js';
 import type { OutboxRow } from './rows.js';
@@ -41,6 +44,90 @@ export function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlati
   if (db.findRun(runId)?.status !== RunStatus.Running) return 0;
   if (db.findWait(runId, correlationId)?.status !== WaitStatus.Waiting) return 0;
   return outbox.pendingSlot(runId, EventType.WaitCreated, correlationId);
+}
+
+/**
+ * The outbox slot a queue message would settle, or 0 where none is owed. Unlike other run-scoped
+ * calls, a start is answered for a run this store does not hold yet: `start()` publishes the start
+ * message while `run_created` is still in flight, and only new runs have one.
+ */
+export function pendingSlotFor(store: StoreContext, claim: OutboxClaim): number {
+  const { db, outbox } = store;
+  if (claim.kind !== MessageKind.Start) store.own(claim.runId);
+  switch (claim.kind) {
+    case MessageKind.Start:
+      return outbox.pendingSlot(claim.runId, EventType.RunCreated);
+    case MessageKind.HookWake:
+      return outbox.pendingSlot(claim.runId, EventType.HookReceived);
+    case MessageKind.Step:
+      return pendingStepSlot(db, outbox, claim.runId, claim.stepId, claim.stepName);
+    case MessageKind.WaitContinuation:
+      return pendingWaitSlot(db, outbox, claim.runId, claim.correlationId);
+    default:
+      return unreachable(claim);
+  }
+}
+
+/** Settles the outbox rows of a message the queue accepted: a start or hook wake every row up to `slot`, a step or wait its own. */
+export function markPublished(store: StoreContext, kind: MessageKind, runId: string, slot: number): void {
+  const { outbox } = store;
+  if (kind !== MessageKind.Start) store.own(runId);
+  switch (kind) {
+    case MessageKind.Start:
+      return outbox.publishThrough(runId, slot, EventType.RunCreated);
+    case MessageKind.HookWake:
+      return outbox.publishThrough(runId, slot, EventType.HookReceived);
+    case MessageKind.Step:
+      return outbox.publishSlot(runId, slot, EventType.StepCreated);
+    case MessageKind.WaitContinuation:
+      return outbox.publishSlot(runId, slot, EventType.WaitCreated);
+    default:
+      return unreachable(kind);
+  }
+}
+
+/**
+ * Publishes queue messages that settle this store's outbox rows: claims their slots, pushes them
+ * to their queue shards, and settles the rows the queue accepted fresh, all in one call.
+ */
+export async function dispatch(store: StoreContext, entries: QueueDispatch[]): Promise<EnqueueResult[]> {
+  const slots = entries.map(({ claim }) => pendingSlotFor(store, claim));
+  const results = await store.pushQueue(entries);
+  for (const [index, { claim }] of entries.entries()) {
+    const slot = slots[index];
+    const result = results[index];
+    if (slot && 'fresh' in result && result.fresh) markPublished(store, claim.kind, claim.runId, slot);
+  }
+  return results;
+}
+
+/** After a run's hook wake dead-lettered: reopens its start if it never started, else its hook wakes. */
+export async function reopenHookWakes(store: StoreContext, runId: string): Promise<number> {
+  store.own(runId);
+  const run = store.db.findRun(runId);
+  if (run === undefined || isTerminalWorkflowRunStatus(run.status)) return 0;
+  const kind = run.status === RunStatus.Pending ? EventType.RunCreated : EventType.HookReceived;
+  return reopen(store, runId, Date.now() + REDRIVE_DELAY_MS, kind);
+}
+
+export async function reopenStepDispatch(store: StoreContext, runId: string, stepId: string, stepName: string): Promise<number> {
+  store.own(runId);
+  if (!isPendingStep(store.db, runId, stepId, stepName)) return 0;
+  return reopen(store, runId, Date.now() + REDRIVE_DELAY_MS, EventType.StepCreated, stepId);
+}
+
+export async function reopenWaitDispatch(store: StoreContext, runId: string, correlationId: string): Promise<number> {
+  store.own(runId);
+  const wait = store.db.findWait(runId, correlationId);
+  if (store.db.findRun(runId)?.status !== RunStatus.Running || wait?.status !== WaitStatus.Waiting) return 0;
+  const at = Math.max(Date.now() + REDRIVE_DELAY_MS, wait.resumeAt?.getTime() ?? 0);
+  return reopen(store, runId, at, EventType.WaitCreated, correlationId);
+}
+
+async function reopen(store: StoreContext, runId: string, at: number, kind: DispatchKind, correlationId?: string): Promise<number> {
+  const reopened = store.outbox.reopen(runId, at, kind, correlationId);
+  if (reopened) await store.armAlarm(at, 'redrive');
+  return reopened;
 }
 
 /** Publishes due outbox rows. Returns how many rows were due. */

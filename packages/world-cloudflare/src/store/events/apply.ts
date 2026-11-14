@@ -1,7 +1,6 @@
-import { EntityConflictError, InBandSupersededError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
+import { EntityConflictError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  getQueueTopicPrefix, getRunQueueNamespace, IN_BAND_SEQ_AT_RUN_CREATION, isTerminalWorkflowRunStatus,
-  requireEventSlot, ValidQueueName,
+  getQueueTopicPrefix, getRunQueueNamespace, isTerminalWorkflowRunStatus, requireEventSlot, ValidQueueName,
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type Hook, type WorkflowRun,
 } from '@workflow/world';
 import { ulid } from 'ulid';
@@ -12,6 +11,7 @@ import type { IndexOutbox } from '../index-outbox.js';
 import type { Outbox } from '../outbox.js';
 import { toEvent } from '../rows.js';
 import type { TokenOutbox } from '../token-outbox.js';
+import { advanceFence, checkFence } from './fence.js';
 import { changeHook } from './hooks.js';
 import { appendEvent, eventResult, journalOf } from './journal.js';
 import { checkRunAccepts, createRun, updateRun } from './runs.js';
@@ -69,52 +69,6 @@ export function applyEvent(
   const allocated = change.kind === ChangeKind.LazyStepStart ? 2 : 1;
   advanceFence(db, runId, fence, allocated);
   return eventResult(db, event, change, params, allocated);
-}
-
-/** A spec 9 run's in-band count before a write, and whether the write is in-band. */
-export type Fence = { count: number; inBand: boolean; creates: boolean };
-
-/**
- * The in-band fence of spec 9 runs. An in-band write must name the run's current in-band count,
- * or it is refused with `InBandSupersededError` before anything is written. `run_created` counts as
- * the first in-band position and is never fenced itself; a lazy `run_started` that creates the run
- * is checked against that position. Undefined for a run without the fence: below spec 9, or missing.
- */
-export function checkFence(
-  db: Db, runId: string, existing: WorkflowRun | undefined, data: AnyEventRequest, specVersion: number,
-  params: CreateEventParams,
-): Fence | undefined {
-  const inBand = params.inBand === true;
-  let fence: Fence | undefined;
-  if (existing !== undefined) {
-    if (data.eventType === EventType.RunCreated) return undefined;
-    const count = db.seqInBand(runId);
-    fence = count === null ? undefined : { count, inBand, creates: false };
-  } else if (!isSingleOrchestrator(specVersion)) {
-    return undefined;
-  } else if (data.eventType === EventType.RunCreated) {
-    return { count: 0, inBand: true, creates: true };
-  } else if (data.eventType === EventType.RunStarted) {
-    fence = { count: IN_BAND_SEQ_AT_RUN_CREATION, inBand, creates: true };
-  } else {
-    // A missing run: the write fails as not found.
-    return undefined;
-  }
-  if (!inBand) return fence;
-  if (params.expectedSeqInBand === undefined) {
-    throw new WorkflowWorldError('An in-band write needs expectedSeqInBand', { status: 400 });
-  }
-  if (fence === undefined) throw new WorkflowWorldError(`Run ${runId} has no in-band fence`, { status: 400 });
-  if (params.expectedSeqInBand !== fence.count) {
-    throw new InBandSupersededError(`Run ${runId} has another in-band writer`, { seq: db.lastSlot(runId), seqInBand: fence.count });
-  }
-  return fence;
-}
-
-/** Counts the positions an in-band write allocated, and stores a new run's count. */
-export function advanceFence(db: Db, runId: string, fence: Fence | undefined, allocated: number): void {
-  if (fence === undefined || (!fence.inBand && !fence.creates)) return;
-  db.setSeqInBand(runId, fence.count + (fence.inBand ? allocated : 0));
 }
 
 function checkParams(data: AnyEventRequest, params: CreateEventParams): void {

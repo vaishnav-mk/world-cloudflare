@@ -3,11 +3,12 @@ import { DOQB, FetchTypes } from 'workers-qb';
 import { decode, encode } from '../lib/codec.js';
 import { allRows, requireRow } from '../lib/qb.js';
 import { indexSourceCount } from '../lib/shards.js';
-import type { HeldToken, IndexAnswer, IndexBatch } from '../types.js';
+import type { HeldToken, IndexAnswer, IndexBatch, ResolveDataMode } from '../types.js';
 import type { Db } from './db.js';
 import { listRecords } from './pages.js';
 import type { StoreSchema } from './tables.js';
 import { retentionLapsed } from './tokens.js';
+import { hookView } from './views.js';
 
 /** A finished run's hook past its retention is gone to readers, as on its run's store. */
 const isLive = ({ hook, finished }: HeldToken, now: Date) => !finished || !retentionLapsed(hook, now);
@@ -70,15 +71,16 @@ export class RunIndex {
   }
 
   /** A live hook with this ID. IDs are unique within a store, so two runs on different stores may share one. */
-  findHook(hookId: string, now: Date): Hook | undefined {
-    return allRows(this.#qb.fetchAll<'index_hooks', 'data'>({
+  findHook(hookId: string, resolveData: ResolveDataMode | undefined, now: Date): Hook | undefined {
+    const held = allRows(this.#qb.fetchAll<'index_hooks', 'data'>({
       tableName: 'index_hooks', fields: ['data'], where: { conditions: 'id = ?', params: [hookId] },
-    })).map((row) => decode<HeldToken>(row.data)).find((held) => isLive(held, now))?.hook;
+    })).map((row) => decode<HeldToken>(row.data)).find((each) => isLive(each, now));
+    return held === undefined ? undefined : hookView(held.hook, resolveData);
   }
 
   /** A page of hooks of every run, as a store lists its own: the cursor counts expired hooks too. */
-  listHooks({ pagination }: ListHooksParams, now: Date): PaginatedResponse<Hook> {
+  listHooks({ pagination, resolveData }: ListHooksParams, now: Date): PaginatedResponse<Hook> {
     const page = listRecords<HeldToken>(this.#db, 'index_hooks', { pagination });
-    return { ...page, data: page.data.filter((held) => isLive(held, now)).map(({ hook }) => hook) };
+    return { ...page, data: page.data.filter((held) => isLive(held, now)).map(({ hook }) => hookView(hook, resolveData)) };
   }
 }
