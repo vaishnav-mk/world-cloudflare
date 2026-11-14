@@ -23,6 +23,7 @@ Check a value once, where it enters, and let the types carry the result. Don't r
 - Name SDK string values with the enums in `src/enums.ts` and use `switch` over them. End a switch over an SDK event type with `default: return unreachable(data)`, because TypeScript doesn't treat enum cases as covering a string-literal union.
 - Shared types live in `src/types.ts`, tunables in `src/constants.ts`.
 - Durable Object methods are RPC. Keep their names and signatures stable, because retained executors call them. Use `#private` members, not TypeScript `private`, so helpers aren't exposed over RPC.
+- Keep Durable Object classes thin. `WorldStore` methods delegate to the module for their role (`store/reads.ts`, `store/writes.ts`, `store/token-shard.ts`...), which takes the store's `StoreContext`; `QueueShard` delivers through `queue/deliver.ts`.
 - Tables are Drizzle definitions in each object's `tables.ts`. After changing one, run `pnpm db:generate` in the package and commit the migration. Keep schema changes additive.
 - Queries use workers-qb. Use `raw` only for aggregates, joins and arithmetic updates its typed API can't express.
 

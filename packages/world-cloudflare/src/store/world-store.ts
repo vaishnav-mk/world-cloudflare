@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import type {
-  BatchEventRequest, CreateEventBatchParams, CreateEventParams, AnyEventRequest, Event, EventBatchResult, EventListResponse,
+  AnyEventRequest, BatchEventRequest, CreateEventBatchParams, CreateEventParams, Event, EventBatchResult, EventListResponse,
   EventResult, GetWorkflowRunParams, Hook, HookClaimedFrom, ListEventsByCorrelationIdParams, ListEventsParams, ListHooksParams,
   ListWorkflowRunStepsParams, ListWorkflowRunsParams, PaginatedResponse, Step, StepWithoutData, WorkflowRun,
   WorkflowRunWithoutData,
