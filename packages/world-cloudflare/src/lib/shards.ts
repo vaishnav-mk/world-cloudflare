@@ -167,12 +167,18 @@ export function indexShardsOf(store: string): string[] {
 }
 
 /**
- * How many stores feed index shard `name`: its epoch's store shards, and for the first epoch the
+ * The stores that feed index shard `name`: its epoch's store shards, and for the first epoch the
  * legacy store. A later epoch must not wait for it: it backfilled before that epoch existed.
  */
-export function indexSourceCount(name: string): number {
+export function indexSourceNames(name: string): string[] {
   const epoch = epochNamed(name, 'index');
-  return epoch.store + (epoch === epochs()[0] ? 1 : 0);
+  const stores = Array.from({ length: epoch.store }, (_, index) => `store-${tagOf(epoch)}${index}`);
+  return epoch === epochs()[0] ? [...stores, STORE_NAME] : stores;
+}
+
+/** How many stores feed index shard `name`. */
+export function indexSourceCount(name: string): number {
+  return indexSourceNames(name).length;
 }
 
 /** Whether `name` is a store that holds runs: a store shard or the legacy store, not an index shard. */

@@ -243,6 +243,21 @@ describe('list index', () => {
     expect([...touched].every((touchedName) => touchedName.startsWith('index-'))).toBe(true);
   }, 30_000);
 
+  it('has an index shard ask a store that has yet to report it, such as after a new epoch', async () => {
+    const reported = () => count('index-0', 'SELECT COUNT(*) AS count FROM index_sources WHERE store = ?', 'store-1');
+    // As if store-1 had reported before index-0 existed.
+    await runInDurableObject(store('index-0'), (_store, state) => state.storage.sql.exec('DELETE FROM index_sources WHERE store = ?', 'store-1'));
+    expect(await reported()).toBe(0);
+    const { world: reader, touched } = watched();
+    await reader.runs.list({ pagination: { limit: 1 }, resolveData: 'none' });
+    expect(touched.has('store-1')).toBe(true);
+    // The list that found the shard incomplete had it ask store-1, which reports again.
+    await expect.poll(reported, { timeout: 10_000 }).toBe(1);
+    touched.clear();
+    await reader.runs.list({ pagination: { limit: 1 }, resolveData: 'none' });
+    expect([...touched].every((name) => name.startsWith('index-'))).toBe(true);
+  });
+
   it('reads many runs on many shards through the index shards alone', async () => {
     const name = `index-many-${crypto.randomUUID()}`;
     const runs: WorkflowRun[] = [];

@@ -130,7 +130,7 @@ A run's list row, the run without its payloads, lives on index shard `hash(runId
 
 `runs.list` and `hooks.list` without a run ID ask every index shard, 32 at a time, and merge their pages by `createdAt`, then ID; filters apply on the index shards. With `resolveData: 'all'`, the page's runs then come whole from their stores. `hooks.get` asks one index shard per epoch, and `runs.getMany` one store per shard its IDs hash to.
 
-Runs written before the index reach it through a one-time backfill per store, 200 runs per alarm. An index shard answers only once every store that feeds it has reported its backfill; until then lists and `hooks.get` ask every store.
+Runs written before the index reach it through a one-time backfill per store, 200 runs per alarm. An index shard answers only once every store that feeds it has reported its backfill; until then lists and `hooks.get` ask every store, and the shard asks the stores it is missing to report, so it answers alone soon after an upgrade or a new epoch.
 
 ## Payloads and streams
 

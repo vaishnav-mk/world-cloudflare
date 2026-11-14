@@ -123,6 +123,16 @@ export class IndexFeed {
     this.#store.ctx.storage.kv.put(INDEX_BACKFILL, backfill);
   }
 
+  /**
+   * An index shard asks for this store's report. A store that has reported tells that shard again,
+   * which covers a shard added after it reported; one still backfilling reports when it is done.
+   */
+  async reportTo(shard: string): Promise<void> {
+    if (this.backfill().stage === BackfillStage.Reported && indexShardsOf(this.#store.name).includes(shard)) {
+      await this.#store.peer(shard).markIndexed(this.#store.name);
+    }
+  }
+
   /** Tells every index shard this store feeds that it holds every run and hook this store held before the index. */
   async #report(): Promise<void> {
     const { name } = this.#store;

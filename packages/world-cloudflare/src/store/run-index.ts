@@ -2,7 +2,7 @@ import type { Hook, ListHooksParams, ListWorkflowRunsParams, PaginatedResponse, 
 import { DOQB, FetchTypes } from 'workers-qb';
 import { decode, encode } from '../lib/codec.js';
 import { allRows, requireRow } from '../lib/qb.js';
-import { indexSourceCount } from '../lib/shards.js';
+import { indexSourceCount, indexSourceNames } from '../lib/shards.js';
 import type { HeldToken, IndexAnswer, IndexBatch, ResolveDataMode } from '../types.js';
 import type { Db } from './db.js';
 import { listRecords } from './pages.js';
@@ -56,6 +56,13 @@ export class RunIndex {
   /** Records that `store` has pushed this shard every run and hook it held before the index. */
   markIndexed(store: string): void {
     this.#qb.insert({ tableName: 'index_sources', data: { store, indexed_at: Date.now() }, onConflict: 'IGNORE' }).execute();
+  }
+
+  /** The stores that feed this shard and have yet to report it backfilled. */
+  missingSources(): string[] {
+    const reported = new Set(allRows(this.#qb.fetchAll<'index_sources', 'store'>({ tableName: 'index_sources', fields: ['store'] }))
+      .map(({ store }) => store));
+    return indexSourceNames(this.#name).filter((store) => !reported.has(store));
   }
 
   /** `read`'s answer once every store that feeds this shard has backfilled it. */
