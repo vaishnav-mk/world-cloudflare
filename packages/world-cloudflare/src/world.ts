@@ -23,6 +23,9 @@ export function createWorld(env: WorldEnv = platformEnv): World {
       atomicStartHook: { active: true },
       // A unique `(run_id, resume_id)` index, and the store returns the committed event to a retry.
       hookResumeDedup: true,
+      // A run's workflow deliveries and invocations all reach its one `Runner`, which runs the
+      // deliveries one at a time and the invocations beside them.
+      invoke: true,
       // Every resume is deduplicated, so a cached hook's resume needs only its `resumeId`; a missing
       // or taken hook is refused before anything is written.
       resolvedHookResume: true,

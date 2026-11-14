@@ -12,7 +12,11 @@ export type WorldEnv = {
   RUN_STREAMS: DurableObjectNamespace<RunStreams>;
   RUNNER: DurableObjectNamespace<Runner>;
   /** Service binding to the main Worker's `QueueConsumer` entrypoint, from it and from its retained executors. */
-  CONSUMER: { consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]>; latestDeploymentId(): Promise<string> };
+  CONSUMER: {
+    consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]>;
+    invoke(delivery: Delivery): Promise<{ status: number; body: string }>;
+    latestDeploymentId(): Promise<string>;
+  };
   DLQ: R2Bucket;
   /** Payloads and stream chunks too large to keep in a Durable Object, keyed `runs/<runId>/<id>`. */
   PAYLOADS: R2Bucket;

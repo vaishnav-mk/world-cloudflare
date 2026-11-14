@@ -14,15 +14,26 @@ type ConsumerEnv = WorldEnv & { EXECUTORS?: DispatchNamespace };
  */
 export function createQueueConsumer(flow: FlowHandler) {
   return class QueueConsumer extends WorkerEntrypoint<ConsumerEnv> {
-    /**
-     * Runs a batch of deliveries side by side (the shard hands over at most 10) and returns each
-     * one's outcome, so a slow or failing flow holds up and retries only itself.
-     */
     /** This Worker's deployment: the latest, since every executor's `CONSUMER` binding reaches it. */
     latestDeploymentId(): string {
       return this.env.DEPLOYMENT_ID;
     }
 
+    /**
+     * Runs an invocation (`Queue.invoke`) on this deployment's flow handler, whatever the run's
+     * deployment: the SDK handles one by checking the hook and writing the event it carries, without
+     * the run's workflow code, so a run whose retained executor predates invocations takes it too.
+     * Returns the response, whose body `createQueueHandler` wrote.
+     */
+    async invoke(delivery: Delivery): Promise<{ status: number; body: string }> {
+      const response = await this.#runFlow(this.env.DEPLOYMENT_ID, flowRequest(delivery, Date.now()));
+      return { status: response.status, body: await response.text() };
+    }
+
+    /**
+     * Runs a batch of deliveries side by side (a runner hands over at most 10) and returns each
+     * one's outcome, so a slow or failing flow holds up and retries only itself.
+     */
     consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {
       const startedAt = Date.now();
       return Promise.all(deliveries.map((delivery) => this.#consumeOne(delivery, startedAt)));

@@ -21,6 +21,7 @@ export class Sink extends DurableObject<Env> {
 }
 export class QueueConsumer extends WorkerEntrypoint<Env> {
   latestDeploymentId() { return 'test-v1'; }
+  invoke(): Promise<{ status: number; body: string }> { throw new Error('Invocations need a flow handler'); }
   async consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {
     const wake: DeliveryOutcome = { kind: DeliveryResult.Wake, seconds: 0.1 };
     if (deliveries.some((delivery) => delivery.body.queueName.endsWith('_poison'))) return deliveries.map(() => wake);

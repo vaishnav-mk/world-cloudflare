@@ -1,4 +1,5 @@
 import { WorkflowWorldError } from '@workflow/errors';
+import { captureInvocationOutcome, unwrapInvocationOutcome } from '@workflow/errors/invocation';
 import { parse, stringify } from 'devalue';
 import {
   MessageId, QueuePrefix, ValidQueueName,
@@ -7,15 +8,16 @@ import {
 import { MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
+import { transientAsWorldError } from '../lib/transient.js';
 import { onRun } from '../store/route.js';
 import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
-import { queueShardFor } from '../lib/shards.js';
+import { queueShardFor, runnerShardFor } from '../lib/shards.js';
 import { DEFAULT_HOLD_LEASE_SECONDS, MAX_HOLD_LEASE_SECONDS } from '../constants.js';
 import { holdMessage, wakeSeconds } from './hold.js';
 
-type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
+type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'RUNNER' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
 
 /** The World's `Queue`, backed by the queue shard Durable Objects. */
@@ -51,7 +53,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
 
   return {
     getDeploymentId: async () => env.DEPLOYMENT_ID,
-    // Only the queue consumer and private executor dispatch reach the flow route; no public route serves it.
+    // Only the queue consumer, called by runners, and private executor dispatch reach the flow route; no public route serves it.
     queueAuthMode: 'skip',
 
     queue: async (queueName, message, opts = {}) => {
@@ -78,6 +80,24 @@ export function createQueue(env: QueueEnv): HoldingQueue {
 
     queueBatch,
 
+    /**
+     * Hands an invocation to the run's runner (`Runner.invoke`), which runs it beside the run's
+     * delivery in progress, if any. The outcome carries the handler's errors with their class.
+     */
+    invoke: async (runId, payload, { idempotencyKey = crypto.randomUUID(), timeoutMs } = {}) => {
+      const outcome = transientAsWorldError(env.RUNNER.getByName(runnerShardFor(runId))).invoke(runId, payload, idempotencyKey);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<never>((_, reject) => {
+        if (timeoutMs === undefined) return;
+        timer = setTimeout(() => reject(new WorkflowWorldError('Timed out awaiting the invocation; its outcome is unknown', { status: 408 })), timeoutMs);
+      });
+      try {
+        return unwrapInvocationOutcome(await Promise.race([outcome, timedOut]));
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+
     // Only a deployment with no executor to run it is definitely unreachable.
     isDeploymentUnavailableError: (error) => WorkflowWorldError.is(error) && error.code === DEPLOYMENT_UNAVAILABLE,
 
@@ -95,12 +115,17 @@ export function createQueue(env: QueueEnv): HoldingQueue {
         // Absent from a consumer that predates them: then every delivery may be a redelivery.
         const deliveryCount = Number(request.headers.get('x-vqs-delivery-count') ?? Number.NaN);
         const startedAt = Number(request.headers.get('x-workflow-invocation-started-at') ?? Number.NaN);
-        const result = await handler(payload, {
+        const meta = {
           queueName: ValidQueueName.parse(queueName), messageId: MessageId.parse(messageId), attempt,
           deliveryCount: Number.isSafeInteger(deliveryCount) && deliveryCount >= 1 ? deliveryCount : undefined,
           createdAt: new Date(Number(request.headers.get('x-vqs-created-at'))),
           invocationStartedAt: Number.isSafeInteger(startedAt) ? startedAt : Date.now(),
-        });
+        };
+        // An invocation's result is its response, never queue control, and its errors go back with it.
+        if ('invoke' in payload && payload.invoke === true) {
+          return new Response(stringify(await captureInvocationOutcome(() => handler(payload, meta))));
+        }
+        const result = await handler(payload, meta);
         const seconds = wakeSeconds(result, payload);
         if (seconds !== undefined) return Response.json({ timeoutSeconds: seconds });
         return Response.json({ ok: true });

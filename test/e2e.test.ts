@@ -1,11 +1,12 @@
 import { env, SELF } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
-import { HookConflictError } from '@workflow/errors';
+import { HookConflictError, HookNotFoundError } from '@workflow/errors';
 import { resumeHook, start } from 'workflow/api';
 import { PAYLOAD_MAX_BYTES, STREAM_CHUNK_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
 import { workflows } from '../src/workflows.js';
 import { MAX_BODY_BYTES } from '../src/http.js';
 import { world } from '../src/world.js';
+import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 
 const headers = {};
 const MiB = 1024 * 1024;
@@ -127,6 +128,43 @@ it('streams step output to a reader that connects before the step', async () => 
     const response = await SELF.fetch(`https://local/runs/${runId}`, { headers });
     return (await response.json() as { status: string }).status;
   }, { interval: 100, timeout: 15_000 }).toBe('completed');
+});
+
+async function hookToken(runId: string): Promise<string> {
+  return vi.waitFor(async () => {
+    const hooks = await (await SELF.fetch(`https://local/runs/${runId}/hooks`, { headers })).json() as { data: { token: string }[] };
+    expect(hooks.data[0]?.token).toBeTruthy();
+    return hooks.data[0].token;
+  }, { interval: 100, timeout: 10_000 });
+}
+
+it("resumes a hook through its run's runner, which wakes the run, and writes a retry's input once", async () => {
+  using invokes = vi.spyOn(world, 'invoke');
+  const runId = await startRun('approval', 11);
+  const token = await hookToken(runId);
+  const resumed = await SELF.fetch(`https://local/hooks/${token}`, {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(7),
+  });
+  expect(resumed.status).toBe(200);
+  // The SDK handed the input to the runner instead of writing it and queueing a wake itself.
+  const call = invokes.mock.calls.find(([id]) => id === runId);
+  expect(call?.[1]).toMatchObject({ type: 'hook_resume', token });
+  // The runner's wake settled the event's outbox row, so no recovery wake follows it.
+  expect(await env.WORLD_STORE.getByName(storeShardFor(runId)).pendingHookWakeSlot(runId)).toBe(0);
+  expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 18 });
+  // A retry under the same key converges on the first write.
+  if (call === undefined) throw new Error('No invocation');
+  expect(await world.invoke!(...call)).toEqual({ status: 'accepted' });
+  const events = await world.events.list({ runId, pagination: { limit: 100 }, resolveData: 'none' });
+  expect(events.data.filter(({ eventType }) => eventType === 'hook_received')).toHaveLength(1);
+});
+
+it('returns an invocation error with its class', async () => {
+  const runId = await startRun('approval', 1);
+  await hookToken(runId);
+  const missing = { type: 'hook_resume', version: 1, hookId: 'hook_missing', token: 'missing', payload: new Uint8Array(1) };
+  await expect(world.invoke!(runId, missing, { idempotencyKey: crypto.randomUUID() })).rejects.toSatisfy(HookNotFoundError.is);
+  await expect(world.invoke!(runId, { type: 'unknown' })).rejects.toMatchObject({ status: 400 });
 });
 
 it('resumes a durable hook and continues replay', async () => {

@@ -126,6 +126,17 @@ The queue shard delivers to the runners, which run the flow handler, through dur
 
 1,000 parallel steps took 188 s before these changes and 66 s after.
 
+Before runners, a spec 8 step's delivery read the run's whole log to see whether it was the last step, and the last ones replayed the run inline, on the step's queue shard. With `capabilities.invoke` it wakes the run instead, and the run's queue shard and runner coalesce the wakes. `parallelSteps` in local workerd (`vitest.replays.config.ts`; two runs each; a full read is an `events.list` of the run from the start):
+
+| Engine | Steps | Before | Full reads before | After | Full reads after | Workflow deliveries after |
+| --- | --- | --- | --- | --- | --- | --- |
+| node | 200 | 2.4 to 3.2 s | 198 | 2.5 to 3.1 s | 2 to 3 | 2 to 3 |
+| node | 1,000 | 20.8 to 26.5 s | 998 | 10.5 to 10.9 s | 3 | 3 |
+| QuickJS | 200 | 1.9 to 2.5 s | 198 | 1.9 to 2.0 s | 1 | 3 |
+| QuickJS | 1,000 | 16.4 to 16.8 s | 998 | 5.4 to 5.5 s | 1 | 2 |
+
+QuickJS replays after the first restore a VM snapshot (the test config's threshold is 2 events), so they read from the snapshot's cursor. Not re-measured on Workers.
+
 ## CPU
 
 The Wrangler templates set `limits.cpu_ms` to 300,000, the Workers Paid maximum. A step that needs more is killed and redelivered until the queue gives up (64 attempts), holding up its lane meanwhile, so split long CPU work across steps. With the default 30 s limit, a step of about 60 s of CPU never finished.

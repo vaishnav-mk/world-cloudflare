@@ -36,7 +36,7 @@ What is still missing is optional and outside the runtime's path: `describeRun`,
 | `experimental_queueHold` | Missing | Partly | queue | `@workflow/world` 5.2.0 has no such capability and its runtime never asks for a hold, so it is not declared; `queue()` still takes `experimental_hold` ([Queue](#queue)) |
 | `deploymentAffinity` | Missing | Built | contract, e2e lanes | A deployment ID names one release, run by this Worker or its retained executor, so the runtime's guard sends a misrouted delivery back to its run's deployment |
 | `dynamicWorkflowCode` | Partly | Built | contract, e2e | Before, inline code was stored but not declared and a code ref threw. Now inline or uploaded code is stored with the run; see `uploadDynamicWorkflowCode` |
-| `invoke` | N/A | N/A | | Vercel does not declare it either; request/response invocations need an in-process runner per run, which a Worker invocation is not |
+| `invoke` | N/A | Built | e2e, queue | Vercel does not declare it. A run's workflow deliveries and invocations reach its one `Runner`, which runs the deliveries one at a time and the invocations beside them ([runners](../packages/world-cloudflare/README.md#runners)) |
 
 ## Storage
 
@@ -124,7 +124,8 @@ A candidate whose token claim succeeded but whose run never committed, because b
 | Failing messages redelivered for at least an hour | Partly | Built | | Backoff is `attempt²` seconds up to 5 minutes, so the default 64 attempts last about 4 hours; it was about 25 minutes |
 | Coalesced re-runs | N/A | N/A | | Optional; this World holds instead |
 | `isDeploymentUnavailableError` | Missing | Built | queue | True for a target with no executor here |
-| `invoke`, `registerHandler`, `registerRoute` | N/A | N/A | | For in-process queues; deliveries reach `createQueueHandler` through the consumer |
+| `invoke` | N/A | Built | e2e | To the run's runner, on this deployment's flow handler; `createQueueHandler` answers an `invoke: true` message with its outcome, errors included. `timeoutMs` is a 408 with the outcome unknown |
+| `registerHandler`, `registerRoute` | N/A | N/A | | For in-process queues; deliveries reach `createQueueHandler` through the consumer |
 | Dead letters | Built | Built | queue, storage | In R2; a dead-lettered wake reopens its outbox row |
 
 ## Streams
@@ -184,4 +185,5 @@ A candidate whose token claim succeeded but whose run never committed, because b
 - **Token release.** A write that frees a token now waits for the token's shard to apply the release, so it is free when the write returns. That adds one RPC to a run's last write when it held hooks.
 - **Inline budget.** `getRuntimeDeadline` raises the runtime's inline budget from 2 to 5 minutes per delivery on spec 8 runs too. A CPU-bound workflow near the 300 s CPU limit can set `WORKFLOW_V2_TIMEOUT_MS` to keep the old budget.
 - **`CONSUMER`.** Retained executors call `latestDeploymentId` on the main Worker's consumer, so deploy the main Worker first.
-- **Runners.** The `Runner` class needs a `v2` migration (`new_sqlite_classes`) and a `RUNNER` binding. Queue shards hand deliveries to runners once the new code reaches them; a delivery in flight on the old code finishes there. Retained executors need no change: they never ran the queue shards.
+- **Runners.** The `Runner` class needs a `v2` migration (`new_sqlite_classes`) and a `RUNNER` binding, so deploy the main Worker at once, not gradually. Queue shards hand deliveries to runners once the new code reaches them; a delivery in flight on the old code is cut off by the deploy and delivered again. The current deployment's executor needs the `RUNNER` binding too, and `EXECUTOR_ROUTES` must name it, because invocations run there.
+- **Retained executors built before runners** keep working: their runs' deliveries reach them through runners. Their World does not declare `invoke`, so their spec 8 step deliveries still read the whole log and the last ones replay inline, beside the run's runner, as on `main`, until those runs drain. A hook resume for such a run from the main Worker is an invocation, which the current deployment handles, and its wake reaches the old executor.
