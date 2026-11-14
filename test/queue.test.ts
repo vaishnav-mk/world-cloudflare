@@ -2,6 +2,9 @@ import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject 
 import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
+import type { WorldEnv } from '@workflow/world-cloudflare';
+import { PUBLISH_BATCH_MAX } from '../packages/world-cloudflare/src/constants.js';
+import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
 import { queueShardFor, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
@@ -29,6 +32,27 @@ describe('durability fanout', () => {
     for (const { messageId } of [results[0], results[2]]) {
       await expect.poll(() => env.SINK.getByName('sink').received(), { timeout: 5_000 }).toContain(messageId);
     }
+  });
+
+  it("gathers a flow request's publishes in one turn into a few calls to the run's store", async () => {
+    const calls: number[] = [];
+    const stores = { getByName: () => ({
+      dispatch: async (entries: { request: { id: string } }[]) => {
+        calls.push(entries.length);
+        return entries.map(({ request }) => ({ id: request.id, fresh: true }));
+      },
+    }) } as unknown as WorldEnv['WORLD_STORE'];
+    const gathering = createQueue({ ...env, WORLD_STORE: stores });
+    const runId = `wrun_${'0'.repeat(26)}`;
+    const step = (stepId: string) => gathering.queue(queueName, { runId, stepId, stepName: 'work' }, { idempotencyKey: stepId });
+    const count = PUBLISH_BATCH_MAX + 1;
+    const published = await withRequestContext(createExecutionContext(), {}, () =>
+      Promise.all(Array.from({ length: count }, (_, index) => step(`step-${index}`))));
+    expect(new Set(published.map(({ messageId }) => messageId)).size).toBe(count);
+    expect(calls).toEqual([PUBLISH_BATCH_MAX, 1]);
+    // Outside a flow request, each publish is its own call.
+    await Promise.all([step('alone-1'), step('alone-2')]);
+    expect(calls).toEqual([PUBLISH_BATCH_MAX, 1, 1, 1]);
   });
 
   it('runs a batch of deliveries together and returns each its own outcome', async () => {

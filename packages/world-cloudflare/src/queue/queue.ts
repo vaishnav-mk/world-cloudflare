@@ -2,6 +2,7 @@ import { WorkflowWorldError } from '@workflow/errors';
 import { unwrapInvocationOutcome } from '@workflow/errors/invocation';
 import { stringify } from 'devalue';
 import { MessageId, ValidQueueName, type Queue, type QueueOptions, type QueuePayload } from '@workflow/world';
+import { currentRequest, type FlowRequest } from '../lib/request-context.js';
 import { MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { messageIdFor, sha256Hex } from '../lib/hash.js';
@@ -11,12 +12,14 @@ import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDis
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
-import { DEFAULT_HOLD_LEASE_SECONDS, MAX_HOLD_LEASE_SECONDS } from '../constants.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, MAX_HOLD_LEASE_SECONDS, PUBLISH_BATCH_MAX } from '../constants.js';
 import { createQueueHandler } from './handler.js';
 import { holdMessage } from './hold.js';
 
 type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'RUNNER' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
+type Published = Awaited<ReturnType<NonNullable<Queue['queueBatch']>>>[number];
+type Waiting = { message: QueuePayload; opts: QueueOptions; resolve: (result: Published | undefined) => void; reject: (error: unknown) => void };
 
 /** The World's `Queue`, backed by the queue shard Durable Objects. */
 export function createQueue(env: QueueEnv): HoldingQueue {
@@ -49,6 +52,32 @@ export function createQueue(env: QueueEnv): HoldingQueue {
     });
   };
 
+  // A flow request's single publishes in the same turn go out together, PUBLISH_BATCH_MAX to a
+  // `queueBatch`: a replay that starts thousands of steps at once then makes a few calls to the
+  // run's store instead of one per step, which overloaded it.
+  const turns = new WeakMap<FlowRequest, Map<string, Waiting[]>>();
+  const publish = (queueName: string, message: QueuePayload, opts: QueueOptions): Promise<Published | undefined> => {
+    const request = currentRequest();
+    if (request === undefined) return queueBatch(queueName, [{ message, opts }]).then(([result]) => result);
+    const queues = turns.get(request) ?? new Map<string, Waiting[]>();
+    turns.set(request, queues);
+    const batch = queues.get(queueName) ?? [];
+    if (batch.length === 0) {
+      queues.set(queueName, batch);
+      setTimeout(() => {
+        queues.delete(queueName);
+        for (let start = 0; start < batch.length; start += PUBLISH_BATCH_MAX) {
+          const chunk = batch.slice(start, start + PUBLISH_BATCH_MAX);
+          queueBatch(queueName, chunk).then(
+            (results) => chunk.forEach(({ resolve }, index) => resolve(results[index])),
+            (error: unknown) => chunk.forEach(({ reject }) => reject(error)),
+          );
+        }
+      });
+    }
+    return new Promise((resolve, reject) => batch.push({ message, opts, resolve, reject }));
+  };
+
   return {
     getDeploymentId: async () => env.DEPLOYMENT_ID,
     // Only the queue consumer, called by runners, and private executor dispatch reach the flow route; no public route serves it.
@@ -69,7 +98,7 @@ export function createQueue(env: QueueEnv): HoldingQueue {
       if (target !== undefined && !reachable(env, target)) {
         throw new WorkflowWorldError(`Deployment ${target} is unavailable`, { status: 404, code: DEPLOYMENT_UNAVAILABLE });
       }
-      const [result] = await queueBatch(queueName, [{ message, opts: rest }]);
+      const result = await publish(queueName, message, rest);
       if (result === undefined || result.error !== undefined) throw new Error(result?.error ?? 'Message was not enqueued');
       return hold === undefined
         ? { messageId: result.messageId }
