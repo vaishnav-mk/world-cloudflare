@@ -8,7 +8,7 @@ A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for 
 | `QueueShard` | Queue shards: queue messages, delays, retries and idempotency keys; dead letters go to R2 |
 | `RunStreams` | One per run: that run's streams and its VM snapshot |
 
-Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It advertises the `hookRetention` and `hookResumeDedup` capabilities. It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
+Schemas are Drizzle tables with Drizzle Kit migrations ([`drizzle/`](drizzle/README.md)), and queries use [workers-qb](https://workers-qb.massadas.com/). It creates spec 8 runs, or spec 9 (single-orchestrator) runs with `WORKFLOW_SPEC_VERSION=9`, and advertises every capability Vercel's World does: `inBandFence`, `maxConcurrency`, `hookRetention`, `hookResumeDedup`, `resolvedHookResume`, `hookForceClaim`, `atomicStartHook`, `experimental_queueHold`, `deploymentAffinity` and `dynamicWorkflowCode`. It is unpublished; see [contract parity](../../docs/contract-parity.md) for what is built and tested. The `@workflow` npm scope belongs to Vercel, so publishing needs another name.
 
 ## Requirements
 
@@ -58,7 +58,7 @@ Bindings, as in the repo's `wrangler.jsonc`:
 | Binding | Type |
 | --- | --- |
 | `WORLD_STORE`, `QUEUE_SHARD`, `RUN_STREAMS` | SQLite Durable Objects with those class names |
-| `CONSUMER` | Service binding to this Worker's `QueueConsumer` entrypoint |
+| `CONSUMER` | Service binding to the main Worker's `QueueConsumer` entrypoint; executors use it to resolve the latest deployment |
 | `DLQ` | R2 bucket for dead letters |
 | `PAYLOADS` | R2 bucket for payloads and stream chunks over 1 MiB |
 | `DEPLOYMENT_ID` | A new ID per release |
@@ -77,12 +77,23 @@ A run lives in one store shard from its first event, so no single object sees ev
 - **Event pages.** A page of events ends at its count limit or once its stored rows pass 4 MiB, and the SDK reads on with the cursor. A store reads at most two pages at once, 512 KiB at a time.
 - **Routing.** The World client sends a run-scoped call to the run's shard. A shard throws `WorkflowRunNotFoundError` for a run it does not hold, so the client retries on the legacy store and remembers, per isolate, that the run lives there.
 - **Lists.** `runs.list` and `hooks.list` without a run ID ask every shard of every epoch and the legacy store, 32 at a time, merge their pages by `createdAt` then ID, and return the last row's sort key as the cursor. `runs.getMany` makes one call per shard its IDs hash to, then one to the legacy store for the rest. `hooks.get` asks every store.
-- **Hook tokens.** A token's registry row lives on shard `hash(token) % store` of the first epoch, which never changes, a copy of the hook that holds it. Before a `hook_created` write, the run's shard claims the token there and journals `hook_created` or `hook_conflict`. `hooks.getByToken` reads that shard.
-- **Releases.** A disposal or the run finishing owes the token's shard a release, committed with the write and sent just after it in the background, so a freed token is free shortly after the write returns. A finished run's retained token stays held until its retention lapses. A failed release stays owed and the shard's alarm retries it with backoff. A claim whose write is rejected is released the same way; one cut off by a reset of the run's shard holds its token until the run retries the write.
+- **Hook tokens.** A token's registry row lives on shard `hash(token) % store` of the first epoch, which never changes, a copy of the hook that holds it. Before a `hook_created` write, the run's shard claims the token there and journals `hook_created` or `hook_conflict`. `hooks.getByToken` reads that shard. A start Hook (`start({ experimental_hook })`) is claimed the same way before its run is created, and a refused candidate is recorded so every copy of it gets the same answer.
+- **Forced claims.** For `createHook({ experimental_force: true })` the token's shard records the takeover, asks the holder's store to journal `hook_disposed{forceClaimedBy}` and drop the hook, and only then gives the token to the claimer. A resume of the old hook is refused with `HookForceClaimedError`. The shard's alarm finishes a takeover a failed call left.
+- **Releases.** A disposal or the run finishing owes the token's shard a release, committed with the write and sent before the write returns, so a freed token is free when it does. A finished run's retained token stays held until its retention lapses. A failed release stays owed and the shard's alarm retries it with backoff. A claim whose write is rejected is released the same way; one cut off by a reset of the run's shard holds its token until the run retries the write.
 - **Legacy tokens.** Each token shard, the first time it answers, copies in the tokens that legacy hooks hold, so they still conflict. Legacy runs claim new tokens on the shards like any other run.
 - **Recovery.** Each shard drains its own outboxes from its alarm, armed before any write that owes a queue message or a release. The cron reaches only the legacy store.
 
 Retained executors deployed before store shards talk only to the legacy store, so don't route new runs to them.
+
+## Spec 9
+
+With `WORKFLOW_SPEC_VERSION=9` on the Worker and its executors, new runs follow the SDK's single-orchestrator model:
+- **The in-band fence.** Each spec 9 run counts the positions its orchestrator's writes took (`runs.seq_in_band`). `events.list` returns `snapshot: { seq, seqInBand }`, and an in-band write whose count is stale is refused with `InBandSupersededError` before anything is written.
+- **Appends.** Step and wait events are not checked against step or wait state, and writes return no step or wait. An inline step's first `step_started` creates it.
+- **One orchestrator at a time.** A run's orchestrator messages go to its run's queue shard, which delivers one batch at a time and holds the run's second message in a batch until the batch ends. `{ timeoutSeconds: 0 }` hands the message off without counting an attempt, and `meta.deliveryCount` is 1 only on a message's first delivery.
+- **Live feed.** `events.subscribe` long-polls the run's store, which answers as each event commits.
+
+Runs created before keep spec 8, which the World still serves.
 
 ## Large payloads
 

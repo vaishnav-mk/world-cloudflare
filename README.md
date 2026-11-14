@@ -24,7 +24,7 @@ pnpm install
 pnpm run build:workflow   # compiles workflows/ with @workflow/world-cloudflare/build
 pnpm run typecheck
 pnpm test                 # workerd storage, queue, stream and contract tests
-pnpm run test:e2e         # real SDK runs in workerd: QuickJS, the native engine, and encrypted
+pnpm run test:e2e         # real SDK runs in workerd: QuickJS, the native engine, encrypted, and spec 9
 pnpm build                # the workflow build and a Wrangler dry run
 ```
 
@@ -74,11 +74,11 @@ The SDK's web UI (`workflow web`) runs locally against a deployed World through 
 
 ## Limits
 
-- Runs, hook tokens and messages hash onto store and queue shards, 128 and 256 by default, and `SHARD_EPOCHS` adds shards for new runs without moving old ones. `runs.list` and global `hooks.list` ask every store, so they cost more than a run-scoped read and grow with the shard count. A freed hook token becomes free just after the write that frees it, not with it.
+- Runs, hook tokens and messages hash onto store and queue shards, 128 and 256 by default, and `SHARD_EPOCHS` adds shards for new runs without moving old ones. `runs.list` and global `hooks.list` ask every store, so they cost more than a run-scoped read and grow with the shard count.
 - Payloads and stream chunks over 1 MiB go to R2. On Workers with QuickJS a 16 MiB step output works and 20 MiB does not, because the workflow VM runs out of memory, so the World rejects any serialized payload over 18 MiB with a 413 and the step fails instead of retrying forever. HTTP bodies are capped at 100 MB. Larger data goes from step to step in a byte stream: locally 4 GiB moved in 64 MiB chunks ([streams](docs/limits.md#streams)). Measurements are in [limits](docs/limits.md#payloads).
 - R2 payload objects are never deleted, including ones left by writes that failed.
 - A step that exceeds the CPU limit is retried until the queue gives up, and holds up its delivery lane meanwhile. The templates raise `limits.cpu_ms` to 300,000; split longer work across steps.
-- Payloads and VM snapshots are stored in plaintext unless the Worker has a `WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)), and that secret cannot be rotated. Finished runs are kept forever, and forced hook claims are not supported. See [contract parity](docs/contract-parity.md).
+- Payloads and VM snapshots are stored in plaintext unless the Worker has a `WORKFLOW_ENCRYPTION_SECRET` ([encryption](packages/world-cloudflare/README.md#encryption)), and that secret cannot be rotated. Finished runs are kept forever. See [contract parity](docs/contract-parity.md).
 - Steps run at least once, so give their side effects idempotency keys.
 - `@workflow/world-cloudflare/build` relies on a few internals of `@workflow/builders` and `@workflow/core` 5.5.0 (see its comments); check it when upgrading the SDK.
 - QuickJS probably needs more CPU than the Free plan's 10 ms limit.

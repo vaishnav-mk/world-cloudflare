@@ -32,7 +32,7 @@ What limits it:
 - **Distance.** Each Durable Object call from the test colo took about 150 ms, because shards live where they were first called.
 - **The test.** One machine and one colo may cap it before the World does.
 - **Lists.** `runs.list` and a global `hooks.list` ask every store, so their cost grows with the shard count, and a large `limit` with `resolveData: 'all'` costs memory. `hooks.get` asks every store too.
-- **Token release lag.** A disposal or a finished run releases its tokens on their shards just after the write, in the background, so another run's claim in between still conflicts.
+- **Token release.** A disposal or a finished run releases its tokens on their shards before the write returns, which adds a call to a run's last write when it held hooks.
 - **The legacy store.** It still serves runs created before store shards, each token shard's first answer (once), and a shard that cannot find a lazily started run.
 
 ## Payloads
