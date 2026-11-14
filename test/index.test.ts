@@ -251,6 +251,8 @@ describe('list index', () => {
     }
     const stores = new Set(runs.map(({ runId }) => storeShardFor(runId)));
     expect(stores.size).toBe(12);
+    // `run_created` does not wait for its list row, so a run reaches the index a moment later.
+    await expect.poll(() => indexed(name), { timeout: 10_000 }).toBe(runs.length);
     const { world: reader, touched } = watched();
     const pages = await allPages((cursor) => reader.runs.list({ workflowName: name, pagination: { limit: 40, cursor }, resolveData: 'none' }));
     expect(pages).toHaveLength(Math.ceil(runs.length / 40));
