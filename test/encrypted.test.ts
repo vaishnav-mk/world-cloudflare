@@ -1,5 +1,5 @@
 import { SELF } from 'cloudflare:test';
-import { expect, it, vi } from 'vitest';
+import { beforeAll, expect, it, vi } from 'vitest';
 import { world } from '../src/world.js';
 
 // Runs with WORKFLOW_ENCRYPTION_SECRET set (wrangler.encrypted.test.jsonc), on QuickJS with snapshots.
@@ -21,6 +21,10 @@ async function storedPayloads(runId: string): Promise<Uint8Array[]> {
   return [run.input, run.output, ...events.flatMap((event) => Object.values('eventData' in event ? event.eventData ?? {} : {}))]
     .filter((value) => value instanceof Uint8Array);
 }
+
+// The first delivery loads the flow route, and in that time the 200 ms sleep below would elapse, so
+// the run would finish without suspending and snapshotting.
+beforeAll(async () => { expect(await result(await startRun('demo', 1))).toBe(2); });
 
 it('keeps payloads and VM snapshots encrypted at rest, and the run restores from its snapshot', async () => {
   const snapshots = world.experimental_snapshots!;

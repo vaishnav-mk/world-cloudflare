@@ -6,13 +6,13 @@
   "scripts": {
     "test": "vitest run",
     "test:e2e": "vitest run --config vitest.app.config.ts && vitest run --config vitest.isolate.config.ts && vitest run --config vitest.encrypted.config.ts",
-    "build:workflow": "workflow build --target cloudflare-workers",
+    "build:workflow": "rm -rf .wrangler/tmp && node packages/world-cloudflare/src/build.ts workflows",
     "typecheck": "wrangler types --config wrangler.test.jsonc worker-configuration.d.ts && tsc --noEmit",
     "build": "pnpm run build:workflow && wrangler deploy --dry-run --outdir /tmp/worlds-cloudflare-build",
     "ui": "pnpm --filter @workflow/world-cloudflare build && node --env-file=.dev.vars.remote-ui node_modules/@workflow/cli/bin/run.js web"
   },
   "dependencies": {
-    "@workflow/cli": "link:.vendor/workflow-sdk/packages/cli",
+    "@workflow/cli": "5.1.0",
     "@workflow/errors": "5.1.1",
     "@workflow/world": "5.2.0",
     "@workflow/world-cloudflare": "workspace:*",

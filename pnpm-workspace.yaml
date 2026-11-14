@@ -6,6 +6,3 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - '@durability/transforms@0.4.0'
   - durability@4.1.2
-overrides:
-  '@workflow/cli': link:.vendor/workflow-sdk/packages/cli
-  workflow: link:.vendor/workflow-sdk/packages/workflow

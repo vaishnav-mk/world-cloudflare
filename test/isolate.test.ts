@@ -1,18 +1,19 @@
 import { SELF } from 'cloudflare:test';
 import { afterEach, beforeAll, expect, it } from 'vitest';
 
-// Runs under vitest.isolate.config.ts, where WORKFLOW_VM=isolate. The flow handler runs in this
-// isolate, so wrapping the build's workflow factory counts isolate-engine replays.
+// Runs under vitest.isolate.config.ts, where WORKFLOW_VM=node. The flow handler runs in this isolate, so
+// wrapping the workflow factory the build registers with vm.ts counts node-engine replays.
+type Bundle = { names: readonly string[]; evaluate: (...args: unknown[]) => void };
 let replays = 0;
-beforeAll(async () => {
-  await SELF.fetch('https://local/runs/not-real'); // loads the Worker, which registers the factory
-  type Bundle = { evaluate: (...args: unknown[]) => void };
-  const bundle = (globalThis as unknown as Record<symbol, Bundle>)[Symbol.for('@workflow/core//isolateWorkflowBundle')];
-  const { evaluate } = bundle;
-  bundle.evaluate = (...args) => { replays++; evaluate(...args); };
+beforeAll(() => {
+  // SAFETY: vm.ts keeps a Map of bundles under this key, and adopts this one if it loads later.
+  const bundles = (globalThis as unknown as Record<symbol, Map<string, Bundle>>)[Symbol.for('@workflow/world-cloudflare//workflowBundles')] ??= new Map();
+  const set = bundles.set.bind(bundles);
+  bundles.set = (code, bundle) => set(code, { ...bundle, evaluate: (...args) => { replays++; bundle.evaluate(...args); } });
+  for (const [code, bundle] of bundles) bundles.set(code, bundle);
 });
 
-afterEach(() => { process.env.WORKFLOW_VM = 'isolate'; });
+afterEach(() => { process.env.WORKFLOW_VM = 'node'; });
 
 async function run(name: string, value: number) {
   const started = await SELF.fetch('https://local/runs', {
@@ -27,9 +28,9 @@ async function run(name: string, value: number) {
   return { engine: status.executionContext.workflowVm, value: result.value };
 }
 
-it('replays sequential steps on the isolate engine', async () => {
+it('replays sequential steps on the node engine', async () => {
   const before = replays;
-  expect(await run('sequentialSteps', 50)).toEqual({ engine: 'isolate', value: 50 });
+  expect(await run('sequentialSteps', 50)).toEqual({ engine: 'node', value: 50 });
   expect(replays).toBeGreaterThan(before);
 });
 
@@ -38,7 +39,7 @@ it('keeps a run started on QuickJS on QuickJS', async () => {
   const started = await SELF.fetch('https://local/runs', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'demo', value: 4 }),
   });
-  process.env.WORKFLOW_VM = 'isolate';
+  process.env.WORKFLOW_VM = 'node';
   const { runId } = await started.json() as { runId: string };
   const before = replays;
   await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${runId}`)).json() as { status: string }).status,
