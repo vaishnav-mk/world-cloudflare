@@ -15,6 +15,8 @@ Tables are Drizzle definitions with Drizzle Kit migrations ([`drizzle/`](drizzle
 
 ## Setup
 
+The package ships TypeScript source. To use it in your own Worker, copy this directory into your pnpm workspace and depend on it with `"@workflow/world-cloudflare": "workspace:*"`, as the example app does. Also depend on `workflow` 5.5.0: your code imports `workflow/api`, and the build bundles `workflow/runtime`. A copy installed under `node_modules`, from a tarball for example, does not work, because Node does not strip types there and the build command fails with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`. With pnpm 11 or later, copy `allowBuilds` from the repo's `pnpm-workspace.yaml`, or `pnpm install` fails with `ERR_PNPM_IGNORED_BUILDS`.
+
 Build the workflows before `wrangler dev` or `wrangler deploy`. The command takes the directories to scan, `.` by default:
 
 ```sh
@@ -38,10 +40,26 @@ export default {
 };
 ```
 
-`registerWorld()` does what `setWorld()` from `workflow/runtime` does, without importing it: `workflow/runtime` 5.5.0 draws a random ID as it loads, which Workers forbid at startup. `WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`.
+`registerWorld()` does what `setWorld()` from `workflow/runtime` does, without importing it: `workflow/runtime` 5.5.0 draws a random ID as it loads, which Workers forbid at startup. `WORKFLOW_TARGET_WORLD` does not work on Workers, because the SDK loads that package with `require.resolve`. For TypeScript, declare the generated `.mjs` module as the example's [`src/generated-flow.d.ts`](../../src/generated-flow.d.ts) does.
+
+Wrangler does not run the SDK's client transform, so `start(hello, [21])` throws `'start' received an invalid workflow function`. Pass the workflow's ID instead. It is `workflow//./<file without extension>//<export>`, and `.well-known/workflow/v1/manifest.json` lists every one. The example sets them in [`src/workflows.ts`](../../src/workflows.ts).
+
+```ts
+import { start } from 'workflow/api';
+
+const run = await start({ workflowId: 'workflow//./workflows/hello//hello' }, [21]);
+```
 
 The Wrangler config, as in the repo's [`wrangler.jsonc`](../../wrangler.jsonc), needs:
 - the `nodejs_compat` flag;
+- the four Durable Object bindings and a migration that makes their classes SQLite-backed. Without it, each object fails in its constructor with `DrizzleError: Rollback`:
+
+  ```jsonc
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldStore", "QueueShard", "RunStreams", "Runner"] }]
+  ```
+
+- a `CONSUMER` service binding to the Worker itself: `"services": [{ "binding": "CONSUMER", "service": "<this Worker's name>", "entrypoint": "QueueConsumer" }]`;
+- the `DLQ` and `PAYLOADS` R2 buckets and a `DEPLOYMENT_ID` ([configuration](#configuration));
 - `alias` entries for the SDK packages that do not load on Workers, which the SDK imports to pick a default World and to hand off background work. In a vitest config for the Workers pool, pass `workerAliases` from `@workflow/world-cloudflare/build` as `resolve.alias` instead:
 
   ```jsonc
