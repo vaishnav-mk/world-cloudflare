@@ -21,7 +21,8 @@ export function checkFence(
   let fence: Fence | undefined;
   if (existing !== undefined) {
     if (data.eventType === EventType.RunCreated) return undefined;
-    const count = db.seqInBand(runId);
+    // Only a spec 9 run has a count, so an earlier run's writes skip the read.
+    const count = isSingleOrchestrator(existing.specVersion) ? db.seqInBand(runId) : null;
     fence = count === null ? undefined : { count, inBand, creates: false };
   } else if (!isSingleOrchestrator(specVersion)) {
     return undefined;
