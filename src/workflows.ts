@@ -13,10 +13,11 @@ function withIds<M extends Record<string, object>>(file: string, module: M): { [
 }
 
 /** Workflows `POST /runs` may start, by function name. */
-export const workflows = { ...withIds('demo', demo), ...withIds('limits', limits), ...withIds('world-testing', worldTesting) };
+export const workflows = { ...withIds('demo', demo), ...withIds('limits', limits) };
 
-/** The engine stress workflows, for tests only: `POST /runs` cannot start them. */
+/** Workflows only tests start: the engine stress suite and the SDK's conformance scenarios. `POST /runs` cannot. */
 export const stressWorkflows = withIds('stress', stress);
+export const conformanceWorkflows = withIds('world-testing', worldTesting);
 
 type WorkflowName = keyof typeof workflows;
 

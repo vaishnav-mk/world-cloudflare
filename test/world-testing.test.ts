@@ -9,7 +9,7 @@ import {
   type WorkflowRun,
 } from '@workflow/world';
 import { getHookByToken, getRun, resumeHook, start } from 'workflow/api';
-import { workflows } from '../src/workflows.js';
+import { conformanceWorkflows as workflows } from '../src/workflows.js';
 import { world } from '../src/world.js';
 
 type Name = keyof typeof workflows;
