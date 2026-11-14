@@ -663,6 +663,24 @@ export class WorldStore extends DurableObject<WorldEnv> {
     return read();
   }
 
+  /**
+   * For `events.subscribe`: the run's events after `afterSlot`, as `events.list` returns them, or
+   * the next ones to commit within 15 s. `done` once a finished run has none left.
+   */
+  async eventsAfter(runId: string, afterSlot: number): Promise<{ events: Event[]; done: boolean }> {
+    if (!Number.isSafeInteger(afterSlot) || afterSlot < 0) throw new RangeError('Invalid subscription slot');
+    this.#own(runId);
+    const read = () => {
+      const events = Array.from(this.#db.events(runId, afterSlot, EVENT_POLL_BATCH), (row) => toEvent(row));
+      const done = events.length === 0 && isTerminalWorkflowRunStatus(this.#db.getRun(runId).status);
+      return { events, done };
+    };
+    const page = read();
+    if (page.events.length > 0 || page.done) return page;
+    await this.#waiters.wait(runId, EVENT_POLL_MS, () => this.#db.lastSlot(runId) > afterSlot);
+    return read();
+  }
+
   // Dispatch outbox, called by the queue client and the queue shard's dead-letter handler.
 
   /** The outbox slot each queue message would settle, 0 where none is owed, in one call. */

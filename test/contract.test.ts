@@ -85,6 +85,31 @@ describe('World v5 contract (workerd bindings)', () => {
     } }, { resolveData: 'none' })).eventCursor).toBeUndefined();
   });
 
+  it('pushes committed events to a subscriber in slot order, stops on unsubscribe, and reports a finished run', async () => {
+    const runId = await newRun();
+    const seen: string[] = [];
+    let ended: unknown;
+    const unsubscribe = world.events.subscribe!(runId, 1, (event) => seen.push(event.eventType), {
+      onError: (error) => { ended = error; },
+    });
+    await world.events.create(runId, { eventType: 'run_started' });
+    await world.events.create(runId, {
+      eventType: 'step_created', correlationId: 'step', eventData: { stepName: 'work', input: bytes('argument') },
+    });
+    await expect.poll(() => seen).toEqual(['run_started', 'step_created']);
+    unsubscribe();
+    await world.events.create(runId, { eventType: 'step_started', correlationId: 'step' });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(seen).toEqual(['run_started', 'step_created']);
+    expect(ended).toBeUndefined();
+    // A subscription to a finished run delivers what is left, then says it has ended.
+    await world.events.create(runId, { eventType: 'run_completed', eventData: { output: bytes('done') } });
+    const rest: string[] = [];
+    const finished = new Promise((resolve) => world.events.subscribe!(runId, 3, (event) => rest.push(event.eventType), { onError: resolve }));
+    expect(await finished).toBeInstanceOf(Error);
+    expect(rest).toEqual(['step_started', 'run_completed']);
+  });
+
   it('gets one event by ID, with or without its payload', async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });

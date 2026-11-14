@@ -1,6 +1,8 @@
 import { HookNotFoundError } from '@workflow/errors';
+import { requireEventSlot } from '@workflow/world';
 import type {
   CreateEventParams,
+  Event,
   CreateEventRequest,
   EventResult,
   GetWorkflowRunParams,
@@ -136,6 +138,28 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
         resolveAll(await onRun(stores, params.runId, (store) => store.listEvents(params), answersUnknown)),
       listByCorrelationId: async (params) =>
         resolveAll(await onRun(stores, params.runId, (store) => store.listEventsByCorrelationId(params), answersUnknown)),
+      // A long poll per page on the run's store, which answers as soon as an event commits.
+      subscribe: (runId, afterSlot, onEvent, { onError } = {}) => {
+        let live = true;
+        const follow = async () => {
+          for (let slot = afterSlot; live;) {
+            // RPC stubs type Event-bearing results as never; this is `WorldStore.eventsAfter`'s own type.
+            const page: { events: Event[]; done: boolean } = await onRun(stores, runId, (store) => store.eventsAfter(runId, slot));
+            for (const event of await resolveAll(page.events)) {
+              if (!live) return;
+              onEvent(event);
+              slot = requireEventSlot(event.eventId);
+            }
+            if (page.done) throw new Error(`Run ${runId} is finished; its events have all been delivered`);
+          }
+        };
+        follow().catch((error: unknown) => {
+          if (live) onError?.(error);
+        });
+        return () => {
+          live = false;
+        };
+      },
     },
     // A hook lives with its run, and its token's copy on the token's shard. The SDK runtime calls
     // `hooks.get` only for invocations, which this World does not declare, so it asks every store.
