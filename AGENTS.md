@@ -24,6 +24,7 @@ Check a value once, where it enters, and let the types carry the result. Don't r
 - Shared types live in `src/types.ts`, tunables in `src/constants.ts`.
 - Durable Object methods are RPC. Keep their names and signatures stable, because retained executors call them. Use `#private` members, not TypeScript `private`, so helpers aren't exposed over RPC.
 - Keep Durable Object classes thin. `WorldStore` methods delegate to the module for their role (`store/reads.ts`, `store/writes.ts`, `store/token-shard.ts`...), which takes the store's `StoreContext`; `QueueShard` delivers through `queue/deliver.ts`.
+- The package compiles to `dist` with `tsc -p tsconfig.build.json` (`pnpm build` in the package; `pnpm run build:workflow` runs it). The root resolves `@workflow/world-cloudflare` to `src` through the `worlds-source` export condition (`customConditions` in `tsconfig.json`, `ssr.resolve.conditions` in each vitest config), so typecheck and tests run on source. Wrangler and Node load `dist`.
 - Tables are Drizzle definitions in each object's `tables.ts`. After changing one, run `pnpm db:generate` in the package and commit the migration. Keep schema changes additive.
 - Queries use workers-qb. Use `raw` only for aggregates, joins and arithmetic updates its typed API can't express.
 

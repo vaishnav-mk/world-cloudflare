@@ -33,7 +33,7 @@ Requires Node 24 and pnpm.
 
 ```sh
 pnpm install
-pnpm run build:workflow   # compiles workflows/ with @workflow/world-cloudflare/build
+pnpm run build:workflow   # builds the package, then compiles workflows/ with @workflow/world-cloudflare/build
 pnpm exec wrangler dev
 curl -X POST localhost:8787/runs -H 'content-type: application/json' -d '{"name":"demo","value":21}'
 curl localhost:8787/runs/<runId>/result   # {"value":42}

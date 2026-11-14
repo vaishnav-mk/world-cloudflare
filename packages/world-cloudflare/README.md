@@ -15,12 +15,12 @@ Tables are Drizzle definitions with Drizzle Kit migrations ([`drizzle/`](drizzle
 
 ## Setup
 
-The package ships TypeScript source. To use it in your own Worker, copy this directory into your pnpm workspace and depend on it with `"@workflow/world-cloudflare": "workspace:*"`, as the example app does. Also depend on `workflow` 5.5.0: your code imports `workflow/api`, and the build bundles `workflow/runtime`. A copy installed under `node_modules`, from a tarball for example, does not work, because Node does not strip types there and the build command fails with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`. With pnpm 11 or later, copy `allowBuilds` from the repo's `pnpm-workspace.yaml`, or `pnpm install` fails with `ERR_PNPM_IGNORED_BUILDS`.
+The package ships compiled JavaScript with type declarations, in `dist/`. Until it is published, pack it with `pnpm pack` in this directory, which builds it first, and depend on the tarball: `"@workflow/world-cloudflare": "file:<path>/workflow-world-cloudflare-0.2.0.tgz"`. Also depend on `workflow` 5.5.0: your code imports `workflow/api`, and the build bundles `workflow/runtime`. With pnpm 11 or later, copy `allowBuilds` from the repo's `pnpm-workspace.yaml`, or `pnpm install` fails with `ERR_PNPM_IGNORED_BUILDS`.
 
 Build the workflows before `wrangler dev` or `wrangler deploy`. The command takes the directories to scan, `.` by default:
 
 ```sh
-node node_modules/@workflow/world-cloudflare/src/build.ts workflows
+node node_modules/@workflow/world-cloudflare/dist/build.js workflows
 ```
 
 It writes `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handler, the steps module it loads, the QuickJS WebAssembly modules and `manifest.json`. `flow.mjs` loads the SDK on its first delivery, not at startup. The Worker then exports the Durable Objects and the queue consumer, and registers the World:
@@ -70,9 +70,10 @@ The Wrangler config, as in the repo's [`wrangler.jsonc`](../../wrangler.jsonc), 
   }
   ```
 
-- a rule that bundles the migration SQL as text: `"rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]`;
 - a `* * * * *` cron for `drainOutbox`, which recovers the legacy store's dispatches and wakes the queue shards;
 - `limits.cpu_ms` of 300,000 and a high `limits.subrequests`, because the SDK makes about one Durable Object call per event.
+
+Wrangler's default `Text` rule bundles the migration SQL (`**/*.sql`), from `node_modules` too. A config with a `Text` rule of its own must list that glob or set `"fallthrough": true` on its rule.
 
 ## Configuration
 
@@ -227,6 +228,6 @@ With `WORKFLOW_SPEC_VERSION=9` on the Worker and its executors, new runs follow 
 
 ## Remote client
 
-`@workflow/world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker's `handleWorldRpc` endpoint, so the SDK's tools, such as the web UI (`workflow web`), can read and write its runs. Load it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, and set `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`. Build it with `pnpm build` in this package: unlike the Worker entry, it ships as JavaScript (`dist/remote/client.js`), because Node loads it directly.
+`@workflow/world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker's `handleWorldRpc` endpoint, so the SDK's tools, such as the web UI (`workflow web`), can read and write its runs. Load it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, and set `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`. In this repo, build it first with `pnpm build` in this package.
 
 The token can write events and, with an encryption secret, fetch every run's key, so keep it in a secret. The client cannot receive queue deliveries; workflows still run on Cloudflare. Payloads travel in one request or response, so the Worker's request body limit and memory bound the largest value it can move.
