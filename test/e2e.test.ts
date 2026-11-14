@@ -338,6 +338,20 @@ it('passes a 256 MiB byte stream in chunks at the chunk limit from one step to t
   expect((await payloadObjects(runId)).map(({ size }) => size)).toEqual(Array.from({ length: 256 / chunk }, () => chunk * MiB));
 }, 120_000);
 
+it('ends the reader of a stream whose writer is cut off long after its step returned', async () => {
+  // The writing step returns at once, and its stream takes 60 s to write. The test configs give a
+  // flow request's background work 10 s, standing in for the platform cutting it off.
+  const runId = await startRun('streamSlowly', 60);
+  await expect.poll(() => runStatus(runId), { interval: 500, timeout: 50_000 }).toBe('failed');
+  expect(await runError(runId)).toContain('ended without being closed: its writer stopped');
+  const { names } = await (await SELF.fetch(`https://local/runs/${runId}/streams`)).json() as { names: string[] };
+  const info = await world.streams.getInfo(runId, names[0]);
+  // The request kept writing after the step returned, until its budget ran out.
+  expect(info).toMatchObject({ done: false });
+  expect(info.tailIndex).toBeGreaterThan(20);
+  expect(info.tailIndex).toBeLessThan(599);
+}, 60_000);
+
 it('resumes a hook with a 12 MB payload', async () => {
   const runId = await startRun('hookPayload', 0);
   const token = await vi.waitFor(async () => {

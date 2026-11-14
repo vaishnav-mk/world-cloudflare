@@ -5,8 +5,9 @@
   "compatibility_date": "2026-10-17",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
-  // A threshold of 2 events makes a run that sleeps once save a VM snapshot and restore from it.
-  "vars": { "DEPLOYMENT_ID": "test-v1", "WORKFLOW_VM": "quickjs", "WORKFLOW_COMPRESSION_CODEC": "gzip",
+  // A threshold of 2 events makes a run that sleeps once save a VM snapshot and restore from it. A
+  // 10 s background budget lets a test cut off a slow stream write.
+  "vars": { "DEPLOYMENT_ID": "test-v1", "FLOW_BACKGROUND_BUDGET_MS": "10000", "WORKFLOW_VM": "quickjs", "WORKFLOW_COMPRESSION_CODEC": "gzip",
     "WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED": "1", "WORKFLOW_SNAPSHOT_THRESHOLD": "2",
     "WORKFLOW_EXPERIMENTAL_DYNAMIC_WORKFLOWS": "1" },
   "durable_objects": { "bindings": [

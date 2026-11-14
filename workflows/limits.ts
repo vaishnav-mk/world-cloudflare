@@ -15,6 +15,7 @@ const MAX_CHUNK_MIB = 1024;
 const MAX_COUNT = 30_000;
 const MAX_MEGA_ITERATIONS = 20_000;
 const MAX_SLEEP_HOURS = 24 * 400;
+const MAX_SLOW_SECONDS = 3600;
 
 const clamp = (value: number, max: number) => Math.max(0, Math.min(Math.floor(value), max));
 
@@ -53,6 +54,18 @@ export async function streamBytes(totalMiB: number, chunkMiB: number) {
   'use workflow';
   const stream = await patternStream(clamp(totalMiB, MAX_STREAM_MIB) * MiB, Math.max(1, clamp(chunkMiB, MAX_CHUNK_MIB)) * MiB);
   return checkPattern(stream);
+}
+
+/**
+ * A step returns a byte stream that makes 1 KiB every 100 ms for `seconds` seconds, so it is written
+ * long after the step returns. After a sleep, so a later invocation reads it, a second step reads it
+ * to the end. The run returns the bytes read.
+ */
+export async function streamSlowly(seconds: number) {
+  'use workflow';
+  const stream = await slowStream(clamp(seconds, MAX_SLOW_SECONDS) * 10);
+  await sleep(1000);
+  return countBytes(stream);
 }
 
 /** Runs `count` steps one after another. */
@@ -163,6 +176,31 @@ async function checkPattern(stream: ReadableStream<Uint8Array>) {
   }
   const seconds = (Date.now() - startedAt) / 1000;
   return { bytes, firstMismatch, seconds, mibPerSecond: Math.round(bytes / MiB / seconds) };
+}
+
+async function slowStream(chunks: number) {
+  'use step';
+  let sent = 0;
+  return new ReadableStream<Uint8Array>({
+    type: 'bytes',
+    async pull(controller) {
+      if (sent === chunks) {
+        controller.close();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      controller.enqueue(new Uint8Array(1024));
+      sent++;
+    },
+  });
+}
+
+async function countBytes(stream: ReadableStream<Uint8Array>) {
+  'use step';
+  const reader = stream.getReader();
+  let bytes = 0;
+  for (let read = await reader.read(); !read.done; read = await reader.read()) bytes += read.value.byteLength;
+  return bytes;
 }
 
 async function increment(value: number) {
