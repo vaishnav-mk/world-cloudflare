@@ -127,5 +127,6 @@ Measured on Workers, with objects and load generation configured with the same r
 | [`packages/world-cloudflare`](packages/world-cloudflare/README.md) | Setup, configuration and design of the World |
 | [`packages/world-cloudflare/drizzle`](packages/world-cloudflare/drizzle/README.md) | Schema migrations |
 | [`docs/contract-parity.md`](docs/contract-parity.md) | What of the SDK's World contract is built and tested |
+| [`docs/hook-ownership.md`](docs/hook-ownership.md) | Claim admission, recovery and receiver-first upgrades |
 | [`docs/limits.md`](docs/limits.md) | Measured limits, compared with Vercel's |
 | [`docs/native-engine.md`](docs/native-engine.md) | The SDK's node engine on Workers, against QuickJS |

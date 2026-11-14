@@ -44,7 +44,7 @@ What is missing is optional and off the runtime's path: `describeRun`, `analytic
 | `runs.waitForTerminalStatus` | Built | Built | storage | `AbortSignal` cannot cross RPC and is ignored, as the contract allows |
 | `runs.cancelMany` | Built | Built | contract | |
 | `runs.experimentalSetAttributes` | N/A | N/A | storage | The contract's stopgap until `attr_set`, which this World stores; the runtime feature-detects it |
-| `events.create` | Built | Built | contract, storage | One SQLite transaction per write in the run's store shard; dense slots |
+| `events.create` | Built | Built | contract, storage | Event, state and outbox commit together in the run's store; dense slots. Claim-bearing writes first persist recoverable admission |
 | `events.create` params: `eventCount`, `sinceCursor`, `occurredAt`, `resumeId`, `resumePayloadDigest`, `resolveData` | Built | Built | contract | |
 | `events.create` params: `inBand`, `expectedSeqInBand` | Missing | Built | conformance | Threw before |
 | `events.create` param: `requireHookResumeDedup` | Missing | Built | contract | |
@@ -82,11 +82,11 @@ What is missing is optional and off the runtime's path: `describeRun`, `analytic
 
 ## Forced hook claims
 
-The token's shard records the takeover in `token_takeovers`, asks the holder's store to journal `hook_disposed{forceClaimedBy}` and drop the hook (`forced_disposals`), and only then gives the token to the claimer, whose `hook_created` names what it took in `forceClaimedFrom`. A running holder below spec 8 is refused, and the claimer journals `hook_conflict` with `forceRefusedReason: 'victim-spec-version'`. A resume that found the holder before the move is refused with `HookForceClaimedError` naming the claimer. The shard's alarm retries a takeover a failed call left. `force-claim.test.ts` covers each step, and the e2e lanes take a real run's token over.
+The token's shard records the takeover in `token_takeovers`, asks the holder's store to journal `hook_disposed{forceClaimedBy}` and drop the hook (`forced_disposals`), and only then gives the token to the claimer, whose `hook_created` names what it took in `forceClaimedFrom`. A running holder below spec 8 is refused, and the claimer journals `hook_conflict` with `forceRefusedReason: 'victim-spec-version'`. A resume that found the holder before the move is refused with `HookForceClaimedError` naming the claimer. The run store first validates and persists claim admission; the token shard keeps immutable decisions and reserves pending takeovers. Recovery rolls accepted operations forward across lost replies and resets. See [hook ownership](hook-ownership.md) for the gates, receipts, unmaterialized candidates and receiver-first upgrade procedure. `force-claim.test.ts` and `hook-recovery.test.ts` cover these transitions; the e2e lanes take a real run's token over.
 
 ## Start Hooks
 
-The run's store admits `start({ experimental_hook })`: it claims the token on its shard, then creates the run with the start Hook `startHookId(runId)`, so the two commit together. A refusal is recorded in `start_hook_refusals`, so every later copy of the candidate is refused naming the same run. The SDK's atomic start Hook suite passes (25 tests); its 7 orphan-bound cases skip because this World reads the Durable Objects' clock, and `start-hook.test.ts` crosses the 24-hour bound with a candidate minted in the past instead. Retention is limited to 30 days, as world-local's default. A candidate whose token claim succeeded but whose run never committed, because both its direct write and its queued copy were lost, keeps its token.
+The run's store admits `start({ experimental_hook })`: it claims the token on its shard, then creates the run with the start Hook `startHookId(runId)`, so the two commit together. A refusal is recorded in `start_hook_refusals`, so every later copy of the candidate is refused naming the same run. The SDK's atomic start Hook suite passes (25 tests); its 7 orphan-bound cases skip because this World reads the Durable Objects' clock, and `start-hook.test.ts` crosses the 24-hour bound with a candidate minted in the past instead. Retention is limited to 30 days, as world-local's default. A durable intent recovers a grant whose run has not committed. An expired uncreated candidate obtains a token-side cancellation receipt before owing its conditional release. This does not backfill historical orphan grants.
 
 ## Queue
 
@@ -94,9 +94,10 @@ The run's store admits `start({ experimental_hook })`: it claims the token on it
 | --- | --- | --- | --- | --- |
 | `queue`, `queueBatch`, `getDeploymentId` | Built | Built | contract, queue | |
 | `queueAuthMode: 'skip'` | Built | Built | contract | Only the queue consumer, called by runners, and private executor dispatch reach the flow route |
-| `QueueOptions.deploymentId` | Built | Built | queue | Routed to the deployment's retained executor |
+| `QueueOptions.deploymentId` | Built | Built | queue | Routed to the deployment's retained executor; omitted targets persist the sender's deployment, not the later consumer's default |
 | `QueueOptions.idempotencyKey`, dedupe for 24 hours | Built | Built | queue | Keys are kept forever; a repeat next to a message in backoff changes nothing |
 | `QueueOptions.delaySeconds` | Built | Built | queue | |
+| Handler error `retryAfter` | Missing | Built | queue-retry-floor | A finite positive number of seconds is a retry floor over local backoff, capped at 23 hours. Invalid values are ignored; this is not step `RetryableError` Date semantics |
 | `QueueOptions.retentionSeconds` | Partly | Partly | | No message expires by age, but one whose deliveries keep failing is dead-lettered after `QUEUE_MAX_ATTEMPTS`: about 25 minutes before, about 4 hours now (below) |
 | `QueueOptions.experimental_hold` | Missing | Built | queue | Not in 5.2.0's `QueueOptions`, so the World types it itself (`HoldingQueue`). The shard enqueues the message behind a lease the sender renews (1 to 3,600 s, default 30). `consume` runs it as its first delivery. A successful spec 8 `{ timeoutSeconds }` enqueues a fresh message before settling the held original; spec 9 timeouts and `release` retain its ID. Only this deployment's messages, and never a repeat of an accepted key |
 | `QueueOptions.specVersion`, `headers` | Built | Built | | The payload is devalue-encoded whatever the version |

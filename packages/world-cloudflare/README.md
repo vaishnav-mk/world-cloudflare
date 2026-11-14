@@ -109,7 +109,7 @@ A Durable Object is created near its first caller, so objects first reached from
 
 No single object sees every run. `WorldStore` objects play four roles, by name:
 - **Store shards** (`store-<n>`) hold the runs that hash to them, from a run's first event. A write commits its event, state changes and outbox rows in one transaction.
-- **Token shards** are store shards too: a hook token's registry row lives on shard `hash(token) % store` of the first epoch, which never changes. A run's store claims the token there before it journals `hook_created` or `hook_conflict`, and releases it when the hook is disposed of or the run finishes. A forced claim (`experimental_force`) moves a token only after the holder's store has disposed of its hook.
+- **Token shards** are store shards too: a hook token's registry row lives on shard `hash(token) % store` of the first epoch, which never changes. A run's store validates and durably admits its claim before contacting the registry. It then journals `hook_created` or `hook_conflict`, and owes an owner-conditional release when the hook is disposed of or the run finishes. A forced claim (`experimental_force`) reserves the token and moves it only after the holder's store records disposal. Persisted intents, decisions and tombstones recover interrupted operations; accepted claims can delay later writes to that run while a peer is unavailable. See [hook ownership](../../docs/hook-ownership.md), including the receiver-first upgrade procedure.
 - **Index shards** (`index-<n>`) hold list rows ([listing](#listing)).
 - **The legacy store** (`global`) holds the runs created before store shards, with their hooks. The World client tries a run's shard first and falls back to it.
 
@@ -128,7 +128,7 @@ A queue shard runs no workflow code, so flows do not take its CPU: it hands each
 
 ## Listing
 
-A run's list row, the run without its payloads, lives on index shard `hash(runId) % index` of its epoch, and each hook's on `hash(hookId) % index`. A store pushes the latest row of every run and hook change right after the write, from an outbox. A write that changes a hook, or finishes a run, answers once the push lands or after 1 s, because the SDK reads a hook right after creating it. Other run writes, including `run_created`, do not wait, so a run appears in lists a moment after `start()` returns.
+A run's list row, the run without its payloads, lives on index shard `hash(runId) % index` of its epoch, and each hook's on `hash(hookId) % index`. A store pushes the latest row of every run and hook change right after the write, from an outbox. A write that changes a hook, or finishes a run, answers once the push lands or after 1 s, because the SDK reads a hook right after creating it. Other run writes, including `run_created`, do not wait, so a run appears in lists a moment after `start()` returns. Forced-disposal callbacks schedule the victim's index update without waiting, so an index outage cannot hold the requester's run gate.
 
 `runs.list` and `hooks.list` without a run ID ask every index shard, 32 at a time, and merge their pages by `createdAt`, then ID; filters apply on the index shards. With `resolveData: 'all'`, the page's runs then come whole from their stores. `hooks.get` asks one index shard per epoch, and `runs.getMany` one store per shard its IDs hash to.
 
