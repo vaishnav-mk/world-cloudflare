@@ -27,20 +27,20 @@ type Plan =
 const SETTLE = { action: DispatchAction.Settle } as const;
 const POSTPONE = { action: DispatchAction.Postpone } as const;
 
-export function isPendingStep(db: Db, runId: string, stepId: string, stepName: string): boolean {
+function isPendingStep(db: Db, runId: string, stepId: string, stepName: string): boolean {
   if (db.findRun(runId)?.status !== RunStatus.Running) return false;
   const step = db.findStep(runId, stepId);
   return step?.status === StepStatus.Pending && step.stepName === stepName;
 }
 
 /** Pending `step_created` slot for a step that still needs a delivery, or 0. */
-export function pendingStepSlot(db: Db, outbox: Outbox, runId: string, stepId: string, stepName: string): number {
+function pendingStepSlot(db: Db, outbox: Outbox, runId: string, stepId: string, stepName: string): number {
   if (!isPendingStep(db, runId, stepId, stepName)) return 0;
   return outbox.pendingSlot(runId, EventType.StepCreated, stepId);
 }
 
 /** Pending `wait_created` slot for a wait that still needs a wake, or 0. */
-export function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlationId: string): number {
+function pendingWaitSlot(db: Db, outbox: Outbox, runId: string, correlationId: string): number {
   if (db.findRun(runId)?.status !== RunStatus.Running) return 0;
   if (db.findWait(runId, correlationId)?.status !== WaitStatus.Waiting) return 0;
   return outbox.pendingSlot(runId, EventType.WaitCreated, correlationId);

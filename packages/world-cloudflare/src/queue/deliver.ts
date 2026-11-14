@@ -13,7 +13,7 @@ import type { DeliveryCounts } from './delivery-counts.js';
 import type { Holds } from './holds.js';
 import type { InflightTable } from './inflight.js';
 
-export type FanoutMessage = DurabilityFanoutMessage<Envelope>;
+type FanoutMessage = DurabilityFanoutMessage<Envelope>;
 
 /** A due delivery and the runner it goes to: its run's, in the run's turn, for a replay of `run`. */
 type HandOff = { delivery: Delivery; runner: string; run?: string };
