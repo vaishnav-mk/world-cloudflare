@@ -1,4 +1,4 @@
-import { HookNotFoundError } from '@workflow/errors';
+import { EntityConflictError, FatalError, HookNotFoundError } from '@workflow/errors';
 import { requireEventSlot } from '@workflow/world';
 import type {
   CreateEventParams,
@@ -18,11 +18,13 @@ import type {
   WorkflowRun,
   WorkflowRunWithoutData,
 } from '@workflow/world';
+import { stringify } from 'devalue';
 import { ulid } from 'ulid';
+import { PAYLOAD_MAX_BYTES } from '../constants.js';
 import { EventType } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { createPayloads } from '../lib/payloads.js';
-import type { WorldEnv } from '../types.js';
+import type { EventOf, WorldEnv } from '../types.js';
 import { cancelMany } from './cancel-many.js';
 import { mergePages } from './pages.js';
 import { storeShardFor } from '../lib/shards.js';
@@ -33,6 +35,7 @@ type AnyStep = Step | StepWithoutData;
 type WithoutData = { resolveData: 'none' };
 type WithData = { resolveData?: 'all' };
 
+const encoder = new TextEncoder();
 const runKey = (run: AnyRun): [number, string] => [run.createdAt.getTime(), run.runId];
 const hookKey = (hook: Hook): [number, string] => [hook.createdAt.getTime(), hook.hookId];
 
@@ -110,6 +113,7 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
     // The store mints run IDs too, but a payload's R2 key needs the run ID before the write.
     const id = runId ?? (data.eventType === EventType.RunCreated ? `wrun_${ulid()}` : null);
     if (id === null) throw new Error('runId is required');
+    if (data.eventType === EventType.StepCompleted) await failOversizedResult(id, data, params);
     // Payloads reach R2 before the event commits, so a committed ref never points at nothing.
     const written = new Map<string, Uint8Array>();
     const request = await offloadEvent(id, data, written);
@@ -119,6 +123,26 @@ export function createStorage(env: Pick<WorldEnv, 'WORLD_STORE' | 'PAYLOADS'>): 
       : await onRun(stores, id, (store) => store.createEvent(id, request, params));
     // The store returns the union result; narrow it to the request's event type.
     return resolveAll(result, written) as Promise<EventResult<T['eventType']>>;
+  }
+
+  /**
+   * Fails a step whose result is over the payload limit, then rejects its completion as a conflict.
+   * The SDK redelivers any other rejected completion, and on the native engine the redelivery
+   * re-runs the step until it exceeds its retries, hiding why. A conflict it skips, then replays
+   * the step's failure, on the first attempt with either engine.
+   */
+  async function failOversizedResult(runId: string, data: EventOf<EventType.StepCompleted>, params?: CreateEventParams) {
+    const { result, stepName } = data.eventData;
+    if (!(result instanceof Uint8Array) || result.byteLength <= PAYLOAD_MAX_BYTES) return;
+    const message = `A ${result.byteLength}-byte result is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`;
+    // How the SDK serializes `new FatalError(message)`: a format prefix, then devalue.
+    const error = encoder.encode(`devl${stringify(new FatalError(message), {
+      FatalError: (value: unknown) => value instanceof FatalError && { message: value.message },
+    })}`);
+    await onRun(stores, runId, (store) => store.createEvent(runId, {
+      eventType: EventType.StepFailed, specVersion: data.specVersion, correlationId: data.correlationId, eventData: { stepName, error },
+    }, params));
+    throw new EntityConflictError(`Step ${data.correlationId} failed: ${message}`);
   }
 
   return {

@@ -2,6 +2,7 @@ import { env, SELF } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
 import { HookConflictError } from '@workflow/errors';
 import { resumeHook, start } from 'workflow/api';
+import { PAYLOAD_MAX_BYTES } from '../packages/world-cloudflare/src/constants.js';
 import { workflows } from '../src/workflows.js';
 import { MAX_BODY_BYTES } from '../src/http.js';
 import { world } from '../src/world.js';
@@ -18,6 +19,16 @@ async function startRun(name: string, value: number | number[]): Promise<string>
 }
 
 const payloadObjects = async (runId: string) => (await env.PAYLOADS.list({ prefix: `runs/${runId}/` })).objects;
+const runStatus = async (runId: string) => (await (await SELF.fetch(`https://local/runs/${runId}`)).json() as { status: string }).status;
+const runEvents = async (runId: string) => (await SELF.fetch(`https://local/runs/${runId}/events`)).text();
+
+/** The run's error as the SDK serialized it, decompressed, as text. */
+async function runError(runId: string): Promise<string> {
+  const run = await (await SELF.fetch(`https://local/runs/${runId}`)).json() as { error: { $bytes: string } };
+  const bytes = Buffer.from(run.error.$bytes, 'base64');
+  if (bytes.subarray(0, 4).toString() !== 'gzip') return bytes.toString();
+  return new Response(new Blob([bytes.subarray(4)]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+}
 
 it('rejects oversized streaming JSON without Content-Length', async () => {
   let sent = 0;
@@ -293,10 +304,11 @@ it('returns a 12 MiB run output', async () => {
   expect((await payloadObjects(runId)).length).toBeGreaterThanOrEqual(1);
 }, 60_000);
 
-it('fails a step whose output is over the payload limit instead of retrying forever', async () => {
+it('fails a step whose output is over the payload limit on its first attempt', async () => {
   const runId = await startRun('stepOutput', 20 * MiB);
-  await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${runId}`, { headers })).json() as { status: string }).status,
-    { interval: 250, timeout: 50_000 }).toBe('failed');
+  await expect.poll(() => runStatus(runId), { interval: 250, timeout: 30_000 }).toBe('failed');
+  expect(await runError(runId)).toContain(`byte result is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`);
+  expect((await runEvents(runId)).match(/event: step_started/g)).toHaveLength(1);
   expect(await payloadObjects(runId)).toHaveLength(0);
 }, 60_000);
 

@@ -65,9 +65,10 @@ export function createPayloads(bucket: R2Bucket) {
     const fields = await Promise.all(Object.entries(request.eventData).map(async ([key, value]: [string, unknown]) => {
       if (!(value instanceof Uint8Array)) return [key, value];
       if (value.byteLength > PAYLOAD_MAX_BYTES) {
-        throw new WorkflowWorldError(`A ${value.byteLength}-byte ${key} is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`, {
-          status: 413, code: 'PAYLOAD_TOO_LARGE',
-        });
+        const message = `A ${value.byteLength}-byte ${key} is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`;
+        // `fatal`, because a retry meets the same limit: the SDK then fails the step that wrote it, or
+        // the run committing a suspension, instead of redelivering it.
+        throw Object.assign(new WorkflowWorldError(message, { status: 413, code: 'PAYLOAD_TOO_LARGE' }), { fatal: true });
       }
       return [key, await offload(runId, value, written)];
     }));

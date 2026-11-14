@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:test';
+import { EntityConflictError } from '@workflow/errors';
 import { describe, expect, it } from 'vitest';
 import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { PAYLOAD_INLINE_MAX_BYTES, PAYLOAD_MAX_BYTES, PAYLOAD_REF_PREFIX } from '../packages/world-cloudflare/src/constants.js';
@@ -43,9 +44,26 @@ describe('payloads in R2', () => {
     const write = store.events.create(runId, {
       eventType: 'step_created', correlationId: 'huge', eventData: { stepName: 'work', input: new Uint8Array(PAYLOAD_MAX_BYTES + 1) },
     });
-    await expect(write).rejects.toMatchObject({ status: 413 });
+    await expect(write).rejects.toMatchObject({ status: 413, fatal: true });
     expect(await objects(runId)).toHaveLength(0);
     expect((await store.events.list({ runId })).data).toHaveLength(2);
+  });
+
+  it('fails a step whose result is over the limit and rejects its completion as a conflict', async () => {
+    const runId = await startedRun();
+    await store.events.create(runId, { eventType: 'step_created', correlationId: 'big', eventData: { stepName: 'work', input: new Uint8Array([1]) } });
+    await store.events.create(runId, { eventType: 'step_started', correlationId: 'big' });
+    const write = store.events.create(runId, {
+      eventType: 'step_completed', correlationId: 'big', eventData: { stepName: 'work', result: new Uint8Array(PAYLOAD_MAX_BYTES + 1) },
+    });
+    await expect(write).rejects.toSatisfy(EntityConflictError.is);
+    const step = await store.steps.get(runId, 'big');
+    expect(step.status).toBe('failed');
+    // The error is a FatalError as the SDK serializes one.
+    expect(new TextDecoder().decode(step.error as Uint8Array)).toBe(
+      `devl[["FatalError",1],{"message":2},"A ${PAYLOAD_MAX_BYTES + 1}-byte result is over the ${PAYLOAD_MAX_BYTES}-byte payload limit"]`,
+    );
+    expect(await objects(runId)).toHaveLength(0);
   });
 
   it('offloads a large step input written through a batch', async () => {
