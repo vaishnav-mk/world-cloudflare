@@ -33,6 +33,6 @@ export function toWorldError(error: unknown): unknown {
 }
 
 /** Whether a call failed because its chain of calls between Workers and objects grew too deep. */
-export function isDepthExhausted(error: unknown): boolean {
+function isDepthExhausted(error: unknown): boolean {
   return String(error).includes('Subrequest depth limit exceeded');
 }
