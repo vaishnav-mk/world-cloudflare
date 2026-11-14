@@ -1,7 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import { expect, it } from 'vitest';
 import { createWorld } from '@workflow/world-cloudflare';
-import { FLOW_ATTEMPT_TIMEOUT_MS } from '../packages/world-cloudflare/src/constants.js';
+import { FLOW_DELIVERY_BUDGET_MS } from '../packages/world-cloudflare/src/constants.js';
 import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 
 // The lookup `@vercel/functions` `waitUntil` makes, which the SDK uses for background work.
@@ -29,12 +29,12 @@ it('has no request outside a flow request', () => {
   expect(() => sdkWaitUntil(Promise.resolve())).not.toThrow();
 });
 
-it('reports when the queue gives up on the current delivery, and no deadline outside one', async () => {
+it('reports when the current delivery should hand off, and no deadline outside one', async () => {
   const world = createWorld(env);
   expect(await world.getRuntimeDeadline!()).toBeUndefined();
   const request = new Request('https://internal/flow', { headers: { 'x-workflow-invocation-started-at': '1000' } });
   const deadline = await withRequestContext(createExecutionContext(), () => world.getRuntimeDeadline!(), request);
-  expect(deadline).toEqual(new Date(1000 + FLOW_ATTEMPT_TIMEOUT_MS));
+  expect(deadline).toEqual(new Date(1000 + FLOW_DELIVERY_BUDGET_MS));
 });
 
 it("resolves the latest deployment from the main Worker's consumer", async () => {

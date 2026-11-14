@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { FLOW_ATTEMPT_TIMEOUT_MS } from '../constants.js';
+import { FLOW_DELIVERY_BUDGET_MS } from '../constants.js';
 
 type RequestContext = { waitUntil(promise: Promise<unknown>): void; startedAt?: number };
 
@@ -15,8 +15,8 @@ const requests = new AsyncLocalStorage<RequestContext>();
 
 /**
  * Runs a flow request so the SDK's background work extends `ctx` instead of being dropped, and so
- * `getRuntimeDeadline` knows when the queue gives up on the delivery: `FLOW_ATTEMPT_TIMEOUT_MS`
- * after the consumer took it, as its `x-workflow-invocation-started-at` header says.
+ * `getRuntimeDeadline` knows when to hand off: `FLOW_DELIVERY_BUDGET_MS` after the consumer took
+ * the delivery, as its `x-workflow-invocation-started-at` header says.
  */
 export function withRequestContext<T>(ctx: ExecutionContext, run: () => T, request?: Request): T {
   const header = Number(request?.headers.get('x-workflow-invocation-started-at') ?? Number.NaN);
@@ -29,8 +29,8 @@ export function currentInvocationStart(): number | undefined {
   return requests.getStore()?.startedAt;
 }
 
-/** When the current flow delivery is cut off, if this is one. */
+/** When the current flow delivery should hand off, if this is one. */
 export function currentDeadline(): Date | undefined {
   const startedAt = currentInvocationStart();
-  return startedAt === undefined ? undefined : new Date(startedAt + FLOW_ATTEMPT_TIMEOUT_MS);
+  return startedAt === undefined ? undefined : new Date(startedAt + FLOW_DELIVERY_BUDGET_MS);
 }

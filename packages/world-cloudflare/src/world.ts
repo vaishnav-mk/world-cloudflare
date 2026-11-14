@@ -51,7 +51,7 @@ export function createWorld(env: WorldEnv = platformEnv): World {
         throw new WorkflowWorldError(`The run's execution context is ${bytes} bytes, over the ${MAX_EXECUTION_CONTEXT_BYTES}-byte limit`, { status: 400 });
       }
     },
-    // The queue gives up on a delivery after FLOW_ATTEMPT_TIMEOUT_MS, so the SDK hands off before then.
+    // A delivery hands off after FLOW_DELIVERY_BUDGET_MS, well inside the CPU limit.
     getRuntimeDeadline: async () => currentDeadline(),
     // `start({ deploymentId: 'latest' })`: the main Worker's deployment, also from a retained executor.
     resolveLatestDeploymentId: () => env.CONSUMER.latestDeploymentId(),

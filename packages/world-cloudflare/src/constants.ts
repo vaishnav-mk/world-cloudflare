@@ -114,6 +114,12 @@ export const FLOW_ATTEMPT_TIMEOUT_MS = 14 * 60_000;
  */
 export const REPLAY_MARKS_MAX = 10_000;
 /**
+ * How long a flow delivery runs before the SDK hands off (`getRuntimeDeadline`). Workers end an
+ * invocation at its CPU limit (`limits.cpu_ms`, 300 s in the templates) long before the queue's
+ * attempt timeout, and replay is mostly CPU, so the SDK hands off well inside that.
+ */
+export const FLOW_DELIVERY_BUDGET_MS = 2 * 60_000;
+/**
  * Shard counts per epoch when `SHARD_EPOCHS` is unset. Queue shards: durability delivers one batch
  * per shard at a time, and a batch lasts as long as its slowest flow, so a long run holds up only
  * the runs on its own shard. Store shards: runs spread over warm objects instead of each paying to
