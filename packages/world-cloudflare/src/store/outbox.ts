@@ -57,7 +57,16 @@ export class Outbox {
   /** Marks exactly one row published. */
   publishSlot(runId: string, slot: number, kind: DispatchKind): void {
     assertSlot(slot, 1);
-    this.#publish(runId, kind, ['slot = ?'], [slot]);
+    // The row looks up its own event: `eventFilter` by kind alone reads every event of the run.
+    this.#qb.update({
+      tableName: 'dispatch_outbox',
+      data: { status: OutboxStatus.Published },
+      where: {
+        conditions: ['run_id = ?', 'slot = ?', 'status = ?',
+          'EXISTS (SELECT 1 FROM events WHERE events.run_id = dispatch_outbox.run_id AND events.slot = dispatch_outbox.slot AND events.kind = ?)'],
+        params: [runId, slot, OutboxStatus.Pending, kind],
+      },
+    }).execute();
   }
 
   /** Starts and wakes settle every earlier row too; steps and waits settle only their own row. */
