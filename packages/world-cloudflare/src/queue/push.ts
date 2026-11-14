@@ -1,4 +1,5 @@
 import { DurabilityRouting } from 'durability/routing';
+import { groupBy } from '../lib/group.js';
 import { objectOptions } from '../lib/shards.js';
 import { toWorldError } from '../lib/transient.js';
 import type { EnqueueRequest, EnqueueResult, WorldEnv } from '../types.js';
@@ -18,8 +19,7 @@ export function shardPusher(namespace: WorldEnv['QUEUE_SHARD']) {
     sharding: ({ shard }) => ({ shard, ...objectOptions() }),
   });
   return async function push(entries: { request: EnqueueRequest; shard: string }[]): Promise<EnqueueResult[]> {
-    const byShard = new Map<string, number[]>();
-    for (const [index, { shard }] of entries.entries()) byShard.set(shard, [...(byShard.get(shard) ?? []), index]);
+    const byShard = groupBy(entries.keys(), (index) => entries[index].shard);
     const results: EnqueueResult[] = entries.map(() => ({ error: 'Message was not enqueued' }));
     await Promise.all([...byShard].map(async ([shard, indexes]) => {
       const pushed = await shards.push({ shard, requests: indexes.map((index) => entries[index].request) }).catch((error: unknown) => {

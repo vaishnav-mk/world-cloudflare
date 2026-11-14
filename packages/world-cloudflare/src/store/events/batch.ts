@@ -30,7 +30,9 @@ export function checkBatch(events: readonly BatchEventRequest[], appends: boolea
   for (const { event } of events) {
     if (UNBATCHABLE.has(event.eventType)) throw new Error(`${event.eventType} cannot be batched`);
     if (!('correlationId' in event) || event.correlationId === undefined) continue;
-    byEntity.set(event.correlationId, [...(byEntity.get(event.correlationId) ?? []), event]);
+    const entity = byEntity.get(event.correlationId);
+    if (entity === undefined) byEntity.set(event.correlationId, [event]);
+    else entity.push(event);
   }
   for (const [correlationId, [first, second, ...rest]] of byEntity) {
     if (second === undefined) continue;
