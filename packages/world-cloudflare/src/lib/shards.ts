@@ -158,14 +158,21 @@ export function indexShardNames(): string[] {
   return epochs().flatMap(indexShardsIn);
 }
 
-/** The index shards a store's runs and hooks go to: its epoch's, or every epoch's for the legacy store. */
+/**
+ * The index shards a store's runs and hooks go to: its epoch's. The legacy store's runs predate
+ * sharding, and an epoch added later starts after its deploy, so they all fall in the first epoch.
+ */
 export function indexShardsOf(store: string): string[] {
-  return store === STORE_NAME ? indexShardNames() : indexShardsIn(epochNamed(store, 'store'));
+  return indexShardsIn(store === STORE_NAME ? epochs()[0] : epochNamed(store, 'store'));
 }
 
-/** How many stores feed index shard `name`: its epoch's store shards, and the legacy store. */
+/**
+ * How many stores feed index shard `name`: its epoch's store shards, and for the first epoch the
+ * legacy store. A later epoch must not wait for it: it backfilled before that epoch existed.
+ */
 export function indexSourceCount(name: string): number {
-  return epochNamed(name, 'index').store + 1;
+  const epoch = epochNamed(name, 'index');
+  return epoch.store + (epoch === epochs()[0] ? 1 : 0);
 }
 
 /** Whether `name` is a store that holds runs: a store shard or the legacy store, not an index shard. */

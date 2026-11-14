@@ -85,10 +85,11 @@ describe('shard epochs', () => {
   it('has each store report to the index shards it feeds, and each index shard count its stores', () => {
     expect(indexShardsOf('store-3')).toEqual(['index-0', 'index-1']);
     expect(indexShardsOf(`store-e${SECOND}-7`)).toEqual([`index-e${SECOND}-0`, `index-e${SECOND}-1`, `index-e${SECOND}-2`]);
-    expect(indexShardsOf('global')).toEqual(indexShardNames());
-    // An epoch's store shards and the legacy store.
+    // The legacy store's runs predate every epoch added later.
+    expect(indexShardsOf('global')).toEqual(['index-0', 'index-1']);
+    // An epoch's store shards, and for the first epoch the legacy store.
     expect(indexSourceCount('index-1')).toBe(5);
-    expect(indexSourceCount(`index-e${SECOND}-2`)).toBe(9);
+    expect(indexSourceCount(`index-e${SECOND}-2`)).toBe(8);
     expect(() => indexShardsOf('store-x')).toThrow();
   });
 
