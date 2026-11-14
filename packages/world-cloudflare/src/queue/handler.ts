@@ -51,6 +51,11 @@ export const createQueueHandler: Queue['createQueueHandler'] = (prefix, handler)
     return Response.json({ ok: true });
   } catch (error) {
     console.error('Workflow delivery failed', error);
-    return Response.json({ error: 'Delivery failed' }, { status: 500 });
+    // SDK world errors may cross realms; RetryableError's Date is not a queue retry floor.
+    const retryAfter = typeof error === 'object' && error !== null && 'retryAfter' in error ? error.retryAfter : undefined;
+    return Response.json({
+      error: 'Delivery failed',
+      ...(typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfter } : {}),
+    }, { status: 500 });
   }
 };

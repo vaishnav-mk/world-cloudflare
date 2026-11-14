@@ -44,7 +44,12 @@ export function createQueueConsumer(flow: FlowHandler): new (ctx: ExecutionConte
         const target = delivery.body.targetDeployment ?? this.env.DEPLOYMENT_ID;
         const response = await this.#runFlow(target, flowRequest(delivery, startedAt));
         if (!response.ok) {
-          return { kind: DeliveryResult.Failed, error: `Flow handler returned ${response.status}: ${await response.text()}` };
+          const failure: unknown = await response.clone().json().catch(() => undefined);
+          const retryAfter = typeof failure === 'object' && failure !== null && 'retryAfter' in failure ? failure.retryAfter : undefined;
+          return {
+            kind: DeliveryResult.Failed, error: `Flow handler returned ${response.status}: ${await response.text()}`,
+            ...(typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfter } : {}),
+          };
         }
         const { timeoutSeconds } = await response.json() as { timeoutSeconds?: unknown };
         const wake = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds >= 0;

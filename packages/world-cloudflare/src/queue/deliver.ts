@@ -1,6 +1,6 @@
 import { isSingleOrchestratorMessage } from '@workflow/world';
 import type { DurabilityFanoutMessage } from 'durability';
-import { DEFAULT_QUEUE_MAX_ATTEMPTS, DELIVERY_COUNT_RETENTION_MS, MAX_QUEUE_RETRY_DELAY_MS, REPLAY_MARKS_MAX } from '../constants.js';
+import { DEFAULT_QUEUE_MAX_ATTEMPTS, DELIVERY_COUNT_RETENTION_MS, MAX_QUEUE_RETRY_DELAY_MS, MAX_WAKE_SECONDS, REPLAY_MARKS_MAX } from '../constants.js';
 import { DeliveryResult } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { readPayload, replayOf } from '../lib/messages.js';
@@ -142,7 +142,8 @@ export class Deliverer {
           break;
         case DeliveryResult.Failed:
           console.error('Flow delivery failed', { messageId: delivery.id, attempt: delivery.attempt, error: outcome.error });
-          await message.retry(retryDelayMs(delivery.attempt));
+          // Cap requested waits at the queue's existing 23-hour wake limit, before converting to ms.
+          await message.retry(Math.max(retryDelayMs(delivery.attempt), Math.min(outcome.retryAfter ?? 0, MAX_WAKE_SECONDS) * 1000));
           break;
         default:
           unreachable(outcome);

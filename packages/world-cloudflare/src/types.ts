@@ -55,7 +55,7 @@ export type Envelope = {
 export type DeliveryOutcome =
   | { kind: DeliveryResult.Done }
   | { kind: DeliveryResult.Wake; seconds: number }
-  | { kind: DeliveryResult.Failed; error: string };
+  | { kind: DeliveryResult.Failed; error: string; /** Minimum retry delay in seconds. */ retryAfter?: number };
 
 /**
  * One message handed to `QueueConsumer.consume`. `id` is stable across redeliveries;
