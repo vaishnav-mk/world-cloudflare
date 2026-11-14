@@ -1,5 +1,5 @@
 // Runs `sequentialSteps` against a local `wrangler dev` and prints ms per step as the log grows,
-// from the events' own timestamps. See docs/limits.md#engines.
+// from the events' own timestamps. See docs/native-engine.md#limits.
 //
 //   pnpm exec wrangler dev --port 8811 --var WORLD_RPC_TOKEN:x --var WORKFLOW_VM:node \
 //     --var WORKFLOW_V2_TIMEOUT_MS:1800000
