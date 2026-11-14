@@ -251,6 +251,7 @@ export async function disposeForcedHook(
   });
   if (outcome === null) return null;
   if (outcome.journaled) store.waiters.wake(runId);
-  await store.feed.flush();
+  // The requester's run gate must not wait for the victim's eventual index update.
+  store.ctx.waitUntil(store.feed.flush());
   return outcome.claimedFrom;
 }

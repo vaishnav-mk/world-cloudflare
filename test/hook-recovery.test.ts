@@ -4,7 +4,7 @@ import { createWorld, type WorldEnv, type WorldStore } from '@workflow/world-clo
 import { START_HOOK_CANDIDATE_MAX_AGE_MS, startHookId } from '@workflow/world';
 import { newRunId } from './ids.js';
 import { HookNotFoundError } from '@workflow/errors';
-import type { HookClaimOperation } from '../packages/world-cloudflare/src/types.js';
+import type { HookClaimOperation, IndexBatch } from '../packages/world-cloudflare/src/types.js';
 import { StoreContext } from '../packages/world-cloudflare/src/store/context.js';
 import { STORE_NAME } from '../packages/world-cloudflare/src/constants.js';
 import { storeShardFor, tokenShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
@@ -141,6 +141,43 @@ describe('durable hook ownership', () => {
     expect(await free(firstToken)).toBe(true);
     expect(await world.hooks.getByToken(token)).toMatchObject({ runId: owner });
     expect((await world.events.list({ runId: owner })).data.at(-1)?.eventType).toBe('hook_created');
+  });
+
+  it('lets a forced requester cancel while the victim index push is paused', async () => {
+    const owner = await newRun();
+    let requester = await newRun();
+    while (storeShardFor(requester) === storeShardFor(owner)) requester = await newRun();
+    const token = awayFrom(owner, requester);
+    const original = await world.events.create(owner, hookCreated(token));
+    const entered = barrier();
+    const resume = barrier();
+    const stub = env.WORLD_STORE.getByName(storeShardFor(owner));
+    await stub.drainOutbox();
+    await runInDurableObject(stub, async (store, state) => {
+      const restore = intercept(store, 'indexChanges', async (peer, args) => {
+        entered.open();
+        await resume.reached;
+        return peer.indexChanges(args[0] as IndexBatch);
+      });
+      // The requester's gate must progress without the victim's index wait timeout firing.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const taking = world.events.create(requester, hookCreated(token, true));
+        await entered.reached;
+        expect(state.storage.sql.exec('SELECT hook_id FROM forced_disposals WHERE run_id = ?', owner).toArray())
+          .toEqual([{ hook_id: original.hook?.hookId }]);
+        expect(state.storage.sql.exec('SELECT id FROM hooks WHERE run_id = ?', owner).toArray()).toEqual([]);
+        expect((await world.events.create(requester, { eventType: 'run_cancelled' })).run?.status).toBe('cancelled');
+        expect((await taking).event?.eventType).toBe('hook_created');
+        expect(vi.getTimerCount()).toBeGreaterThan(0);
+      } finally {
+        resume.open();
+        await store.drainOutbox();
+        restore();
+        vi.useRealTimers();
+      }
+    });
+    expect(await free(token)).toBe(true);
   });
 
   it('does not accept a public hook creation retry after disposal and reset', async () => {
