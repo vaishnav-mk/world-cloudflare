@@ -111,7 +111,7 @@ To browse runs in the SDK's web UI, set `WORLD_RPC_TOKEN` on the Worker (`wrangl
 
 ## Limits
 
-Measured on Workers, with the objects and the load in one region. [Limits](docs/limits.md) compares them with Vercel's and gives the build of each.
+Measured on Workers, with objects and load generation configured with the same region hint. Placement is best-effort. [Limits](docs/limits.md) compares them with Vercel's and gives the build of each.
 
 - 4,220 runs created per second, over 100,000 runs. 10,000 parallel steps in one run in 69 s with QuickJS.
 - 30,000 sequential steps (90,003 events) in one run; the World sets no event cap. Replay after 10,000 steps took 185 ms with QuickJS and 3.9 s native.

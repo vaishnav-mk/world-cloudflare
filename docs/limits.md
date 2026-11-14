@@ -4,7 +4,7 @@ Measured numbers live here, and the other docs link to this page. Each number sa
 
 ## Compared with Vercel
 
-Vercel's column is its documented limits. This World's column was measured on Workers, on a deployment of `main` with `LOCATION_HINT` set so every object is in one region, and with load sent from Workers in that region.
+Vercel's column is its [documented limits](https://vercel.com/docs/workflows/pricing#workflow-run-limits), not a benchmark. Its 10,000-step and 25,000-event caps apply to the default Node runtime; QuickJS runs with snapshotting enabled are exempt from those two caps. This World's column was measured on Workers with `LOCATION_HINT` and load generated from Workers using the same region hint. A hint does not guarantee physical colocation or regional residency.
 
 | Limit | Vercel | This World | Build |
 | --- | --- | --- | --- |
@@ -18,7 +18,7 @@ Vercel's column is its documented limits. This World's column was measured on Wo
 
 - Over 100,000 runs, creation averaged 4,220 per second, with p50 latency 93 ms, p95 237 ms and no errors. On `adff891`, 20,000-run bursts ran at 3,376 to 4,225 per second with QuickJS, the node engine and spec 9, and every run completed with the right result.
 - The 30,000-step run used QuickJS and took 3,896 s. The SDK takes its event ceiling from the World's `run_started` result, and this World returns none.
-- Replay is the time from a sleep's end to the next step in a run of 10,000 steps (30,008 events). QuickJS restores a VM snapshot, which the SDK saves every 1,000 events; the node engine has none and replays the whole log.
+- Replay is the time from a sleep's end to the next step in a run of 10,000 steps (30,008 events). QuickJS restores a VM snapshot. Core saves at an eligible suspension after its default threshold of 1,000 processed events; the node engine has no snapshots and replays the log. The measured gap includes delivery and storage time, not just VM CPU.
 - One payload is the one row below Vercel. The limit is the 128 MB isolate's memory ([payloads](#payloads)). Larger data goes in byte streams, which carry 1 GiB and more ([streams](#streams)).
 - Parallel steps: with QuickJS, 1,000 took 13 s, 5,000 took 41 s and 10,000 took 69 s; at 20,000 the run's store ran out of memory and three steps failed after their retries. At the first fan-out the store writes a turn's `step_created` events and publishes in batches, which keeps its memory near 60 MiB for 5,000 steps (locally) instead of growing past the 128 MB isolate; before that, 5,000 steps took 683 s and 10,000 never started (`845c1ec`). The node engine finished 1,000 in 14 s and 2,000 in 22 s; its last replay needs memory that grows with the square of the step count, which is in core, so 3,000 and more run it out of memory.
 - The chunk cap is `STREAM_CHUNK_MAX_BYTES`. 1 GiB in 32 MiB chunks completed with every byte checked, at 12 MiB/s with QuickJS and 18 to 20 MiB/s native.
@@ -56,7 +56,7 @@ A reading step on SDK 5.5.0 grows by about 40 MiB per GiB it reads, with either 
 
 A run's ULID time picks its [shard epoch](../packages/world-cloudflare/README.md#shards-and-epochs), and its ID picks a store shard and a queue shard in that epoch. A new Durable Object is slow on its first call, about 1.7 s (Workers, `3fdbf00`), so more shards than the load needs means more cold calls. To add capacity, append an epoch; never change an existing one.
 
-A Durable Object is created near its first caller and stays there. Without `LOCATION_HINT`, objects first reached from different places can end up far apart: a run whose store and runner were apart took about 170 ms per event write, where 8 to 27 ms is usual (Workers, the build before `2ada977`). With `LOCATION_HINT`, the World creates its objects in that region. A region spans several data centers, so a run's store creates the run's runner itself, without the hint, before it publishes the run's start, and the runner is created next to the store. With `LOCATION_HINT=enam`, runs whose runner and store were in different data centers took 105 to 140 ms per step, and runs with both in one took about 70 ms (Workers, the build before `28b3063`). The hint places only new objects, so set it before the first run or add an epoch.
+A Durable Object's initial placement normally favors its first caller; placement and later migration are platform decisions. Without `LOCATION_HINT`, objects first reached from different places can end up far apart: a run whose store and runner were apart took about 170 ms per event write, where 8 to 27 ms is usual (Workers, the build before `2ada977`). With `LOCATION_HINT`, the World requests placement in that region for newly created objects. A region spans several data centers, so a run's store first touches its shared workflow runner without the hint before publishing the start, favoring proximity without guaranteeing colocation. With `LOCATION_HINT=enam`, runs whose runner and store were in different data centers took 105 to 140 ms per step, and runs with both in one took about 70 ms (Workers, the build before `28b3063`). The hint places only new objects, so set it before the first run or add an epoch.
 
 ## Subrequest depth
 
