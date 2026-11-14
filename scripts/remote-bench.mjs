@@ -16,20 +16,21 @@ const matrix = process.argv.length > 2
   ? process.argv.slice(2).map((arg) => { const [name, value] = arg.split(':'); return [name, Number(value)]; })
   : [['sequentialSteps', 2000], ['replayAfterSteps', 2000], ['replayAfterSteps', 10000]];
 
-async function call(path, init = {}) {
-  let response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(120_000) });
+async function call(path, init = {}, timeoutMs = 120_000) {
+  let response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   // A busy store answers 503 with retry-after; a read can wait it out. A write is not retried, as it may have landed.
   for (let tries = 0; response.status === 503 && (init.method ?? 'GET') === 'GET' && tries < 120; tries++) {
     await response.text();
     await sleep(Number(response.headers.get('retry-after') ?? 1) * 1000);
-    response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(120_000) });
+    response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   }
   if (!response.ok) throw new Error(`${path}: HTTP ${response.status} ${(await response.text()).slice(0, 200)}`);
   return response;
 }
 
 async function events(runId) {
-  const text = await (await call(`/runs/${runId}/events`)).text();
+  // A 30,000-step run's 90,000 events are about 40 MB, which takes minutes to stream.
+  const text = await (await call(`/runs/${runId}/events`, {}, 1_800_000)).text();
   return text.split('\n\n').filter((block) => block.includes('event: ')).map((block) => {
     const type = block.match(/^event: (.+)$/m)[1];
     const { createdAt } = JSON.parse(block.match(/^data: (.+)$/m)[1]);
@@ -42,7 +43,7 @@ for (const [name, value] of matrix) {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, value }),
   })).json();
   let run;
-  for (const deadline = Date.now() + 3_600_000; Date.now() < deadline;) {
+  for (const deadline = Date.now() + 4 * 3_600_000; Date.now() < deadline;) {
     run = await (await call(`/runs/${runId}`)).json();
     if (TERMINAL.has(run.status)) break;
     await sleep(2_000);
