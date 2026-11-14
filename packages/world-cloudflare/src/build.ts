@@ -103,14 +103,18 @@ const workflowCode = ${JSON.stringify(code)};
 registerWorkflowBundle(workflowCode, ${JSON.stringify(SHADOWED_GLOBALS)}, function (globalThis, __workflowImport, ${SHADOWED_GLOBALS.join(', ')}) {
 ${factory}
 });
-export const POST = workflowEntrypoint(workflowCode${createWorkflowEntrypointOptionsCode({ routeModuleBodyStartedAt: 'workflowRouteModuleBodyStartedAt' })});
+export const createFlow = () => workflowEntrypoint(workflowCode${createWorkflowEntrypointOptionsCode({ routeModuleBodyStartedAt: 'workflowRouteModuleBodyStartedAt' })});
 `);
     // The SDK loads on the first delivery rather than at startup: it keeps startup short, and
     // \`workflow/runtime\` 5.5.0 draws a random ID as it loads, which Workers forbid at startup.
+    // Each request gets an SDK route of its own. With \`capabilities.invoke\`, a route joins a later
+    // delivery of a run to the run's execution in progress, and an execution a reset cut off never
+    // settles, so a shared route would hang the run's next deliveries. Runners serialize a run's
+    // deliveries instead.
     await writeFile(flowSource, `let route;
 export const POST = async (request) => {
   route ??= Promise.all([import('./${STEPS}.mjs'), import(${JSON.stringify(routeSource)})]).then(([, route]) => route);
-  return (await route).POST(request);
+  return (await route).createFlow()(request);
 };
 `);
     const result = await esbuild.build({
