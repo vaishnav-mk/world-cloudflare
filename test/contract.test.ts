@@ -75,6 +75,14 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.events.list({ runId })).data.map((event) => event.eventId)).toEqual(
       [1, 2, 3, 4].map(slotToEventId),
     );
+    // A write's eventCursor resumes an ascending list just after its event, which the list returns as written.
+    expect(since.eventCursor).toBe(since.cursor);
+    const fromStale = await world.events.list({ runId, pagination: { cursor: stale.eventCursor } });
+    expect(fromStale.data.map((event) => event.eventId)).toEqual([slotToEventId(4)]);
+    expect((await world.events.list({ runId })).data[2]).toEqual(stale.event);
+    expect((await world.events.create(runId, { eventType: 'attr_set', eventData: {
+      changes: [{ key: 'k', value: 'v' }], writer: { type: 'workflow' },
+    } }, { resolveData: 'none' })).eventCursor).toBeUndefined();
   });
 
   it('gets one event by ID, with or without its payload', async () => {

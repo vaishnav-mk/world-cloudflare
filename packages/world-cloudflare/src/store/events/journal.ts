@@ -3,7 +3,7 @@ import {
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult,
 } from '@workflow/world';
 import { SINCE_CURSOR_LIMIT } from '../../constants.js';
-import { ChangeKind, EventType, SortOrder } from '../../enums.js';
+import { ChangeKind, EventType, ResolveData, SortOrder } from '../../enums.js';
 import { encode } from '../../lib/codec.js';
 import { mintSpecVersion } from '../../lib/spec.js';
 import type { Db } from '../db.js';
@@ -72,6 +72,9 @@ export function eventResult(db: Db, event: Event, change: Change, params: Create
   const reportsRun = event.eventType.startsWith('run_') || event.eventType === EventType.AttrSet;
   const result: EventResult = {
     event,
+    // Where an ascending list resumes after this event. Only where the list would return this very
+    // event: `none` and `skip-step-inputs` reads leave payloads out.
+    ...(params.resolveData === undefined || params.resolveData === ResolveData.All ? { eventCursor: `eid:${event.eventId}` } : {}),
     allocated,
     ...(reportsRun ? { run: change.run } : {}),
     ...entitiesOf(change),
