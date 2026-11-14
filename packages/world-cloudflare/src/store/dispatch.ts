@@ -30,6 +30,9 @@ type Plan =
     stillOwed: () => boolean;
   };
 
+/** A due row to publish, with its plan. */
+type Send = { row: OutboxRow } & Omit<Extract<Plan, { action: DispatchAction.Publish }>, 'action'>;
+
 const SETTLE = { action: DispatchAction.Settle } as const;
 const POSTPONE = { action: DispatchAction.Postpone } as const;
 
@@ -186,8 +189,8 @@ function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
   const runStatus = run?.status;
   switch (row.kind) {
     case EventType.RunCreated:
-      if (runStatus !== RunStatus.Pending) return SETTLE;
-      return { action: DispatchAction.Publish, message: wakeMessage(row, 'run-start', run?.specVersion), stillOwed: () => true };
+      if (run?.status !== RunStatus.Pending) return SETTLE;
+      return { action: DispatchAction.Publish, message: wakeMessage(row, 'run-start', run.specVersion), stillOwed: () => true };
     case EventType.HookReceived:
       return { action: DispatchAction.Publish, message: wakeMessage(row, 'hook-wake', run?.specVersion), stillOwed: () => true };
     case EventType.StepCreated: {
@@ -214,7 +217,6 @@ function planFor(db: Db, outbox: Outbox, row: OutboxRow): Plan {
   }
 }
 
-type Send = { row: OutboxRow; message: Message; stillOwed: () => boolean };
 
 async function publish(store: StoreContext, sends: Send[]): Promise<void> {
   const prepared = await Promise.all(sends.map(async ({ row, message, stillOwed }) => {
