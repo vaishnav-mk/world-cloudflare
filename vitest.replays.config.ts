@@ -10,5 +10,6 @@ export default defineConfig({
     miniflare: { bindings: { REPLAY_COUNTS: process.env.REPLAY_COUNTS ?? '200,1000' } },
   })],
   resolve: { alias: workerAliases },
+  ssr: { resolve: { conditions: ['worlds-source'] } },
   test: { include: ['test/replays.test.ts'], testTimeout: 660_000 },
 });

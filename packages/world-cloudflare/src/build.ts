@@ -2,7 +2,7 @@
  * `@workflow/world-cloudflare/build`: compiles a project's workflows for a Worker with the published
  * `@workflow/builders`. Runs in Node before `wrangler dev` or `wrangler deploy`:
  *
- *   node node_modules/@workflow/world-cloudflare/src/build.ts [dir...]
+ *   node node_modules/@workflow/world-cloudflare/dist/build.js [dir...]
  *
  * Writes to `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handler;
  * `__step_registrations.mjs`, the steps, which `flow.mjs` imports (two modules keep each under the
@@ -59,8 +59,9 @@ const SHADOWED_GLOBALS = [
   'BroadcastChannel', 'require', 'module', 'exports', '__filename', '__dirname',
 ];
 
+// Siblings in `dist`: the build runs compiled, and bundles the compiled shims.
 const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
-const VM_SHIM = here('./vm.ts');
+const VM_SHIM = here('./vm.js');
 const OUT_DIR = '.well-known/workflow/v1';
 const STEPS = '__step_registrations';
 
@@ -70,8 +71,8 @@ const STEPS = '__step_registrations';
  * (`workflow/api`): as `alias` in the Wrangler config, and as Vite `resolve.alias` in the vitest config.
  */
 export const workerAliases = [
-  { find: /^@workflow\/world-(local|vercel)$/, replacement: here('./stubs/world.ts') },
-  { find: /^@vercel\/functions$/, replacement: here('./stubs/vercel-functions.ts') },
+  { find: /^@workflow\/world-(local|vercel)$/, replacement: here('./stubs/world.js') },
+  { find: /^@vercel\/functions$/, replacement: here('./stubs/vercel-functions.js') },
 ];
 
 class WorkersBuilder extends BaseBuilder {

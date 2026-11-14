@@ -5,16 +5,34 @@
   "description": "Workflow SDK World on Cloudflare Durable Objects",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./build": "./src/build.ts",
-    "./stubs/*": "./src/stubs/*.ts",
+    ".": {
+      "worlds-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./build": {
+      "types": "./dist/build.d.ts",
+      "default": "./dist/build.js"
+    },
+    "./stubs/*": {
+      "types": "./dist/stubs/*.d.ts",
+      "default": "./dist/stubs/*.js"
+    },
     "./remote": {
-      "types": "./src/remote/client.ts",
+      "types": "./dist/remote/client.d.ts",
       "default": "./dist/remote/client.js"
     }
   },
+  "files": [
+    "dist",
+    "src",
+    "drizzle/*/migrations.js",
+    "drizzle/*/*.sql",
+    "drizzle/*/meta/_journal.json"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.remote.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
     "db:generate": "drizzle-kit generate --config drizzle/store.config.ts && drizzle-kit generate --config drizzle/queue.config.ts && drizzle-kit generate --config drizzle/streams.config.ts"
   },
   "dependencies": {
