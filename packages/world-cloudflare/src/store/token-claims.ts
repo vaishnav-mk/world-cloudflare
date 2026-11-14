@@ -5,6 +5,7 @@ import {
 } from '@workflow/world';
 import { DISPATCH_RECOVERY_DELAY_MS, MAX_START_HOOK_RETENTION_MS, STORE_NAME } from '../constants.js';
 import { EventType, TokenClaim } from '../enums.js';
+import { sha256Hex } from '../lib/hash.js';
 import { storeShardFor, tokenShardFor } from '../lib/shards.js';
 import { mintSpecVersion } from '../lib/spec.js';
 import type { HookClaimIntent } from '../types.js';
@@ -78,32 +79,33 @@ export function preflight(store: StoreContext, runId: string, data: AnyEventRequ
 export async function finishIntent(store: StoreContext, intent: HookClaimIntent): Promise<EventResult> {
   const { operation, request, params, expiresAt } = intent;
   const { hook } = operation;
+  const completed = expiresAt === undefined ? true : await sha256Hex(hook.token);
   const shard = store.peer(tokenShardFor(hook.token));
   if (expiresAt !== undefined && Date.now() > expiresAt) {
     // A cancellation receipt precedes the conditional release, including claims delayed in transit.
     await shard.cancelAcceptedHook(operation);
     store.ctx.storage.transactionSync(() => {
       store.releases.owe(hook, true);
-      store.intents.complete(intent);
+      store.intents.complete(intent, completed);
     });
     throw rejected(`Start Hook candidate ${hook.runId} is too old to be created`, 'expired');
   }
   const tokens = await shard.claimAcceptedHook(operation);
   if (tokens.kind === TokenClaim.Rejected) {
-    store.intents.complete(intent);
+    store.intents.complete(intent, completed);
     throw new EntityConflictError(`Hook ${hook.hookId} already exists`);
   }
   if (request.eventType !== EventType.HookCreated && tokens.kind !== TokenClaim.Granted) {
     if (tokens.kind !== TokenClaim.Held && tokens.kind !== TokenClaim.Refused) throw new Error('Expected a token decision');
     store.ctx.storage.transactionSync(() => {
       store.db.insertStartHookRefusal(hook.runId, hook.token, tokens.holderRunId);
-      store.intents.complete(intent);
+      store.intents.complete(intent, completed);
     });
     throw new HookConflictError(hook.token, tokens.holderRunId);
   }
   return store.ctx.storage.transactionSync(() => {
     const result = applyEvent(store.db, store.outbox, store.releases, store.index, tokens, hook.runId, request, params);
-    store.intents.complete(intent);
+    store.intents.complete(intent, completed);
     return result;
   });
 }

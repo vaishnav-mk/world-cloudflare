@@ -214,15 +214,16 @@ export async function disposeForcedHook(
 ): Promise<HookClaimedFrom | null> {
   const { db } = store;
   if (store.isLegacy) refuseRunCopy(db, runId);
+  const tokenDigest = isStartHookId(runId, hookId) ? await sha256Hex(token) : null;
   const outcome = store.ctx.storage.transactionSync(() => {
     const run = db.findRun(runId);
     if (run === undefined) {
       const pending = store.intents.find(runId);
       const candidate = pending?.expiresAt === undefined ? undefined : pending.operation.hook;
-      // SAFETY: complete retains only an admitted start candidate's token at this key.
+      // SAFETY: complete stores a token digest for admitted start candidates, true for other hooks.
       const completed = store.ctx.storage.kv.get<true | string>(`hook-completed:${hookId}`);
       if ((!store.isLegacy && storeShardFor(runId) !== store.name) || !isStartHookId(runId, hookId)
-        || (!(candidate?.runId === runId && candidate.hookId === hookId && candidate.token === token) && completed !== token)) {
+        || (!(candidate?.runId === runId && candidate.hookId === hookId && candidate.token === token) && completed !== tokenDigest)) {
         throw new WorkflowRunNotFoundError(runId);
       }
       if (candidate !== undefined && (candidate.specVersion ?? SPEC_VERSION_LEGACY) < SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM) return null;

@@ -39,10 +39,9 @@ export class HookClaimIntents {
     this.kv.put(`hook-intent:${operation.id}`, intent.digest);
   }
 
-  complete(intent: HookClaimIntent): void {
-    // Public retries carry a hook ID, not the internal operation ID. Never admit them as a new acquisition.
-    // A delayed disposal still needs exact token identity after an expired start intent is gone.
-    this.kv.put(`hook-completed:${intent.operation.hook.hookId}`, intent.expiresAt === undefined ? true : intent.operation.hook.token);
+  complete(intent: HookClaimIntent, completed: true | string): void {
+    // Public retries carry a hook ID; absent start candidates also need a bounded token identity proof.
+    this.kv.put(`hook-completed:${intent.operation.hook.hookId}`, completed);
     this.#qb.delete({ tableName: 'hook_claim_intents', where: {
       conditions: 'operation_id = ?', params: [intent.operation.id],
     } }).execute();

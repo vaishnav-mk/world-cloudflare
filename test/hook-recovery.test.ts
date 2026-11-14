@@ -96,6 +96,17 @@ describe('durable hook ownership', () => {
     });
   });
 
+  it('retains only a digest of a large start token after completion', async () => {
+    const token = `${crypto.randomUUID()}${'x'.repeat(140_000)}`;
+    const { run } = await world.events.create(null, { eventType: 'run_created', specVersion: 9, eventData: {
+      deploymentId: 'test-v1', workflowName: 'large-start-token', input: bytes, startHook: { token },
+    } });
+    expect(await world.hooks.getByToken(token)).toMatchObject({ runId: run.runId });
+    await runInDurableObject(env.WORLD_STORE.getByName(storeShardFor(run.runId)), (_store, state) => {
+      expect(state.storage.kv.get(`hook-completed:${startHookId(run.runId)}`)).toMatch(/^[0-9a-f]{64}$/);
+    });
+  });
+
   it('validates requester parameters and reserves hook IDs before remote disposal', async () => {
     const owner = await newRun();
     const requester = await newRun();
