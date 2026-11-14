@@ -149,6 +149,28 @@ it('streams bytes through streams.get', async () => {
   expect(text).toBe('ab');
 });
 
+it('keeps an octet-stream payload intact even when its bytes look like an RPC error', async () => {
+  const remote = remoteWorld();
+  const runId = `wrun_${crypto.randomUUID()}`;
+  const payload = encode({ ok: false, error: { name: 'Error', message: 'application data', props: {} } });
+  await remote.streams.write(runId, 'out', bytes(payload));
+  await remote.streams.close(runId, 'out');
+  expect(await new Response(await remote.streams.get(runId, 'out')).text()).toBe(payload);
+});
+
+it('rejects streams.get with the backend SDK error instead of returning its envelope as bytes', async () => {
+  const runId = 'wrun_missing_stream';
+  const remote = remoteWorld(TOKEN, {
+    ...world,
+    streams: { ...world.streams, get: async () => { throw new WorkflowRunNotFoundError(runId); } },
+  });
+  const result = remote.streams.get(runId, 'out');
+  await expect(result).rejects.toBeInstanceOf(WorkflowRunNotFoundError);
+  const error: unknown = await result.catch((error: unknown) => error);
+  expect(WorkflowRunNotFoundError.is(error)).toBe(true);
+  expect(error).toMatchObject({ runId });
+});
+
 it('saves, loads and deletes snapshots with their metadata', async () => {
   const remote = remoteWorld();
   const runId = `wrun_${crypto.randomUUID()}`;

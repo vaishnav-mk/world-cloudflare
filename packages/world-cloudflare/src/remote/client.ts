@@ -74,7 +74,13 @@ export function createWorld(options: { url?: string; token?: string } = {}): Wor
       list: call(RpcMethod.StreamsList),
       getChunks: call(RpcMethod.StreamsGetChunks),
       getInfo: call(RpcMethod.StreamsGetInfo),
-      get: async (...args: unknown[]) => (await post(RpcMethod.StreamsGet, args)).body,
+      get: async (...args: unknown[]) => {
+        const response = await post(RpcMethod.StreamsGet, args);
+        if (response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() === 'application/octet-stream') return response.body;
+        const result = decodeResult(await response.text());
+        if (!result.ok) throw rebuild(result.error);
+        throw new TypeError('Expected an application/octet-stream World RPC response');
+      },
     },
     experimental_snapshots: {
       save: call(RpcMethod.SnapshotsSave),
