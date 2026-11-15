@@ -32,7 +32,7 @@ What is missing is optional and off the runtime's path: `describeRun`, `analytic
 | `experimental_queueHold` | Missing | Partly | queue | `@workflow/world` 5.2.0 has no such capability and its runtime never asks for a hold, so it is not declared; `queue()` still takes `experimental_hold` ([Queue](#queue)) |
 | `deploymentAffinity` | Missing | Built | contract, e2e lanes | A deployment ID names one release, run by this Worker or its retained executor, so the runtime's guard sends a misrouted delivery back to its run's deployment |
 | `dynamicWorkflowCode` | Partly | Built | contract, e2e | Before, inline code was stored but not declared and a code ref threw. Now inline or uploaded code is stored with the run; see `uploadDynamicWorkflowCode` |
-| `invoke` | N/A | Built | e2e, queue | Vercel does not declare it. A run's workflow deliveries and invocations reach its one `Runner`, which runs the deliveries one at a time and the invocations beside them ([runners](../packages/world-cloudflare/README.md#runners)) |
+| `invoke` | N/A | Built | e2e, queue | Vercel does not declare it. A run's workflow deliveries and invocations reach its one `Runner`, which runs the deliveries one at a time and the invocations beside them ([runners](https://world-cloudflare.vaishnav.one/docs/services#runners)) |
 
 ## Storage
 

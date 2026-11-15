@@ -111,7 +111,7 @@ An oversized invocation can be redelivered and hit the memory limit again. So th
 
 ## Streams
 
-A step that returns a `ReadableStream` of `type: 'bytes'` passes a handle, and the next step reads the bytes from the run's stream ([example](../packages/world-cloudflare/README.md#payloads-and-streams)). Chunks over 1 MiB go to R2 one at a time, so a stream can be far larger than memory.
+A step that returns a `ReadableStream` of `type: 'bytes'` passes a handle, and the next step reads the bytes from the run's stream ([example](../workflows/limits.ts#L140-L162)). Chunks over 1 MiB go to R2 one at a time, so a stream can be far larger than memory.
 
 The writing isolate holds a few chunks at once: the one being stored and the next one its stream fills. Historical 64 MiB producer chunks exhausted both engines (`e888166`); 32 MiB producer chunks worked (`adff891`). The enforced World cap is 32 MiB of encoded chunk data, rejected with fatal 413 above it. This is not a blanket 32 MiB raw `getWritable` allowance: that probe's base64/framing allows 25,165,800 raw bytes at `8cddcbd`.
 
@@ -121,7 +121,7 @@ A reading step on SDK 5.5.0 grows by about 40 MiB per GiB it reads, with either 
 
 ## Shards and placement
 
-A run's ULID time picks its [shard epoch](../packages/world-cloudflare/README.md#shards-and-epochs), and its ID picks a store shard and a queue shard in that epoch. A new Durable Object is slow on its first call, about 1.7 s (Workers, `3fdbf00`), so more shards than the load needs means more cold calls. To add capacity, append an epoch; never change an existing one.
+A run's ULID time picks its [shard epoch](https://world-cloudflare.vaishnav.one/docs/scaling#routing), and its ID picks a store shard and a queue shard in that epoch. A new Durable Object is slow on its first call, about 1.7 s (Workers, `3fdbf00`), so more shards than the load needs means more cold calls. To add capacity, append an epoch; never change an existing one.
 
 A Durable Object's initial placement normally favors its first caller; placement and later migration are platform decisions. Without `LOCATION_HINT`, objects first reached from different places can end up far apart: a run whose store and runner were apart took about 170 ms per event write, where 8 to 27 ms is usual (Workers, the build before `2ada977`). With `LOCATION_HINT`, the World requests placement in that region for newly created objects. A region spans several data centers, so a run's store first touches its shared workflow runner without the hint before publishing the start, favoring proximity without guaranteeing colocation. With `LOCATION_HINT=enam`, runs whose runner and store were in different data centers took 105 to 140 ms per step, and runs with both in one took about 70 ms (Workers, the build before `28b3063`). The hint places only new objects, so set it before the first run or add an epoch.
 
