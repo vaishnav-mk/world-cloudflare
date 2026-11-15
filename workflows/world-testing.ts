@@ -1,5 +1,7 @@
-// The workflows of the SDK's `@workflow/world-testing` suite, which runs them against a World in a
-// Node server. This World runs in workerd, so `test/world-testing.test.ts` runs them here instead.
+// Derived from the workflows of `@workflow/world-testing` in https://github.com/vercel/workflow,
+// licensed under Apache-2.0. Modified to run in workerd.
+// The SDK's suite runs them against a World in a Node server. This World runs in workerd, so
+// `test/world-testing.test.ts` runs them here instead.
 import { createHook, FatalError, getStepMetadata, getWritable, RetryableError, sleep } from 'workflow';
 
 async function add(num: number, num2: number): Promise<number> {

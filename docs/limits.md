@@ -67,25 +67,25 @@ Every returned run ID completed with zero failed, wrong or unfinished results in
 
 The paced jobs did not produce their nominal global rates: leaf startup and request latency spread admissions. They lasted roughly 33 to 40 seconds, not hours. The non-monotonic 503s, readback load and finite duration prevent calling any row an absolute or sustained throughput ceiling. No production load, disk-filling test or all-region capacity test was performed.
 
-## Compared with Vercel
+## Summary
 
-Vercel's column is its [documented limits](https://vercel.com/docs/workflows/pricing#workflow-run-limits), not a benchmark. Its 10,000-step and 25,000-event caps apply to the default Node runtime; QuickJS runs with snapshotting enabled are exempt from those two caps. This World's column was measured on Workers with `LOCATION_HINT` and load generated from Workers using the same region hint. A hint does not guarantee physical colocation or regional residency.
+Measured on Workers with `LOCATION_HINT` and load generated from Workers using the same region hint. A hint does not guarantee physical colocation or regional residency. These figures describe this World only; no other system was load-tested. Vercel documents the limits of its own World [separately](https://vercel.com/docs/workflows/pricing#workflow-run-limits).
 
-| Limit | Vercel | This World | Build |
-| --- | --- | --- | --- |
-| Run creations | 1,000 per second | 5,082 per second in a 100,000-run burst | `8cddcbd` |
-| Steps per run | 10,000 | 30,000 sequential steps completed | `adff891` |
-| Events per run | 25,000 | 90,003 in that run; the World sets no cap | `adff891` |
-| Replay after 10,000 steps | 240 s budget | 185 ms with QuickJS, 3.9 s native | `adff891` |
-| One payload | 50 MB | 18 MiB serialized cap; 18,790,000-byte raw step output demonstrated | `8cddcbd` |
-| One stream chunk | 10 MB | 32 MiB encoded World cap; SDK framing differs by stream type | `8cddcbd` |
-| Parallel steps in one run | Not documented | 30,000 in 269.4 s QuickJS; 2,500 in 28.5 s native | `8cddcbd` |
+| Quantity | This World | Build |
+| --- | --- | --- |
+| Run creations | 5,082 per second in a 100,000-run burst | `8cddcbd` |
+| Steps per run | 30,000 sequential steps completed | `adff891` |
+| Events per run | 90,003 in that run; the World sets no cap | `adff891` |
+| Replay after 10,000 steps | 185 ms with QuickJS, 3.9 s native | `adff891` |
+| One payload | 18 MiB serialized cap; 18,790,000-byte raw step output demonstrated | `8cddcbd` |
+| One stream chunk | 32 MiB encoded World cap; SDK framing differs by stream type | `8cddcbd` |
+| Parallel steps in one run | 30,000 in 269.4 s QuickJS; 2,500 in 28.5 s native | `8cddcbd` |
 
 - Historically, on `4ceac87`, creation over 100,000 runs averaged 4,220 per second, with p50 latency 93 ms, p95 237 ms and no errors. On `adff891`, 20,000-run bursts ran at 3,376 to 4,225 per second with QuickJS, the node engine and spec 9, and every run completed with the right result.
 - The 30,000-step run used QuickJS and took 3,896 s. The SDK takes its event ceiling from the World's `run_started` result, and this World returns none.
 - Replay is the time from a sleep's end to the next step in a run of 10,000 steps (30,008 events). QuickJS restores a VM snapshot. Core saves at an eligible suspension after its default threshold of 1,000 processed events; the node engine has no snapshots and replays the log. The measured gap includes delivery and storage time, not just VM CPU.
-- The payload allowance is lower than Vercel's documented value. We enforce a serialized cap to stay inside the isolate memory budget ([payloads](#payloads)). Streams carry larger data, subject to the SDK reader's retained memory ([streams](#streams)).
-- Historical parallel-step measurements on `3e5bab2`: with QuickJS, 1,000 took 13 s, 5,000 took 41 s and 10,000 took 69 s; at 20,000 the run's store ran out of memory and three steps failed after their retries. At the first fan-out the store writes a turn's `step_created` events and publishes in batches, which keeps its memory near 60 MiB for 5,000 steps (locally) instead of growing past the 128 MB isolate; before that, 5,000 steps took 683 s and 10,000 never started (`845c1ec`). The node engine finished 1,000 in 14 s and 2,000 in 22 s; its last replay needs memory that grows with the square of the step count, which is in core, so 3,000 and more run it out of memory.
+- We enforce a serialized payload cap to stay inside the isolate memory budget ([payloads](#payloads)). Streams carry larger data, subject to the SDK reader's retained memory ([streams](#streams)).
+- Historical parallel-step measurements on `3e5bab2`: with QuickJS, 1,000 took 13 s, 5,000 took 41 s and 10,000 took 69 s; at 20,000 the run's store ran out of memory and three steps failed after their retries. At the first fan-out the store writes a turn's `step_created` events and publishes in batches, which keeps its memory near 60 MiB for 5,000 steps (locally) instead of growing past the 128 MB isolate; before that, 5,000 steps took 683 s and 10,000 never started (`845c1ec`). The node engine finished 1,000 in 14 s and 2,000 in 22 s; its last replay showed roughly quadratic memory growth with the step count, so 3,000 and more ran out of memory.
 - The encoded chunk cap is `STREAM_CHUNK_MAX_BYTES`. Historically, on `adff891`, 1 GiB in 32 MiB producer chunks completed with every byte checked, at 12 MiB/s with QuickJS and 18 to 20 MiB/s native.
 
 ## How to measure

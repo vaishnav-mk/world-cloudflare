@@ -1,4 +1,6 @@
-// The scenarios of the SDK's `@workflow/world-testing` suite. It drives a World inside a Node server it
+// Derived from the scenarios of `@workflow/world-testing` in https://github.com/vercel/workflow,
+// licensed under Apache-2.0. Modified to run in workerd.
+// The SDK's suite drives a World inside a Node server it
 // spawns, which cannot host a World bound to Durable Objects, so they run here with real SDK runs in
 // workerd. The in-band fence and atomic start Hook checks run as the SDK's own suites, in
 // `test/conformance.test.ts`. Left out: its flow-invocation counts, which read world-local's queue, and

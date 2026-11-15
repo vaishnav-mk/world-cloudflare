@@ -176,7 +176,7 @@ describe('durability fanout', () => {
     expect(afterDelivery.messageId).toBe(first.messageId);
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect((await env.SINK.getByName('sink').received()).filter((id) => id === first.messageId)).toHaveLength(1);
-    // Vercel accepts a repeated key even when its retry payload differs; only the first is delivered.
+    // A repeated key is accepted even when its retry payload differs, matching world-vercel's queue; only the first is delivered.
     expect((await queue.queue(queueName, { runId: 'dedup', requestedAt: new Date() }, opts)).messageId).toBe(first.messageId);
     expect((await env.SINK.getByName('sink').received()).filter((id) => id === first.messageId)).toHaveLength(1);
   });

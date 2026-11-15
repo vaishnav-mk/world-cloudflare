@@ -2,7 +2,7 @@
 
 The SDK's `node` engine (`WORKFLOW_VM=node`, or `WORKFLOW_VM` unset) runs `"use workflow"` code natively in V8, where the `quickjs` engine interprets it in a WebAssembly build of QuickJS. On Node the engine uses `node:vm`; on Workers it runs on `vm.ts`, a `node:vm` that the World's build provides, so it needs no SDK changes. The Wrangler templates default to QuickJS. The engine is stamped on each run when it starts, so existing runs keep theirs when the variable changes.
 
-[Limits](limits.md#compared-with-vercel) has the measurements against QuickJS.
+[Limits](limits.md#summary) has the node engine and QuickJS measurements.
 
 ## Why a shim
 

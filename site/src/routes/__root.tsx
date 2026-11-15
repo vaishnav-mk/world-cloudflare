@@ -8,7 +8,7 @@ export const Route = createRootRoute({
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
       { title: 'World for Cloudflare · Architecture docs' },
-      { name: 'description', content: 'How a Workflow SDK World stores, delivers and runs durable workflows on Cloudflare Workers. Architecture, request walkthroughs and a source-based Vercel comparison.' },
+      { name: 'description', content: 'How a Workflow SDK World stores, delivers and runs durable workflows on Cloudflare Workers. Architecture, request walkthroughs, operations and measurements.' },
       { name: 'theme-color', content: '#f9f8f7' },
     ],
     links: [{ rel: 'stylesheet', href: stylesheet }, { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' }],
