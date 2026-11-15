@@ -1,0 +1,6 @@
+World for Cloudflare
+
+This project includes files derived from the Workflow SDK
+(https://github.com/vercel/workflow), Copyright 2025 Vercel Inc.,
+licensed under the Apache License, Version 2.0. Derived files say so
+in their header comments and were modified to run in workerd.

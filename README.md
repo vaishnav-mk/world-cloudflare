@@ -79,3 +79,7 @@ pnpm run test:e2e
 - [Measurements and limits](https://world-cloudflare.vaishnav.one/docs/benchmarks) and [how Vercel's World differs](https://world-cloudflare.vaishnav.one/docs/vercel).
 
 In this repo: [package configuration](packages/world-cloudflare/README.md), [SDK web UI client](packages/world-cloudflare/README.md#remote-client), [Hook upgrade procedure](docs/hook-ownership.md), [SDK contract coverage](docs/contract-parity.md) and [schema migrations](packages/world-cloudflare/drizzle/README.md).
+
+## License
+
+[Apache-2.0](LICENSE). Some test workflows are derived from the Workflow SDK; see [NOTICE](NOTICE).
