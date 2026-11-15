@@ -72,9 +72,10 @@ export const STREAM_PAGE_MAX_BYTES = 4 * 1_048_576;
 export const STREAM_READ_PIECE_BYTES = 1_048_576;
 export const MAX_TERMINAL_WAIT_MS = 30_000;
 /**
- * The largest stream chunk the World accepts. The writing step's isolate holds a few chunks at once
- * (the one being stored, the next its stream fills), so on Workers 64 MiB chunks ran out of the
- * 128 MB isolate memory with both engines, while 1 GiB streams in 32 MiB chunks worked with both.
+ * The largest encoded stream chunk the World accepts; SDK framing can reduce its raw byte allowance.
+ * The writing step's isolate holds a few chunks at once (the one being stored, the next its stream
+ * fills), so 64 MiB producer chunks exhausted Workers' 128 MB isolate memory with both engines,
+ * while 1 GiB streams in 32 MiB producer chunks worked with both.
  * Locally, live memory peaked near 60 MiB with 16 MiB chunks and near 90 MiB with 32 MiB ones. A
  * larger chunk fails its step instead.
  */
@@ -88,16 +89,16 @@ export const STREAM_WRITER_LEASE_MS = 30_000;
 
 /**
  * Payloads and stream chunks above this size go to R2, and the Durable Objects keep a ref instead.
- * The store keeps each payload twice, once as base64, so this stays well under SQLite's 2 MB limit.
+ * The store keeps each payload twice, once as base64; this conservative threshold stays below
+ * SQLite's currently documented 8 MB row/value limit without increasing existing inline retention.
  */
 export const PAYLOAD_INLINE_MAX_BYTES = 1_048_576;
 /**
  * The largest single serialized event payload the World accepts. A workflow reads each value back
- * into its VM, holding several copies at once; past this size a QuickJS invocation runs out of
- * Workers' 128 MB memory and retries forever. On Workers a 16 MiB step output worked and a 20 MiB
- * one did not. Step outputs serialize bytes as-is, while a step input carries them as base64, about
- * 1.33 times their size, so the largest step input is about 13.5 MiB. Rejecting the write fails
- * the step with an error instead.
+ * into its VM, holding several copies at once. This guard prevents oversized writes from repeatedly
+ * exhausting Workers' 128 MB memory. Step outputs have less framing than inputs; an input carries
+ * bytes as base64, about 1.33 times their size, leaving about 13.5 MiB for raw step input.
+ * Rejecting the write fails the step with an error instead.
  */
 export const PAYLOAD_MAX_BYTES = 18 * 1_048_576;
 /** A payload goes to R2 this many bytes at a time. */
@@ -105,7 +106,7 @@ export const R2_PUT_PART_BYTES = 1_048_576;
 /** Starts a payload ref. No UTF-8 text, SDK payload or SDK stream frame starts with 0xff. */
 export const PAYLOAD_REF_PREFIX = Uint8Array.of(0xff, ...new TextEncoder().encode('r2:'));
 
-/** VM snapshots are stored in parts under Durable Object SQLite's documented 2 MB value limit. */
+/** Conservative snapshot parts stay below SQLite's currently documented 8 MB row/value limit. */
 export const SNAPSHOT_PART_BYTES = 1_900_000;
 
 /** Events whose commit owes a queue message. */
