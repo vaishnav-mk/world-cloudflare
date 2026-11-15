@@ -1,5 +1,5 @@
 import { cloudflareTest } from '@cloudflare/vitest-plugin';
-import { workerAliases } from '@workflow/world-cloudflare/build';
+import { workerAliases } from 'world-cloudflare/build';
 import { defineConfig } from 'vitest/config';
 
 // The SDK end-to-end suite again, with new runs on spec 9 (WORKFLOW_SPEC_VERSION=9).

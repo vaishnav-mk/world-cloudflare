@@ -1,4 +1,4 @@
-import { toJson } from '@workflow/world-cloudflare';
+import { toJson } from 'world-cloudflare';
 import { getRun, resumeHook, start } from 'workflow/api';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { world } from '../src/world.js';

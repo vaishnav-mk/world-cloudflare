@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { START_HOOK_ADMISSION_REJECTED_CODE, START_HOOK_CANDIDATE_MAX_AGE_MS, startHookId } from '@workflow/world';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 import { newRunId } from './ids.js';
 
 const world = createWorld(env);

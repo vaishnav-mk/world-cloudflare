@@ -1,8 +1,8 @@
-# @workflow/world-cloudflare
+# world-cloudflare
 
 A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for Cloudflare Workers, built on SQLite Durable Objects and R2. It runs the published SDK (`workflow` 5.5.0). It creates spec 8 runs, or spec 9 (single-orchestrator) runs with `WORKFLOW_SPEC_VERSION=9`, and declares every capability Vercel's World does (`inBandFence`, `maxConcurrency`, `hookRetention`, `hookResumeDedup`, `resolvedHookResume`, `hookForceClaim`, `atomicStartHook`, `deploymentAffinity`, `dynamicWorkflowCode`) plus `invoke`. [Contract parity](../../docs/contract-parity.md) lists what is built and tested, and [limits](../../docs/limits.md) what was measured.
 
-The package is unpublished. The `@workflow` npm scope belongs to Vercel, so publishing it needs another name.
+Published to npm as `world-cloudflare`. It is an independent project, not an official Cloudflare or Vercel package.
 
 | Durable Object | Holds |
 | --- | --- |
@@ -15,21 +15,21 @@ Tables are Drizzle definitions with Drizzle Kit migrations ([`drizzle/`](drizzle
 
 ## Setup
 
-The package ships compiled JavaScript with type declarations, in `dist/`. Until it is published, pack it with `pnpm pack` in this directory, which builds it first, and depend on the tarball: `"@workflow/world-cloudflare": "file:<path>/workflow-world-cloudflare-0.2.0.tgz"`. Also depend on `workflow` 5.5.0: your code imports `workflow/api`, and the build bundles `workflow/runtime`. With pnpm 11 or later, copy `allowBuilds` from the repo's `pnpm-workspace.yaml`, or `pnpm install` fails with `ERR_PNPM_IGNORED_BUILDS`.
+The package ships compiled JavaScript with type declarations, in `dist/`. Install it with `pnpm add world-cloudflare`. Also depend on `workflow` 5.5.0: your code imports `workflow/api`, and the build bundles `workflow/runtime`. With pnpm 11 or later, copy `allowBuilds` from the repo's `pnpm-workspace.yaml`, or `pnpm install` fails with `ERR_PNPM_IGNORED_BUILDS`.
 
 Build the workflows before `wrangler dev` or `wrangler deploy`. The command takes the directories to scan, `.` by default:
 
 ```sh
-node node_modules/@workflow/world-cloudflare/dist/build.js workflows
+node node_modules/world-cloudflare/dist/build.js workflows
 ```
 
 It writes `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handler, the steps module it loads, the QuickJS WebAssembly modules and `manifest.json`. `flow.mjs` loads the SDK on its first delivery, not at startup. The Worker then exports the Durable Objects and the queue consumer, and registers the World:
 
 ```ts
-import { createQueueConsumer, createWorld, drainOutbox, registerWorld, type WorldEnv } from '@workflow/world-cloudflare';
+import { createQueueConsumer, createWorld, drainOutbox, registerWorld, type WorldEnv } from 'world-cloudflare';
 import { POST as flow } from '../.well-known/workflow/v1/flow.mjs';
 
-export { QueueShard, Runner, RunStreams, WorldStore } from '@workflow/world-cloudflare';
+export { QueueShard, Runner, RunStreams, WorldStore } from 'world-cloudflare';
 export const QueueConsumer = createQueueConsumer(flow);
 
 registerWorld(createWorld());
@@ -60,13 +60,13 @@ The Wrangler config, as in the repo's [`wrangler.jsonc`](../../wrangler.jsonc), 
 
 - a `CONSUMER` service binding to the Worker itself: `"services": [{ "binding": "CONSUMER", "service": "<this Worker's name>", "entrypoint": "QueueConsumer" }]`;
 - the `DLQ` and `PAYLOADS` R2 buckets and a `DEPLOYMENT_ID` ([configuration](#configuration));
-- `alias` entries for the SDK packages that do not load on Workers, which the SDK imports to pick a default World and to hand off background work. In a vitest config for the Workers pool, pass `workerAliases` from `@workflow/world-cloudflare/build` as `resolve.alias` instead:
+- `alias` entries for the SDK packages that do not load on Workers, which the SDK imports to pick a default World and to hand off background work. In a vitest config for the Workers pool, pass `workerAliases` from `world-cloudflare/build` as `resolve.alias` instead:
 
   ```jsonc
   "alias": {
-    "@workflow/world-local": "@workflow/world-cloudflare/stubs/world",
-    "@workflow/world-vercel": "@workflow/world-cloudflare/stubs/world",
-    "@vercel/functions": "@workflow/world-cloudflare/stubs/vercel-functions"
+    "@workflow/world-local": "world-cloudflare/stubs/world",
+    "@workflow/world-vercel": "world-cloudflare/stubs/world",
+    "@vercel/functions": "world-cloudflare/stubs/vercel-functions"
   }
   ```
 
@@ -225,11 +225,11 @@ With `WORKFLOW_SPEC_VERSION=9` on the Worker and its executors, new runs follow 
 | `handleWorldRpc(request, world, token)` | Serves the World over HTTP for the remote client |
 | `toJson(value)` | JSON with bytes as base64 and payload refs as `{ "$ref": key }` |
 
-`@workflow/world-cloudflare/build` exports `buildWorkflows({ cwd?, dirs? })`, which the build command runs, and `workerAliases`.
+`world-cloudflare/build` exports `buildWorkflows({ cwd?, dirs? })`, which the build command runs, and `workerAliases`.
 
 ## Remote client
 
-`@workflow/world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker's `handleWorldRpc` endpoint, so the SDK's tools, such as the web UI (`workflow web`), can read and write its runs. Load it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, and set `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`. In this repo, build it first with `pnpm build` in this package.
+`world-cloudflare/remote` is a World for Node that forwards every call to a deployed Worker's `handleWorldRpc` endpoint, so the SDK's tools, such as the web UI (`workflow web`), can read and write its runs. Load it with `WORKFLOW_TARGET_WORLD=world-cloudflare/remote`, and set `WORKFLOW_CLOUDFLARE_URL` and `WORKFLOW_CLOUDFLARE_TOKEN`. In this repo, build it first with `pnpm build` in this package.
 
 The synchronous `createWorld({ url?, token? })` factory stays usable with older RPC servers. Until initialized, it declares no capabilities and uses `mintedSpecVersion()` without assuming a fence, so a local `WORKFLOW_SPEC_VERSION=9` cannot enable spec 9 by itself. Existing read/write calls need no initialization.
 
@@ -238,7 +238,7 @@ For SDK starts that need the server's spec version or capabilities, use `await c
 The SDK loader accepts async factories but does not call `world.start()`. To enable discovery with `WORKFLOW_TARGET_WORLD`, point it at a module such as `./remote-world.mjs` containing:
 
 ```js
-export { connectWorld as createWorld } from '@workflow/world-cloudflare/remote';
+export { connectWorld as createWorld } from 'world-cloudflare/remote';
 ```
 
 The token can write events and, with an encryption secret, fetch every run's key, so keep it in a secret. The client cannot receive queue deliveries; workflows still run on Cloudflare. Payloads travel in one request or response, so the Worker's request body limit and memory bound the largest value it can move.

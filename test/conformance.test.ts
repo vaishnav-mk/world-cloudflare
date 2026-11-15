@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { vi } from 'vitest';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 // The SDK's own conformance suites, by relative path as their docs ask: the package exports no test-support entry.
 import { atomicStartHookConformance } from '../node_modules/@workflow/world/dist/test-support/atomic-start-hook-conformance.js';
 import { inBandFenceConformance } from '../node_modules/@workflow/world/dist/test-support/in-band-fence-conformance.js';

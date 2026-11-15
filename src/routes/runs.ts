@@ -1,5 +1,5 @@
 import { getRun, start } from 'workflow/api';
-import { toJson } from '@workflow/world-cloudflare';
+import { toJson } from 'world-cloudflare';
 import { HttpError, readJson } from '../http.js';
 import type { RouteContext } from '../router.js';
 import { world } from '../world.js';

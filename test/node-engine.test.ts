@@ -7,7 +7,7 @@ type Bundle = { names: readonly string[]; evaluate: (...args: unknown[]) => void
 let replays = 0;
 beforeAll(() => {
   // SAFETY: vm.ts keeps a Map of bundles under this key, and adopts this one if it loads later.
-  const bundles = (globalThis as unknown as Record<symbol, Map<string, Bundle>>)[Symbol.for('@workflow/world-cloudflare//workflowBundles')] ??= new Map();
+  const bundles = (globalThis as unknown as Record<symbol, Map<string, Bundle>>)[Symbol.for('world-cloudflare//workflowBundles')] ??= new Map();
   const set = bundles.set.bind(bundles);
   bundles.set = (code, bundle) => set(code, { ...bundle, evaluate: (...args) => { replays++; bundle.evaluate(...args); } });
   for (const [code, bundle] of bundles) bundles.set(code, bundle);

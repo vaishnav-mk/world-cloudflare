@@ -1,7 +1,7 @@
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { parse } from 'devalue';
-import { DeliveryResult, type Delivery, type DeliveryOutcome } from '@workflow/world-cloudflare';
-export { QueueShard, Runner, RunStreams, WorldStore } from '@workflow/world-cloudflare';
+import { DeliveryResult, type Delivery, type DeliveryOutcome } from 'world-cloudflare';
+export { QueueShard, Runner, RunStreams, WorldStore } from 'world-cloudflare';
 
 // The Worker the workerd tests run in (`wrangler.test.jsonc`): the World's Durable Objects and a
 // `QueueConsumer` that runs no flows. A queue name's suffix picks what its deliveries do.

@@ -2,7 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { HookNotFoundError } from '@workflow/errors';
 import { startHookId, type Hook, type WorkflowRun } from '@workflow/world';
-import { createWorld, type WorldEnv } from '@workflow/world-cloudflare';
+import { createWorld, type WorldEnv } from 'world-cloudflare';
 import { INDEX_BACKFILL_BATCH } from '../packages/world-cloudflare/src/constants.js';
 import { encode } from '../packages/world-cloudflare/src/lib/codec.js';
 import { hookIndexShards, indexShardFor, indexShardNames, storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';

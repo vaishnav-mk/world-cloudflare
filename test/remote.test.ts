@@ -3,7 +3,7 @@ import { HookConflictError, WorkflowRunNotFoundError } from '@workflow/errors';
 import { startHookId } from '@workflow/world';
 import { afterEach, expect, it, vi } from 'vitest';
 import { start } from 'workflow/api';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 import { handleWorldRpc } from '../packages/world-cloudflare/src/remote/server.js';
 import { connectWorld, createWorld as createRemoteWorld } from '../packages/world-cloudflare/src/remote/client.js';
 import { encode } from '../packages/world-cloudflare/src/remote/protocol.js';

@@ -7,7 +7,7 @@ type RemoteWorld = World & { start(): Promise<void> };
 
 /**
  * A World for Node that forwards every call to a deployed Cloudflare World. Point the SDK's tools
- * at it with `WORKFLOW_TARGET_WORLD=@workflow/world-cloudflare/remote`, plus:
+ * at it with `WORKFLOW_TARGET_WORLD=world-cloudflare/remote`, plus:
  * - `WORKFLOW_CLOUDFLARE_URL`: the Worker that serves `/world/rpc`;
  * - `WORKFLOW_CLOUDFLARE_TOKEN`: the Worker's `WORLD_RPC_TOKEN` secret.
  *

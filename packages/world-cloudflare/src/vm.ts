@@ -62,7 +62,7 @@ const LOOKUP = /^globalThis\.__private_workflows\?\.get\(("(?:[^"\\]|\\.)*")\)$/
 // On globalThis, so every bundled copy of this module, and the tests, see the registered bundles.
 // SAFETY: only this module writes the key, and always a Map of bundles.
 const bundles = ((globalThis as unknown as Record<symbol, Map<string, Bundle>>)[
-  Symbol.for('@workflow/world-cloudflare//workflowBundles')
+  Symbol.for('world-cloudflare//workflowBundles')
 ] ??= new Map());
 
 /** Registers the factory the build compiled `code` into. `names` are its parameters after `globalThis` and `importModule`. */
@@ -110,7 +110,7 @@ export class Script {
 }
 
 const unsupported = () =>
-  new Error('Workers run only the workflow bundle compiled into this deployment by @workflow/world-cloudflare/build. Dynamic workflow code needs WORKFLOW_VM=quickjs.');
+  new Error('Workers run only the workflow bundle compiled into this deployment by world-cloudflare/build. Dynamic workflow code needs WORKFLOW_VM=quickjs.');
 
 /** What the build turns the workflow bundle's `import()` into. QuickJS rejects with a ReferenceError too. */
 const importModule: Import = (specifier) => {

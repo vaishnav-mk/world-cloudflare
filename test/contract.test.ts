@@ -7,7 +7,7 @@ import {
   ValidQueueName, workflowRunIdSchema,
 } from '@workflow/world';
 import { EntityConflictError, HookNotFoundError, RunExpiredError } from '@workflow/errors';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 
 const world = createWorld(env);
 const bytes = (text: string) => new TextEncoder().encode(text);

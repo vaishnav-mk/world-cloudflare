@@ -1,5 +1,5 @@
 import { HookNotFoundError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
-import type { WorldEnv } from '@workflow/world-cloudflare';
+import type { WorldEnv } from 'world-cloudflare';
 import { HttpError } from './http.js';
 import { subscribeEvents } from './routes/events.js';
 import { resumeHookByToken } from './routes/hooks.js';

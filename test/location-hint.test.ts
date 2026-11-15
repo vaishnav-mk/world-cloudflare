@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:test';
 import { afterAll, describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
-import { createWorld, drainOutbox } from '@workflow/world-cloudflare';
+import { createWorld, drainOutbox } from 'world-cloudflare';
 import { parseLocationHint, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 
 // wrangler.test.jsonc sets LOCATION_HINT to weur. The Durable Objects run in this isolate, so

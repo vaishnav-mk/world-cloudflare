@@ -1,8 +1,8 @@
 /**
- * `@workflow/world-cloudflare/build`: compiles a project's workflows for a Worker with the published
+ * `world-cloudflare/build`: compiles a project's workflows for a Worker with the published
  * `@workflow/builders`. Runs in Node before `wrangler dev` or `wrangler deploy`:
  *
- *   node node_modules/@workflow/world-cloudflare/dist/build.js [dir...]
+ *   node node_modules/world-cloudflare/dist/build.js [dir...]
  *
  * Writes to `.well-known/workflow/v1/`: `flow.mjs`, whose `POST` is the flow handler;
  * `__step_registrations.mjs`, the steps, which `flow.mjs` imports (two modules keep each under the

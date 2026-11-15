@@ -1,4 +1,4 @@
-import { createQueueConsumer, drainOutbox, type WorldEnv } from '@workflow/world-cloudflare';
+import { createQueueConsumer, drainOutbox, type WorldEnv } from 'world-cloudflare';
 import { handleRequest } from './router.js';
 import './world.js';
 
@@ -7,7 +7,7 @@ import './world.js';
  * an executor, so this entry leaves the workflow bundle out and starts faster. `index.ts` adds the
  * bundle for a Worker that runs its own flows.
  */
-export { QueueShard, Runner, RunStreams, WorldStore } from '@workflow/world-cloudflare';
+export { QueueShard, Runner, RunStreams, WorldStore } from 'world-cloudflare';
 export const QueueConsumer = createQueueConsumer(() => {
   throw new Error('This Worker runs no flows: bind EXECUTORS, or deploy src/index.ts');
 });

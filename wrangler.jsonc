@@ -4,11 +4,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-17",
   "compatibility_flags": ["nodejs_compat"],
-  // The SDK imports these, and they do not load on Workers; see @workflow/world-cloudflare/build.
+  // The SDK imports these, and they do not load on Workers; see world-cloudflare/build.
   "alias": {
-    "@workflow/world-local": "@workflow/world-cloudflare/stubs/world",
-    "@workflow/world-vercel": "@workflow/world-cloudflare/stubs/world",
-    "@vercel/functions": "@workflow/world-cloudflare/stubs/vercel-functions"
+    "@workflow/world-local": "world-cloudflare/stubs/world",
+    "@workflow/world-vercel": "world-cloudflare/stubs/world",
+    "@vercel/functions": "world-cloudflare/stubs/vercel-functions"
   },
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
   // Without a WORKFLOW_ENCRYPTION_SECRET secret, VM snapshots are stored unencrypted, like every payload; see packages/world-cloudflare/README.md#encryption.

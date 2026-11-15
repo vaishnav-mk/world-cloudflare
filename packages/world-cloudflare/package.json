@@ -1,9 +1,23 @@
 {
-  "name": "@workflow/world-cloudflare",
+  "name": "world-cloudflare",
   "version": "0.2.0",
-  "private": true,
   "license": "Apache-2.0",
   "description": "Workflow SDK World on Cloudflare Durable Objects",
+  "keywords": [
+    "workflow",
+    "workflow-sdk",
+    "world",
+    "cloudflare",
+    "workers",
+    "durable-objects"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vaishnav-mk/world-cloudflare.git",
+    "directory": "packages/world-cloudflare"
+  },
+  "homepage": "https://world-cloudflare.vaishnav.one/",
+  "bugs": "https://github.com/vaishnav-mk/world-cloudflare/issues",
   "type": "module",
   "exports": {
     ".": {

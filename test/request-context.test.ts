@@ -1,6 +1,6 @@
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import { expect, it, vi } from 'vitest';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 import { FLOW_DELIVERY_BUDGET_MS } from '../packages/world-cloudflare/src/constants.js';
 import { currentRequest, withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 

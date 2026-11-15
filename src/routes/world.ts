@@ -1,4 +1,4 @@
-import { handleWorldRpc } from '@workflow/world-cloudflare';
+import { handleWorldRpc } from 'world-cloudflare';
 import type { RouteContext } from '../router.js';
 import { world } from '../world.js';
 

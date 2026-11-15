@@ -2,7 +2,7 @@ import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject 
 import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import { getQueueTopicPrefix, type ValidQueueName } from '@workflow/world';
-import type { WorldEnv } from '@workflow/world-cloudflare';
+import type { WorldEnv } from 'world-cloudflare';
 import type { EnqueueRequest } from '../packages/world-cloudflare/src/types.js';
 import { PAYLOAD_MAX_BYTES, TURN_BATCH_MAX, TURN_CALLS_IN_FLIGHT } from '../packages/world-cloudflare/src/constants.js';
 import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';

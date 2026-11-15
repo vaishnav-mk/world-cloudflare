@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
-import { createWorld, type WorldEnv, type WorldStore } from '@workflow/world-cloudflare';
+import { createWorld, type WorldEnv, type WorldStore } from 'world-cloudflare';
 import { START_HOOK_CANDIDATE_MAX_AGE_MS, startHookId } from '@workflow/world';
 import { newRunId } from './ids.js';
 import { HookNotFoundError } from '@workflow/errors';

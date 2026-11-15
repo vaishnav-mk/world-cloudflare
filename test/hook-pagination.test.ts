@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Hook } from '@workflow/world';
-import { createWorld, type WorldEnv } from '@workflow/world-cloudflare';
+import { createWorld, type WorldEnv } from 'world-cloudflare';
 import { indexShardNames, indexSourceNames, storeShardNames } from '../packages/world-cloudflare/src/lib/shards.js';
 import { Db } from '../packages/world-cloudflare/src/store/db.js';
 

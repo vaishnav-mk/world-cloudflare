@@ -4,7 +4,7 @@ import { queueShardFor, storeShardFor } from '../packages/world-cloudflare/src/l
 import { parse } from 'devalue';
 import { EntityConflictError } from '@workflow/errors';
 import { getQueueTopicPrefix, slotToEventId, SPEC_VERSION_SUPPORTS_SLOT_IDENTITY } from '@workflow/world';
-import type { WorldEnv } from '@workflow/world-cloudflare';
+import type { WorldEnv } from 'world-cloudflare';
 import { TURN_BATCH_MAX } from '../packages/world-cloudflare/src/constants.js';
 import { withRequestContext } from '../packages/world-cloudflare/src/lib/request-context.js';
 import { createStorage } from '../packages/world-cloudflare/src/store/storage.js';

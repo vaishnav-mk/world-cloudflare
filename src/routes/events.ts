@@ -1,5 +1,5 @@
 import { eventIdToSlot, EventTypeSchema } from '@workflow/world';
-import { nextEvents, ResolveData } from '@workflow/world-cloudflare';
+import { nextEvents, ResolveData } from 'world-cloudflare';
 import { HttpError } from '../http.js';
 import type { RouteContext } from '../router.js';
 import { world } from '../world.js';

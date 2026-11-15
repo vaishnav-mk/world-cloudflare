@@ -2,7 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { EntityConflictError, InBandSupersededError, RunExpiredError } from '@workflow/errors';
 import { SPEC_VERSION_SINGLE_ORCHESTRATOR, slotToEventId, type CreateEventParams, type CreateEventRequest } from '@workflow/world';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 import { storeShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 
 const world = createWorld(env);

@@ -154,9 +154,9 @@ This checks one unencrypted QuickJS/spec-8 workflow with an `enam` placement hin
 | Item | Done | Notes |
 | --- | :---: | --- |
 | Installable `createWorld()` package | ✓ | `packages/world-cloudflare`, unpublished |
-| SDK web UI (`workflow web`) | ✓ | Through the `@workflow/world-cloudflare/remote` Node client |
+| SDK web UI (`workflow web`) | ✓ | Through the `world-cloudflare/remote` Node client |
 | Versioned schema migrations | ✓ | Drizzle Kit, additive, applied by each Durable Object on start |
-| Published to npm | ✗ | The `@workflow` scope belongs to Vercel |
+| Published to npm | ✓ | As `world-cloudflare` |
 | Listed in `worlds-manifest.json` | ✗ | |
 | Runs on the published SDK | ✓ | `workflow` 5.5.0 as published. Reading about 4 GiB of stream in one step needs an SDK fix ([streams](limits.md#streams)) |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World; its scenarios are ported ([Conformance](#conformance)) |

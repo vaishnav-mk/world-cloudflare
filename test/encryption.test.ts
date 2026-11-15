@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:test';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { WorkflowRun } from '@workflow/world';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 import { handleWorldRpc } from '../packages/world-cloudflare/src/remote/server.js';
 import { createWorld as createRemoteWorld } from '../packages/world-cloudflare/src/remote/client.js';
 

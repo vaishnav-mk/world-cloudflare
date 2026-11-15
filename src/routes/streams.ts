@@ -1,5 +1,5 @@
 import { getRun } from 'workflow/api';
-import { ResolveData } from '@workflow/world-cloudflare';
+import { ResolveData } from 'world-cloudflare';
 import type { RouteContext } from '../router.js';
 import { world } from '../world.js';
 

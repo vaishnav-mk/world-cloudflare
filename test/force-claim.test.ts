@@ -2,7 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { HookForceClaimedError, HookNotFoundError } from '@workflow/errors';
 import type { Hook } from '@workflow/world';
-import { createWorld } from '@workflow/world-cloudflare';
+import { createWorld } from 'world-cloudflare';
 import { encode } from '../packages/world-cloudflare/src/lib/codec.js';
 import { storeShardFor, tokenShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 

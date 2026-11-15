@@ -1,5 +1,5 @@
 import { cloudflareTest } from '@cloudflare/vitest-plugin';
-import { workerAliases } from '@workflow/world-cloudflare/build';
+import { workerAliases } from 'world-cloudflare/build';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
