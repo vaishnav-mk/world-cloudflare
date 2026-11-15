@@ -2,7 +2,7 @@
 
 Run [Vercel's Workflow SDK](https://workflow-sdk.dev) on Cloudflare Workers, with Durable Objects for state and queueing and R2 for large payloads. Uses published, unpatched `workflow` 5.5.0. This is not a wrapper around native Cloudflare Workflows. It is an independent project, not an official Cloudflare or Vercel product.
 
-The adapter lives in [`packages/world-cloudflare`](packages/world-cloudflare/README.md); the root is an example Worker. The package is experimental and not published to npm. Read the [documentation](https://world-cloudflare.vaishnav.one/) for the design, operations and measurements.
+The adapter lives in [`packages/world-cloudflare`](packages/world-cloudflare/README.md); the root is an example Worker. The package is experimental and published to npm as [`world-cloudflare`](https://www.npmjs.com/package/world-cloudflare). Read the [documentation](https://world-cloudflare.vaishnav.one/) for the design, operations and measurements.
 
 ## How it works
 
@@ -18,6 +18,8 @@ flowchart LR
   runner --> code["Workflow code<br/>(main Worker or retained executor,<br/>QuickJS or node engine)"]
   code -- "steps, events" --> client
 ```
+
+The queue shards are built on [durability](https://github.com/avenceslau/durability), a library of alarm-backed primitives for Durable Objects. Each queue shard uses its `DurabilityScheduler` to share one alarm across due messages, and `DurabilityFanout` to accept batches and deliver them with deduplication keys, retry backoff and a dead-letter hook into R2. `DurabilityRouting` addresses the queue shard for each push, with location hints, and observes the load each shard reports. The World keeps its own run state, event log and attempt cap; durability only moves messages.
 
 ## Quick start
 

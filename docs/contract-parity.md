@@ -153,7 +153,7 @@ This checks one unencrypted QuickJS/spec-8 workflow with an `enam` placement hin
 
 | Item | Done | Notes |
 | --- | :---: | --- |
-| Installable `createWorld()` package | ✓ | `packages/world-cloudflare`, unpublished |
+| Installable `createWorld()` package | ✓ | `packages/world-cloudflare`, on npm as `world-cloudflare` |
 | SDK web UI (`workflow web`) | ✓ | Through the `world-cloudflare/remote` Node client |
 | Versioned schema migrations | ✓ | Drizzle Kit, additive, applied by each Durable Object on start |
 | Published to npm | ✓ | As `world-cloudflare` |
