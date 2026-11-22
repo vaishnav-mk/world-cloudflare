@@ -119,6 +119,15 @@ openssl rand -base64 32 | wrangler secret put WORKFLOW_ENCRYPTION_SECRET
 
 The SDK then encrypts payloads, hook data, stream chunks and VM snapshots with AES-256-GCM before they reach the World. Names, statuses, tokens, attributes, timestamps and byte streams stay readable. There is no rotation: a changed secret makes encrypted runs unreadable. [Encryption](https://world-cloudflare.vaishnav.one/docs/security#encryption)
 
+## Without Workers for Platforms
+
+> [!IMPORTANT]
+> **Workers for Platforms is optional.** It is a separate $25/month plan, and it only keeps runs that are waiting during a deploy on the code that started them. Without it, the main Worker runs its own flows: export `createQueueConsumer(flow)` with the flow bundle, as the example's [`src/index.ts`](https://github.com/vaishnav-mk/world-cloudflare/blob/main/src/index.ts) does, and leave out `EXECUTORS` and `EXECUTOR_ROUTES`.
+
+What you give up: a run created under an older `DEPLOYMENT_ID` cannot resume. Its deliveries fail with `Deployment <id> is unavailable`, retry up to `QUEUE_MAX_ATTEMPTS` and then go to the `DLQ` bucket. So drain before changing `DEPLOYMENT_ID`: stop starting runs and wait for the waiting ones to finish. Keeping the same `DEPLOYMENT_ID` instead replays waiting runs against the new code, which is only safe for changes that replay the same steps in the same order; that path is not tested here.
+
+You still need Workers Paid. The templates set `limits.cpu_ms` and `limits.subrequests`, and Workers Free allows 10 ms of CPU per request; a warm QuickJS delivery measured 12–19 ms.
+
 ## Retained executors
 
 To keep in-flight runs on the code that started them, upload one executor per release to a Workers for Platforms dispatch namespace:

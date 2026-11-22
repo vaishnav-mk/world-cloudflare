@@ -49,7 +49,7 @@ Configuration, releases and tests: [build, deploy and operate](https://world-clo
 - The example API is unauthenticated.
 - [Steps can run more than once](https://world-cloudflare.vaishnav.one/docs/state-and-delivery#delivery); make side effects idempotent.
 - Data is kept indefinitely. [Encryption](https://world-cloudflare.vaishnav.one/docs/security#encryption) is opt-in, without key rotation.
-- Old runs need their code: drain them or use [retained executors](https://world-cloudflare.vaishnav.one/docs/security#releases) before changing `DEPLOYMENT_ID`.
+- Old runs need their code: drain them before changing `DEPLOYMENT_ID`, or keep them on it with [retained executors](https://world-cloudflare.vaishnav.one/docs/security#releases). **Retained executors need Workers for Platforms ($25/month); everything else runs without it**, see [without Workers for Platforms](packages/world-cloudflare/README.md#without-workers-for-platforms). Workers Paid is required either way.
 - The build uses SDK internals; check before upgrading the pinned SDK.
 
 ## Docs

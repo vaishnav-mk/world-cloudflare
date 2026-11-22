@@ -257,16 +257,22 @@ export const docs: Doc[] = [
   },
   {
     slug: 'operations', title: 'Build, deploy and operate', group: 'Run it', icon: Rocket,
-    description: 'The repository root is an example application. The reusable World lives in packages/world-cloudflare. Deploy the minimal mode first, then add retained executors if you need them.',
+    description: 'The repository root is an example application. The reusable World lives in packages/world-cloudflare. Deploy the main Worker first. Retained executors are optional and need Workers for Platforms.',
     keywords: 'setup installation configuration build deploy tests wrangler sdk upgrade retention operations npm package',
     sections: [
-      { id: 'local', title: 'Start with the example', content: <><Code label="From the repository root">{'pnpm install\npnpm run build:workflow\npnpm exec wrangler dev'}</Code><p>Building first generates the SDK workflow bundle and the package’s compiled output. Local execution can run flows in the main Worker without a dispatch namespace. The root README documents bindings, resource creation and the example HTTP routes.</p><p>The package remains private and unpublished. An npm name and licensing/release decisions are still open. Do not treat the docs as an announcement of a published package.</p></> },
+      { id: 'local', title: 'Start with the example', content: <><Code label="From the repository root">{'pnpm install\npnpm run build:workflow\npnpm exec wrangler dev'}</Code><p>Building first generates the SDK workflow bundle and the package’s compiled output. Local execution runs flows in the main Worker without a dispatch namespace. Bindings and configuration are in the package README; the example’s HTTP routes are in <code>src/router.ts</code>.</p><p>The package is published on npm as <code>world-cloudflare</code> under Apache-2.0. It is experimental.</p></> },
+      { id: 'modes', title: 'Choose a mode: Workers for Platforms is optional', content: <><p><strong>You do not need Workers for Platforms.</strong> It is a separate $25/month plan and only keeps runs that are waiting during a deploy on the code that started them. Both modes need Workers Paid: the templates set CPU and subrequest limits, and Workers Free allows 10 ms of CPU per request.</p><Table headers={['', 'Main Worker runs its own flows', 'Retained executors']} rows={[
+        ['Plan', 'Workers Paid', 'Workers Paid and Workers for Platforms'],
+        ['Entry', 'src/index.ts with the flow bundle; no EXECUTORS', 'src/dispatcher.ts plus one executor per release in a dispatch namespace'],
+        ['Changing DEPLOYMENT_ID', 'Runs from the old ID cannot resume: they retry, then dead-letter. Drain first.', 'Old runs keep routing to their release while its route and script exist.'],
+        ['Keeping DEPLOYMENT_ID', 'Waiting runs replay against the new code. Only for changes that replay the same steps; not tested.', 'Same, for runs on that ID.'],
+      ]} /></> },
       { id: 'config', title: 'Know which config changes affect old runs', content: <><Table headers={['Setting', 'What it controls', 'Operational rule']} rows={[
         ['DEPLOYMENT_ID', 'The build identity stamped on new runs.', 'Match the actual retained route when using WFP.'],
         ['EXECUTOR_ROUTES', 'Recorded deployment ID to executor script.', 'Keep old routes and scripts while runs still use them.'],
         ['SHARD_EPOCHS', 'Time-based store, queue and index routing.', 'Append only. Coordinate activation across deployments.'],
         ['LOCATION_HINT', 'Requested placement for new objects.', 'Not residency; does not relocate existing objects.'],
-        ['WORKFLOW_VM', 'Engine policy for new runs.', 'QuickJS is the default here; run context retains the choice.'],
+        ['WORKFLOW_VM', 'Engine policy for new runs.', 'The templates set QuickJS; unset means the SDK’s node engine. Run context retains the choice.'],
         ['WORKFLOW_ENCRYPTION_SECRET', 'Per-run payload key derivation.', 'Keep the secret for old runs; rotation is not supported.'],
         ['WORLD_RPC_TOKEN', 'Optional remote World HTTP endpoint.', 'Endpoint is disabled without it. Keep it secret.'],
       ]} /></> },
