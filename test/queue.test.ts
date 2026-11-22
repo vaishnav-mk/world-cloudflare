@@ -90,6 +90,17 @@ describe('durability fanout', () => {
     expect(calls.dispatched).toEqual([await id('pending:a0eb0f08'), await id('done:retry-1')]);
   });
 
+  it('warms its flow route ahead of a delivery, unless deliveries run on executors', async () => {
+    let warmed = 0;
+    const flow = Object.assign(async () => Response.json({}), { warm: async () => { warmed++; } });
+    const Consumer = createQueueConsumer(flow);
+    await new Consumer(createExecutionContext(), env).warm();
+    expect(warmed).toBe(1);
+    // SAFETY: warm only checks whether the binding exists.
+    await new Consumer(createExecutionContext(), { ...env, EXECUTORS: {} as DispatchNamespace }).warm();
+    expect(warmed).toBe(1);
+  });
+
   it('runs a batch of deliveries together and returns each its own outcome', async () => {
     let running = 0;
     let peak = 0;

@@ -20,6 +20,15 @@ export function createQueueConsumer(flow: FlowHandler): new (ctx: ExecutionConte
     }
 
     /**
+     * Loads this Worker's flow route ahead of its first delivery, so a fresh isolate does not load it
+     * on a run's critical path. A runner calls it when it is created. With executors, deliveries run
+     * elsewhere, so there is nothing to load here.
+     */
+    async warm(): Promise<void> {
+      if (!this.env.EXECUTORS) await flow.warm?.();
+    }
+
+    /**
      * Runs an invocation (`Queue.invoke`) on this deployment's flow handler, whatever the run's
      * deployment: the SDK handles one by checking the hook and writing the event it carries, without
      * the run's workflow code, so a run whose retained executor predates invocations takes it too.

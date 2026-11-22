@@ -113,9 +113,11 @@ export const createFlow = () => workflowEntrypoint(workflowCode${createWorkflowE
     // settles, so a shared route would hang the run's next deliveries. Runners serialize a run's
     // deliveries instead.
     await writeFile(flowSource, `let route;
-export const POST = async (request) => {
-  route ??= Promise.all([import('./${STEPS}.mjs'), import(${JSON.stringify(routeSource)})]).then(([, route]) => route);
-  return (await route).createFlow()(request);
+const load = () => (route ??= Promise.all([import('./${STEPS}.mjs'), import(${JSON.stringify(routeSource)})]).then(([, route]) => route));
+export const POST = async (request) => (await load()).createFlow()(request);
+// Loads the route ahead of a delivery: QueueConsumer.warm.
+POST.warm = async () => {
+  await load();
 };
 `);
     const result = await esbuild.build({

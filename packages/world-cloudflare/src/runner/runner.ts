@@ -52,8 +52,13 @@ export class Runner extends DurableObject<WorldEnv> {
     });
   }
 
-  /** Does nothing: a store shard calls it to create the runner near itself (`StoreContext.placeRunner`). */
-  wake(): void {}
+  /**
+   * A store shard calls it to create the runner near itself (`StoreContext.placeRunner`), and a queue
+   * shard's alarm to make a fresh stub. Also loads the flow route where this runner's deliveries run.
+   */
+  wake(): void {
+    this.ctx.waitUntil(this.env.CONSUMER.warm().catch((error: unknown) => console.error('Could not warm the flow route', error)));
+  }
 
   /** Runs deliveries side by side, such as steps, and returns each one's outcome in order. */
   consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]> {

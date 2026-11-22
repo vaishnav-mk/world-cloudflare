@@ -33,6 +33,7 @@ export type WorldEnv = {
     consume(deliveries: Delivery[]): Promise<DeliveryOutcome[]>;
     invoke(delivery: Delivery): Promise<{ status: number; body: string }>;
     latestDeploymentId(): Promise<string>;
+    warm(): Promise<void>;
   };
   DLQ: R2Bucket;
   /** Payloads and stream chunks too large to keep in a Durable Object, keyed `runs/<runId>/<id>`. */
@@ -52,7 +53,8 @@ export type WorldEnv = {
 };
 
 /** The `POST` export of the app's generated `.well-known/workflow/v1/flow.mjs`. */
-export type FlowHandler = (request: Request) => Promise<Response>;
+/** The SDK's flow route. `warm`, when present, loads it ahead of a delivery (`QueueConsumer.warm`). */
+export type FlowHandler = ((request: Request) => Promise<Response>) & { warm?: () => Promise<void> };
 
 /** What the queue shard stores for each message. */
 export type Envelope = {
