@@ -101,9 +101,10 @@ export function markPublished(store: StoreContext, kind: MessageKind, runId: str
  */
 export async function dispatch(store: StoreContext, entries: QueueDispatch[]): Promise<EnqueueResult[]> {
   const slots = entries.map(({ claim }) => pendingSlotFor(store, claim));
-  // A start is its run's first delivery.
-  await Promise.all(entries.flatMap(({ claim }) => (claim.kind === MessageKind.Start ? [store.placeRunner(claim.runId)] : [])));
-  const results = await store.pushQueue(entries);
+  // A start is its run's first delivery, so its runner is created from here, near the store, while the
+  // queue accepts the message rather than before: the queue's first delivery may create it instead.
+  const placing = Promise.all(entries.flatMap(({ claim }) => (claim.kind === MessageKind.Start ? [store.placeRunner(claim.runId)] : [])));
+  const [results] = await Promise.all([store.pushQueue(entries), placing]);
   for (const [index, { claim }] of entries.entries()) {
     const slot = slots[index];
     const result = results[index];
