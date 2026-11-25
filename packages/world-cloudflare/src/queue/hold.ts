@@ -5,7 +5,7 @@ import { wakeSeconds } from './handler.js';
 import type { QueueShard } from './queue-shard.js';
 
 /** How long the queue waits before it redelivers a held message whose handler rejected. */
-const HELD_FAILURE_RETRY_MS = 1_000;
+export const HELD_FAILURE_RETRY_MS = 1_000;
 
 /**
  * `queue()` with `experimental_hold`: enqueues the message on its shard, held for this sender. The

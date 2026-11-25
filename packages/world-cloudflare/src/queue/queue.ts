@@ -1,9 +1,10 @@
 import { WorkflowWorldError } from '@workflow/errors';
 import { unwrapInvocationOutcome } from '@workflow/errors/invocation';
-import { MessageId, ValidQueueName, type Queue, type QueueOptions, type QueuePayload } from '@workflow/world';
+import { MessageId, SPEC_VERSION_SINGLE_ORCHESTRATOR, ValidQueueName, type Queue, type QueueOptions, type QueuePayload } from '@workflow/world';
+import { waitUntil } from 'cloudflare:workers';
 import { stringify } from 'devalue';
-import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, MAX_HOLD_LEASE_SECONDS, PAYLOAD_MAX_BYTES } from '../constants.js';
-import { MessageKind } from '../enums.js';
+import { DEFAULT_HOLD_LEASE_SECONDS, DISPATCHED_STEPS_READ_MS, INLINE_START_BUDGET_MS, MAX_HOLD_LEASE_SECONDS, PAYLOAD_MAX_BYTES } from '../constants.js';
+import { DeliveryResult, MessageKind } from '../enums.js';
 import { groupBy } from '../lib/group.js';
 import { fnv1a32Hex, messageIdFor, sha256Hex } from '../lib/hash.js';
 import { isRecord } from '../lib/is-record.js';
@@ -13,13 +14,13 @@ import { objectOptions, queueShardFor, runnerShardFor } from '../lib/shards.js';
 import { transientAsWorldError } from '../lib/transient.js';
 import { gatherTurns } from '../lib/turns.js';
 import { answersUnknown, onRun } from '../store/route.js';
-import type { EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
+import type { DeliveryOutcome, EnqueueRequest, EnqueueResult, HoldingQueue, OutboxClaim, QueueDispatch, WorldEnv } from '../types.js';
 import { createQueueHandler } from './handler.js';
-import { holdMessage } from './hold.js';
+import { HELD_FAILURE_RETRY_MS, holdMessage } from './hold.js';
 import { shardPusher } from './push.js';
 import { executorFor } from './routes.js';
 
-type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'RUNNER' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES'>;
+type QueueEnv = Pick<WorldEnv, 'WORLD_STORE' | 'QUEUE_SHARD' | 'RUNNER' | 'CONSUMER' | 'DEPLOYMENT_ID' | 'EXECUTOR_ROUTES' | 'INLINE_START'>;
 type Ready = { request: EnqueueRequest; claim?: OutboxClaim; shard: string };
 /** The steps of a run a flow request read as dispatched, and when it last asked. */
 type Dispatched = { steps: Set<string>; readAt: number; reading?: Promise<unknown> };
@@ -100,6 +101,12 @@ export function createQueue(env: QueueEnv): HoldingQueue {
         const ready = await prepare(env, queueName, message, { ...rest, delaySeconds: leaseSeconds });
         if ('error' in ready) throw new Error(ready.error);
         return holdMessage(() => env.QUEUE_SHARD.getByName(ready.shard, objectOptions()), queueName, message, ready.request, leaseSeconds * 1000);
+      }
+      if (hold === undefined && startsInline(env, message, rest)) {
+        return startInline(env, queueName, message, rest, async (delaySeconds) => {
+          const result = await publish(queueName, { message, opts: { ...rest, delaySeconds } });
+          if (result.error !== undefined) throw new Error(result.error);
+        });
       }
       const target = rest.deploymentId;
       if (target !== undefined && !reachable(env, target)) {
@@ -194,3 +201,89 @@ function outboxClaim(message: QueuePayload): OutboxClaim | undefined {
   return undefined;
 }
 
+
+/**
+ * Whether a start runs its first delivery in the caller (`startInline`): a spec 9 start for this
+ * deployment, which carries the run's input, so the delivery needs nothing the store has not been
+ * sent already. `INLINE_START=0` sends every start through the queue.
+ */
+function startsInline(env: QueueEnv, message: QueuePayload, { delaySeconds, deploymentId }: QueueOptions): boolean {
+  if (env.INLINE_START === '0' || delaySeconds || (deploymentId !== undefined && deploymentId !== env.DEPLOYMENT_ID)) return false;
+  if (!('runInput' in message) || !isRecord(message.runInput)) return false;
+  const { specVersion } = message.runInput;
+  return typeof specVersion === 'number' && specVersion >= SPEC_VERSION_SINGLE_ORCHESTRATOR;
+}
+
+/**
+ * Runs a start's first delivery now, through this Worker's consumer, in place of the store, queue
+ * shard and runner it would otherwise cross: at low traffic each of those can be an idle object
+ * that takes hundreds of milliseconds to come back. The queue holds the message as the backstop
+ * (`experimental_queueHold`) and delivers it only if this delivery does not settle it before its
+ * lease ends, as when this invocation is cut off. The delivery starts beside the hold rather than
+ * after it, and the queue takes the run over after `INLINE_START_BUDGET_MS`, inside the caller's
+ * `waitUntil`. The spec 9 fence keeps one orchestrator, and `run_started` settles the store's start
+ * row as on the queue path.
+ */
+async function startInline(
+  env: QueueEnv, queueName: ValidQueueName, message: QueuePayload, opts: QueueOptions, requeue: (delaySeconds: number) => Promise<void>,
+) {
+  const leaseMs = DEFAULT_HOLD_LEASE_SECONDS * 1000;
+  const ready = await prepare(env, queueName, message, { ...opts, delaySeconds: DEFAULT_HOLD_LEASE_SECONDS });
+  if ('error' in ready) throw new Error(ready.error);
+  const { id, encoded, targetDeployment } = ready.request;
+  const shard = () => env.QUEUE_SHARD.getByName(ready.shard, objectOptions());
+  const enqueuedAt = Date.now();
+  const deadline = enqueuedAt + INLINE_START_BUDGET_MS;
+  const consume = (attempt: number, deliveryCount: number) => env.CONSUMER.consume([{
+    id, attempt, deliveryCount, enqueuedAt, body: { queueName, encoded, targetDeployment },
+  }]).then(([outcome]) => outcome, (error: unknown): DeliveryOutcome => ({ kind: DeliveryResult.Failed, error: String(error) }));
+  const run = consume(1, 1);
+  const accepted = shard().hold(ready.request).then((result) => {
+    if ('error' in result) throw new Error(result.error);
+    return result;
+  });
+  waitUntil(accepted.then(async (result) => {
+    // A repeat of an accepted key is not held: the queue runs it, and this delivery was a duplicate.
+    if (!result.fresh) return;
+    const renewal = setInterval(() => {
+      shard().renewHold(result.id, leaseMs).catch((error: unknown) => console.error('Hold renewal failed', error));
+    }, leaseMs / 2);
+    try {
+      await shard().beginHeld(result.id, leaseMs);
+      for (let delivery = run; ;) {
+        // The SDK hands off only after minutes, past the caller's cut-off. At the budget the queue
+        // delivers the run to its runner instead, whose orchestrator takes over: the fence refuses
+        // this delivery's next write, which ends it.
+        const outcome = await Promise.race([delivery, scheduler.wait(Math.max(0, deadline - Date.now())).then(() => undefined)]);
+        if (outcome === undefined) return await shard().settleHold(result.id, 0, true);
+        switch (outcome.kind) {
+          case DeliveryResult.Done:
+            return await shard().settleHold(result.id, null, false);
+          case DeliveryResult.Wake:
+            // A short wake, such as a sleep or steps still running, is delivered here too, where the
+            // run's route and objects are warm, rather than through the queue's cold path.
+            if (outcome.seconds > 0 && Date.now() + outcome.seconds * 1000 < deadline) {
+              await scheduler.wait(outcome.seconds * 1000);
+              const { deliveries, handoffs } = await shard().beginHeld(result.id, leaseMs);
+              delivery = consume(deliveries - handoffs, deliveries);
+              continue;
+            }
+            // A spec 9 wake of 0 is a handoff, which is not an attempt.
+            return await shard().settleHold(result.id, outcome.seconds * 1000, outcome.seconds === 0);
+          default:
+            console.error('Inline start failed; the queue delivers it', { id, error: outcome.error });
+            return await shard().settleHold(result.id, HELD_FAILURE_RETRY_MS, false);
+        }
+      }
+    } finally {
+      clearInterval(renewal);
+    }
+  }, async (error: unknown) => {
+    // No hold, so no backstop: once the delivery ends, send what it left to the queue as usual.
+    console.error('Could not hold an inline start', { id, error });
+    const outcome = await run;
+    if (outcome?.kind !== DeliveryResult.Done) await requeue(outcome?.kind === DeliveryResult.Wake ? outcome.seconds : HELD_FAILURE_RETRY_MS / 1000);
+  }).catch((error: unknown) => console.error('Could not settle an inline start; the queue delivers it', { id, error })));
+  // The run is under way either way, so start() reports it accepted.
+  return { messageId: MessageId.parse(await accepted.then(({ id: accepted }) => accepted, () => id)) };
+}

@@ -157,6 +157,11 @@ export const REPLAY_MARKS_MAX = 10_000;
  */
 export const FLOW_DELIVERY_BUDGET_MS = 2 * 60_000;
 /**
+ * How long a start's first delivery runs in its caller (`startInline`) before the queue takes the
+ * run over. The caller's `waitUntil` ends 30 s after it answers, which cuts the delivery off.
+ */
+export const INLINE_START_BUDGET_MS = 20_000;
+/**
  * A flow request waits for the background work it started, such as writing a stream a step
  * returned, until this long after its delivery started, so it answers before the delivery times out.
  */

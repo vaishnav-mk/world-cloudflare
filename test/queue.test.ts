@@ -9,6 +9,7 @@ import { withRequestContext } from '../packages/world-cloudflare/src/lib/request
 import { createQueueConsumer } from '../packages/world-cloudflare/src/queue/consumer.js';
 import { queueShardFor, runnerShardFor } from '../packages/world-cloudflare/src/lib/shards.js';
 import { createQueue } from '../packages/world-cloudflare/src/queue/queue.js';
+import { Holds } from '../packages/world-cloudflare/src/queue/holds.js';
 import { executorFor } from '../packages/world-cloudflare/src/queue/routes.js';
 
 const queue = createQueue(env);
@@ -453,5 +454,35 @@ describe('invocations', () => {
   it('refuses a hook payload over the payload limit before reaching the run', async () => {
     const payload = { type: 'hook_resume', version: 1, hookId: 'hook_big', token: 'token-big', payload: new Uint8Array(PAYLOAD_MAX_BYTES + 1) };
     await expect(queue.invoke?.('wrun_big', payload)).rejects.toMatchObject({ status: 413, fatal: true });
+  });
+});
+
+describe('inline starts', () => {
+  const start = (runId: string) => ({ runId, runInput: { specVersion: 9, deploymentId: 'test-v1', workflowName: 'demo', input: new Uint8Array() } });
+  const holdOf = (runId: string, id: string) => runInDurableObject(env.QUEUE_SHARD.getByName(queueShardFor(runId, start(runId))),
+    (_shard, state) => new Holds(state.storage.sql).find(id));
+  const deliveries = async (id: string) => (await env.SINK.getByName('sink').received()).filter((received) => received === id).length;
+
+  it("runs a spec 9 start's first delivery in the caller, and settles its hold so the queue never delivers it", async () => {
+    const runId = `inline-${crypto.randomUUID()}`;
+    const { messageId } = await queue.queue(queueName, start(runId) as never);
+    await expect.poll(() => deliveries(messageId!)).toBe(1);
+    await expect.poll(async () => (await holdOf(runId, messageId!))?.done).toBe(true);
+    await runDurableObjectAlarm(env.QUEUE_SHARD.getByName(queueShardFor(runId, start(runId))));
+    expect(await deliveries(messageId!)).toBe(1);
+  });
+
+  it('delivers a short wake in the caller too, as its next attempt', async () => {
+    // The test consumer wakes a `_retry` message's first attempt in 100 ms and records the next.
+    const runId = `inline-${crypto.randomUUID()}`;
+    const { messageId } = await queue.queue(`${queueName}_retry` as ValidQueueName, start(runId) as never);
+    await expect.poll(() => deliveries(messageId!), { timeout: 5_000 }).toBe(1);
+    await expect.poll(async () => (await holdOf(runId, messageId!))?.done).toBe(true);
+  });
+
+  it('sends a spec 8 start through the queue as before', async () => {
+    const runId = `inline-${crypto.randomUUID()}`;
+    const { messageId } = await queue.queue(queueName, { ...start(runId), runInput: { ...start(runId).runInput, specVersion: 8 } } as never);
+    expect(await holdOf(runId, messageId!)).toBeUndefined();
   });
 });

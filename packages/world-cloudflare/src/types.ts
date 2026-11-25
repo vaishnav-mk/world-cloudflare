@@ -42,6 +42,8 @@ export type WorldEnv = {
   /** JSON map from deployment ID to a retained executor script name. */
   EXECUTOR_ROUTES?: string;
   QUEUE_MAX_ATTEMPTS?: string;
+  /** `0` sends every start through the queue instead of running its first delivery in the caller (`startInline`). */
+  INLINE_START?: string;
   /** Overrides `FLOW_BACKGROUND_BUDGET_MS`, so a test can cut background work short. */
   FLOW_BACKGROUND_BUDGET_MS?: string;
   /** JSON list of `ShardEpoch`, oldest first. Append an epoch starting in the future to add shards. */
