@@ -8,7 +8,10 @@ import { DEFAULT_WORKFLOW, isWorkflowName, workflows } from '../workflows.js';
 const MAX_ARGS = 4;
 const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
-/** `POST /runs` with `{ "name"?: string, "value": number | number[] }`; an array is the workflow's arguments. */
+/**
+ * `POST /runs` with `{ "name"?: string, "value": number | number[] }`; an array is the workflow's arguments.
+ * Answers `{ runId, clientStart }`, `clientStart` being this Worker's clock right before `start()`.
+ */
 export async function startRun({ request }: RouteContext): Promise<Response> {
   const body = await readJson(request);
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Invalid JSON');
@@ -20,8 +23,10 @@ export async function startRun({ request }: RouteContext): Promise<Response> {
   if (!isWorkflowName(workflow)) throw new HttpError(400, 'Unknown workflow');
   // By ID, because the workflows' argument lists differ.
   const { workflowId } = workflows[workflow];
+  // Stamped right before start(), as the SDK's benchmark route does, for time to first step.
+  const clientStart = Date.now();
   const run = await start({ workflowId }, args);
-  return Response.json({ runId: run.runId }, { status: 202 });
+  return Response.json({ runId: run.runId, clientStart }, { status: 202 });
 }
 
 const json = (value: unknown) => new Response(toJson(value), { headers: { 'content-type': 'application/json' } });

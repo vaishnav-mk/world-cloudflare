@@ -1,3 +1,4 @@
+import * as bench from '../workflows/bench.js';
 import * as demo from '../workflows/demo.js';
 import * as limits from '../workflows/limits.js';
 import * as stress from '../workflows/stress.js';
@@ -13,7 +14,7 @@ function withIds<M extends Record<string, object>>(file: string, module: M): { [
 }
 
 /** Workflows `POST /runs` may start, by function name. */
-export const workflows = { ...withIds('demo', demo), ...withIds('limits', limits) };
+export const workflows = { ...withIds('demo', demo), ...withIds('limits', limits), ...withIds('bench', bench) };
 
 /** Workflows only tests start: the engine stress suite and the SDK's conformance scenarios. `POST /runs` cannot. */
 export const stressWorkflows = withIds('stress', stress);
