@@ -6,6 +6,7 @@ import { DEFAULT_HOLD_LEASE_SECONDS, FLOW_ATTEMPT_TIMEOUT_MS, FLOW_TARGET, STEPS
 import { migrateOnStart } from '../db/migrate.js';
 import { ClaimStatus } from '../enums.js';
 import { groupBy } from '../lib/group.js';
+import { fnv1a32Hex } from '../lib/hash.js';
 import { readPayload, replayOf } from '../lib/messages.js';
 import { stepRunnerFor } from '../lib/shards.js';
 import { unreachable } from '../lib/unreachable.js';
@@ -22,7 +23,18 @@ import { FreshRunnerStubs } from './runner-stubs.js';
 type Plan = { done: EnqueueResult } | { message: OutgoingMessage; key?: string; fresh: boolean };
 
 /** The single `flow` shard's delivery lanes before queue shards. */
-const LEGACY_LANES = Array.from({ length: 8 }, (_, lane) => `${FLOW_TARGET}-${lane}`);
+/**
+ * The replay lanes. The fanout delivers one batch per lane at a time, and a spec 9 delivery holds its
+ * batch while it waits on steps or lingers for events, so a shard's runs spread over these lanes to
+ * run side by side. A run's replays all take its one lane (`replayLane`), which keeps them to one at
+ * a time. `flow` holds what was sent before the lanes; the single `flow` shard used the same names.
+ */
+const REPLAY_LANES = Array.from({ length: 8 }, (_, lane) => `${FLOW_TARGET}-${lane}`);
+
+/** A run's replay lane, by a hash of its own, because the shard is `bucket(runId)` and would pick one lane. */
+function replayLane(runId: string): string {
+  return REPLAY_LANES[Number.parseInt(fnv1a32Hex(`lane:${runId}`), 16) % REPLAY_LANES.length];
+}
 
 /**
  * One queue shard: delayed, retried delivery of its runs' messages to the runners
@@ -71,9 +83,7 @@ export class QueueShard extends DurableObject<WorldEnv> {
         maxAttempts: Number.MAX_SAFE_INTEGER,
         delay: (attempt) => retryDelayMs(attempt),
       },
-      // `flow`, plus the lanes the single `flow` shard delivered to before queue shards, so messages
-      // it still holds for them are delivered. New messages go to `flow` only.
-      targets: Object.fromEntries([FLOW_TARGET, ...LEGACY_LANES].map((target): [string, FanoutTarget<Envelope>] => [target, {
+      targets: Object.fromEntries([FLOW_TARGET, ...REPLAY_LANES].map((target): [string, FanoutTarget<Envelope>] => [target, {
         ackOnReturn: true, attemptTimeoutMs: FLOW_ATTEMPT_TIMEOUT_MS, deliver: (messages) => this.#deliverer.deliver(messages),
       }])),
       dlq: (message) => deadLetter(this.env, message),
@@ -107,10 +117,14 @@ export class QueueShard extends DurableObject<WorldEnv> {
     const sends = plans.flatMap((plan) => ('message' in plan ? [plan] : []));
     const ids = new Map<Plan, string>();
     const failures = new Map<Plan, string>();
-    const lanes = groupBy(sends, ({ message }) => (replayOf(readPayload(message.encoded)) === undefined ? STEPS_CHANNEL : 'replays'));
+    const lanes = groupBy(sends, ({ message }) => {
+      const replay = replayOf(readPayload(message.encoded));
+      return replay === undefined ? STEPS_CHANNEL : replayLane(replay.runId);
+    });
     await Promise.all([...lanes].map(async ([lane, group]) => {
       const result = await (lane === STEPS_CHANNEL ? this.#steps : this.#fanout).enqueue(
-        group.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })), { targets: [FLOW_TARGET] },
+        group.map(({ message: { id, ...body }, key }) => ({ id, body, deduplicationKey: key })),
+        { targets: [lane === STEPS_CHANNEL ? FLOW_TARGET : lane] },
       );
       if (!result.success) {
         for (const send of group) failures.set(send, result.error.message);
