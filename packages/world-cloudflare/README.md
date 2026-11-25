@@ -1,6 +1,6 @@
 # world-cloudflare
 
-A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for Cloudflare Workers, built on SQLite Durable Objects and R2. It runs the published, unpatched `workflow` 5.5.0, with spec 8 runs by default or spec 9 with `WORKFLOW_SPEC_VERSION=9`. Independent project, not an official Cloudflare or Vercel package.
+A [Workflow SDK](https://workflow-sdk.dev/worlds/building-a-world) v5 World for Cloudflare Workers, built on SQLite Durable Objects and R2. It runs the published, unpatched `workflow` 5.8.0. New runs are spec 9, the SDK's single-orchestrator engine; `WORKFLOW_SPEC_VERSION=8` keeps the previous one. Independent project, not an official Cloudflare or Vercel package.
 
 [Documentation](https://world-cloudflare.vaishnav.one/) · [Architecture](https://world-cloudflare.vaishnav.one/docs/architecture) · [Measurements](https://world-cloudflare.vaishnav.one/docs/benchmarks) · [Source](https://github.com/vaishnav-mk/world-cloudflare)
 
@@ -16,7 +16,7 @@ Queue shards use [durability](https://github.com/avenceslau/durability) for alar
 ## Setup
 
 ```sh
-pnpm add world-cloudflare workflow@5.5.0
+pnpm add world-cloudflare workflow@5.8.0
 ```
 
 With pnpm 11 or later, copy `allowBuilds` from the repo's [`pnpm-workspace.yaml`](https://github.com/vaishnav-mk/world-cloudflare/blob/main/pnpm-workspace.yaml), or install fails with `ERR_PNPM_IGNORED_BUILDS`.
@@ -92,7 +92,9 @@ Migration SQL is bundled by Wrangler's default `Text` rule (`**/*.sql`). A confi
 | `SHARD_EPOCHS` | Shard counts per epoch. Default: 128 store, 256 queue and 16 index shards. [Scaling](https://world-cloudflare.vaishnav.one/docs/scaling#routing) |
 | `WORKFLOW_VM` | Engine for new runs: `quickjs` or `node` (default). [Engines](https://world-cloudflare.vaishnav.one/docs/engines) |
 | `WORKFLOW_ENCRYPTION_SECRET` | Turns on [encryption](#encryption) |
-| `WORKFLOW_SPEC_VERSION` | `9` for spec 9 runs on the Worker and its executors; older runs keep spec 8 |
+| `WORKFLOW_SPEC_VERSION` | `8` keeps new runs on spec 8. Default spec 9. Existing runs keep their version |
+| `INLINE_START` | `0` sends every start through the queue. By default a spec 9 start runs its first delivery in the Worker that called `start()`, with the queue holding the message as the backstop ([inline starts](#inline-starts)) |
+| `WORKFLOW_RUN_AHEAD_DEPTH` | SDK setting. `0` turns run-ahead off. On SDK 5.8, QuickJS runs past about 500 sequential steps slow down with it: 2,000 steps took 45 s, 5 s without |
 | `WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED` | `1` saves QuickJS VM snapshots without a secret; otherwise each invocation replays the whole log |
 | `WORKFLOW_COMPRESSION_CODEC` | Set `gzip`; zstd in workerd throws on incompressible input |
 | `QUEUE_MAX_ATTEMPTS` | Deliveries before dead-lettering. Default 64 |
@@ -104,12 +106,18 @@ Every Worker that runs World code, retained executors included, needs the same b
 
 ## Behavior to know
 
-- **Steps can run more than once.** Make side effects idempotent. [Delivery](https://world-cloudflare.vaishnav.one/docs/state-and-delivery#delivery)
+- **Steps can run more than once.** Make side effects idempotent. SDK 5.8 also runs steps speculatively; give a step that must not repeat `maxRetries = 0`. [Delivery](https://world-cloudflare.vaishnav.one/docs/state-and-delivery#delivery)
 - **Adding capacity.** Append a `SHARD_EPOCHS` entry, `{ "from": <ms>, "store": n, "queue": n, "index"?: n }`, with `from` after the deploy. Never change an existing epoch. Keep each queue count a multiple of its store count.
 - **Lists are eventually consistent.** A run appears in `runs.list` a moment after `start()` returns. [Indexes](https://world-cloudflare.vaishnav.one/docs/services#indexes)
 - **Large values.** Binary values over 1 MiB go to R2. A serialized payload over 18 MiB or a stream chunk over 32 MiB is rejected with a 413. For more, return a `type: 'bytes'` `ReadableStream` from a step and set `autoAllocateChunkSize`, or workerd stores each 4 KiB read as a chunk ([example](https://github.com/vaishnav-mk/world-cloudflare/blob/main/workflows/limits.ts#L140-L162)). [Payloads and streams](https://world-cloudflare.vaishnav.one/docs/streams)
 - **Nothing is deleted.** Runs and R2 objects are retained indefinitely.
 - **Hook upgrades** follow a receiver-first procedure. [Hook ownership](https://github.com/vaishnav-mk/world-cloudflare/blob/main/docs/hook-ownership.md)
+
+## Inline starts
+
+A spec 9 start carries the run's input, so its first delivery needs nothing from the store. `start()` therefore runs that delivery right away, through this Worker's `CONSUMER`, in the isolate that called it, instead of crossing the run's store, queue shard and runner. At low traffic each of those can be an idle Durable Object that takes hundreds of milliseconds to come back. The queue holds the message as the backstop (`experimental_queueHold`) and delivers it only if the inline delivery does not settle it. A short wake, such as a sleep, is delivered in the caller too. After 20 seconds the queue takes the run over, because the caller's `waitUntil` ends 30 seconds after it answers; the spec 9 fence refuses the inline delivery's next write, which ends it. Spec 8 starts, delayed starts and starts for another deployment use the queue as before.
+
+The trade-off: the inline part of a run executes where `start()` was called, which may be farther from the run's store than its runner. [Measurements](https://world-cloudflare.vaishnav.one/docs/benchmarks#sdk-benchmark).
 
 ## Encryption
 

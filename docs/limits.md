@@ -2,6 +2,27 @@
 
 Measured numbers live here, and the other docs link to this page. Each number says where it was measured, on Workers (Workers Paid) or locally (workerd under `wrangler dev` or in the end-to-end tests), and the build that recorded it. Builds before `5321a43` ran the SDK with local changes; later ones run the published `workflow` 5.5.0. Payloads are random bytes, so compression does not shrink them. The probe workflows are in `workflows/limits.ts`.
 
+## SDK benchmark
+
+The Workflow SDK's own benchmark scenarios (`packages/core/e2e/benchmark.test.ts` and `workbench/example/workflows/97_bench.ts` in vercel/workflow), ported to [`workflows/bench.ts`](../workflows/bench.ts) and run by [`scripts/remote-bench-sdk.mjs`](../scripts/remote-bench-sdk.mjs). Every window uses deployment-side clocks: `clientStart` is stamped in the route right before `start()`, and each step body records its own start and end. 2026-11-25, one client in Bangalore, default pools (128 store, 256 queue shards), QuickJS, unencrypted, no warming. Vercel's World ran the same workflows and routes in a Next.js app on a Hobby project, `workflow` 5.8.0. Samples: 30 one-step runs back to back after 2 warm-ups, one 1,020-step run, 10 fan-outs of 100 steps, 10 resumes. p50 / p75 in ms.
+
+| Metric | This World, SDK 5.5.0 | This World, SDK 5.8.0 | Vercel's World, SDK 5.8.0 |
+| --- | ---: | ---: | ---: |
+| Time to first step | 1,462 / 1,566 | ≤ 26 / ≤ 74 (see below) | 174 / 219 |
+| Step-to-step overhead, inline | 19 / 20 | 0 / 0 (p90 77) | 4 / 6 (p90 157) |
+| Workflow overhead, 1,020 steps | 20,580 | 23,311 | 42,831 |
+| Fan-out of 100, first step done | 1,247 / 1,630 | 602 / 927 | 182 / 224 |
+| Fan-out of 100, last step done | 2,048 / 3,205 | 1,646 / 1,850 | 1,362 / 1,531 |
+| Resume after 1 s idle | 1,229 / 1,249 | 740 / 1,151 | 233 / 301 |
+
+- **Time to first step on 5.8 is a CPU bound, not a clock reading.** With [inline starts](../packages/world-cloudflare/README.md#inline-starts) the step body runs in the isolate that called `start()` before any network round trip completes, and the Workers clock advances only on I/O, so the measured window reads 0 ms. The bound is the CPU the start request and the inline delivery used, from `wrangler tail` over 20 runs: 3 ms and 23 ms at p50, 12 ms and 62 ms at p90. The delivery's CPU includes work after the step, so the real figure is lower.
+- **Step-to-step overhead of 0** comes from the SDK's run-ahead: the next step starts before the previous one's completion commits.
+- **The workflow overhead row is one run each**, and Vercel's varied: an earlier sample was 27,709 ms. This World's 1,020-step run includes one queue hop of 2.6 s, where the run moved from its caller to its runner ([inline starts](../packages/world-cloudflare/README.md#inline-starts)).
+- **Fan-out and resume are slower than Vercel's.** The SDK runs 3 of the 100 steps inline and writes all 100 creations first, to a store that is idle at the start. A resume that the SDK does not linger through costs a new delivery.
+- **Long QuickJS runs slow down with run-ahead on 5.8.** 2,000 sequential steps took 45 s locally with it and 5 s with `WORKFLOW_RUN_AHEAD_DEPTH=0`. The 1,020-step row is below where this dominates.
+
+These depend on the workflow, the client's location and the objects' placement.
+
 ## Latest regression and boundary check
 
 Workers Paid, 2026-11-14/15, build `8cddcbd`, published SDK 5.5.0, unencrypted runs. Store and load-generator placement requested `enam`; this is not a residency guarantee. The latest epoch used 256 store, 512 queue and 16 index shards. These measurements do not establish capacity in other regions or under other workloads.

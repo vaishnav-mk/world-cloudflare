@@ -1,6 +1,6 @@
 # Workflow SDK v5 contract parity
 
-Every method, option, capability and spec-version rule of the contract, the published `@workflow/world` 5.2.0 run by `workflow` 5.5.0, that Vercel's World implements or the runtime uses. The target is the behaviour the SDK sees: where a row names something of Vercel's platform (OIDC, billing, regions), it says what this World does instead.
+Every method, option, capability and spec-version rule of the contract, the published `@workflow/world` 5.4.0 run by `workflow` 5.8.0, that Vercel's World implements or the runtime uses. The target is the behaviour the SDK sees: where a row names something of Vercel's platform (OIDC, billing, regions), it says what this World does instead.
 
 - **Before** is `3f24570`, the World before this contract work; **After** is the current code.
 - **Built**: implemented as the contract describes. **Partly**: implemented with a stated gap. **Missing**: not implemented. **N/A**: the contract says a World like this one omits it.
@@ -19,8 +19,8 @@ What is missing is optional and off the runtime's path: `describeRun`, `analytic
 
 | Item | Before | After | Tests | Notes |
 | --- | --- | --- | --- | --- |
-| `specVersion` | Partly | Built | contract, spec9-e2e | `mintedSpecVersion(process.env, { inBandFence: true })`: spec 8 by default, spec 9 with `WORKFLOW_SPEC_VERSION=9`. Existing runs keep the version they were stamped with |
-| Spec 8 runs (`SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM`) | Built | Built | e2e lanes | Every new run until the variable is set |
+| `specVersion` | Partly | Built | contract, spec9-e2e | `mintedSpecVersion(process.env, { inBandFence: true })`: spec 9 by default since SDK 5.8, spec 8 with `WORKFLOW_SPEC_VERSION=8`. Existing runs keep the version they were stamped with |
+| Spec 8 runs (`SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM`) | Built | Built | unit, spec8 e2e lane | New runs with `WORKFLOW_SPEC_VERSION=8`, and runs started before the upgrade |
 | Spec 9 runs (`SPEC_VERSION_SINGLE_ORCHESTRATOR`) | Missing | Built | conformance, spec9, spec9-e2e lane | See [Spec 9](#spec-9) |
 | `inBandFence` | Missing | Built | conformance | Declared; the SDK's in-band fence suite passes, 13 tests |
 | `maxConcurrency` | Missing | Built | queue | One replay per run at a time, spec 9 or earlier |
@@ -158,7 +158,7 @@ This checks one unencrypted QuickJS/spec-8 workflow with an `enam` placement hin
 | Versioned schema migrations | ✓ | Drizzle Kit, additive, applied by each Durable Object on start |
 | Published to npm | ✓ | As `world-cloudflare` |
 | Listed in `worlds-manifest.json` | ✗ | |
-| Runs on the published SDK | ✓ | `workflow` 5.5.0 as published. Reading about 4 GiB of stream in one step needs an SDK fix ([streams](limits.md#streams)) |
+| Runs on the published SDK | ✓ | `workflow` 5.8.0 as published. Reading about 4 GiB of stream in one step needed an SDK fix on 5.5.0 ([streams](limits.md#streams)); not rechecked on 5.8.0 |
 | SDK `@workflow/world-testing` suite | ✗ | It starts a Node server and cannot inject a Worker-bound World; its scenarios are ported ([Conformance](#conformance)) |
 | Retention and cleanup of finished runs | ✗ | Runs, outbox, dedup and takeover rows, and R2 payloads, are kept forever |
 | Payloads over 1 MiB | ✓ | In R2; 16 MiB step outputs on Workers, and payloads over 18 MiB serialized are rejected ([limits](limits.md#payloads)) |
@@ -170,7 +170,8 @@ This checks one unencrypted QuickJS/spec-8 workflow with an `enam` placement hin
 ## Upgrading
 
 - **Hook claim protocol.** Existing installations need the [receiver-first upgrade](hook-ownership.md#compatibility-and-rollout) before enabling intent-producing writers. Old direct acquisition calls can return retryable 503 during that stage. Receipts and disposal tombstones must survive later releases.
-- **Spec 9 is opt-in.** Nothing changes for new runs until `WORKFLOW_SPEC_VERSION=9` is set on the Worker and every retained executor. Existing runs keep their spec version.
+- **Spec 9 is the default from SDK 5.8.** New runs are spec 9 once the Worker runs 5.8; set `WORKFLOW_SPEC_VERSION=8` on the Worker and every retained executor to keep new runs on spec 8. Existing runs keep their spec version, and a retained executor on an older SDK keeps running its own.
+- **Rate limits (spec 10) are not supported.** The World does not declare `capabilities.rateLimits`, so the SDK never creates a spec 10 run, and the store refuses rate events.
 - **Schema changes are additive** and each Durable Object applies them on start. An existing run has no in-band count, so an in-band write to one is a 400; the spec 8 runtime never sends one.
 - **List index.** Each store backfills the index on its first wake after the upgrade, and lists and `hooks.get` ask every store until all have. A store that took writes on a version without the index after it backfilled (a rollback) leaves those changes out: delete its `index-backfill` storage key and its `index_sources` rows to backfill it again.
 - **Runners.** The `Runner` class needs its own Wrangler migration (`new_sqlite_classes`) and a `RUNNER` binding, so deploy the main Worker at once, not gradually. The current deployment's executor needs `RUNNER` too, and `EXECUTOR_ROUTES` must name it, because invocations run there.
