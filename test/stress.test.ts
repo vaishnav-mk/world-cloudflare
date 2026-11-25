@@ -62,8 +62,8 @@ async function labelledEvents(runId: string) {
 
 /**
  * The run's events without IDs or timestamps: run events in order, then each step, wait and hook
- * with its event types. Grouping by entity drops the interleaving of concurrent steps and timers,
- * which depends on queue timing.
+ * with its event types, sorted. Grouping and sorting drop the interleaving of concurrent steps and
+ * timers, and the order they first appear in, which depend on queue timing and the SDK's speculation.
  */
 async function eventLog(runId: string): Promise<string[]> {
   const run: string[] = [];
@@ -72,7 +72,7 @@ async function eventLog(runId: string): Promise<string[]> {
     if (entity === undefined) run.push(event.eventType);
     else entities.set(entity, [...(entities.get(entity) ?? []), event.eventType]);
   }
-  return [...run, ...[...entities].map(([entity, types]) => `${entity}: ${types.join(',')}`)];
+  return [...run, ...[...entities].map(([entity, types]) => `${entity}: ${types.join(',')}`).sort()];
 }
 
 async function hookToken(runId: string): Promise<string> {
@@ -273,7 +273,16 @@ describe('control flow and values', () => {
   it('try/catch/finally, FatalError, RetryableError and causes', () => expectParity('errorFlow', 3));
   it('Map, Set, Date, RegExp, typed arrays, URL, Headers and BigInt across steps', () => expectParity('richValues'));
   it('classes, private fields, generators, async iterators, symbols and BigInt in workflow code', () => expectParity('language', 3));
-  it('2,000 sequential steps', () => expectParity('manySteps', 2000), 60_000);
+  it('2,000 sequential steps', async () => {
+    // SDK 5.8's run-ahead costs QuickJS time that grows with the log: 2,000 steps take about 45 s
+    // with it and 5 s without. Parity is what this checks, so it runs without.
+    process.env.WORKFLOW_RUN_AHEAD_DEPTH = '0';
+    try {
+      await expectParity('manySteps', 2000);
+    } finally {
+      delete process.env.WORKFLOW_RUN_AHEAD_DEPTH;
+    }
+  }, 60_000);
   it('recursion 1,000 frames deep', () => expectParity('recursion', 1000));
   it('recursion through 50 awaited steps', () => expectParity('asyncRecursion', 50));
   it('node: catches a stack overflow in workflow code', async () => {
@@ -359,8 +368,7 @@ describe('global surface', () => {
     'globalThis write then bare read': 'globals resolve once', 'top-level function on globalThis': 'module scope',
     // Bug in QuickJS: URL has no searchParams.
     'URL#searchParams': 'missing on QuickJS',
-    // The QuickJS in the published SDK (quickjs-wasi 3.4.0) has no `v` flag.
-    'RegExp v flag': 'missing on QuickJS',
+    'RegExp v flag': undefined,
     'Date.prototype.constructor': undefined, 'Object.keys(Math)': undefined,
     'JSON.stringify(1n)': undefined, 'structuredClone(Map)': undefined, Headers: undefined, TextEncoder: undefined,
     AbortController: undefined,

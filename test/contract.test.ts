@@ -227,6 +227,15 @@ describe('World v5 contract (workerd bindings)', () => {
     expect((await world.events.create(runId, resume(hookId), params)).event).toEqual(first.event);
   });
 
+  it('refuses rate limit events, which belong to spec 10 runs this World never creates', async () => {
+    const runId = await newRun();
+    await expect(world.events.create(runId, {
+      eventType: 'rate_created', correlationId: 'rate-1',
+      eventData: { key: 'k', limit: 1, periodMs: 1000, expiresAt: new Date(Date.now() + 60_000) },
+    } as never)).rejects.toThrow('does not support rate limits');
+    expect((await world.events.list({ runId })).data.map((event) => event.eventType)).toEqual(['run_created']);
+  });
+
   it('appends a batch in order, each event with the outcome its own create would have had', async () => {
     const runId = await newRun();
     await world.events.create(runId, { eventType: 'run_started' });

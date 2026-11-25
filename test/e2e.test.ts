@@ -273,7 +273,7 @@ it('runs 200 parallel steps to completion', async () => {
     { interval: 250, timeout: 60_000 }).toBe('completed');
   expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 200 });
   // Spec 9 runs take about 30 s for this here today; the tighter bound is for spec 8.
-  expect(Date.now() - started).toBeLessThan(process.env.WORKFLOW_SPEC_VERSION === '9' ? 60_000 : 30_000);
+  expect(Date.now() - started).toBeLessThan(process.env.WORKFLOW_SPEC_VERSION === '8' ? 30_000 : 60_000);
 }, 90_000);
 
 it('stores incompressible step output larger than 64 KiB', async () => {
@@ -298,11 +298,11 @@ it.skipIf(process.env.WORKFLOW_VM !== 'quickjs')('saves a VM snapshot and restor
   using lists = vi.spyOn(world.events, 'list');
   const response = await SELF.fetch('https://local/runs', {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'delayed', value: 15 }),
+    body: JSON.stringify({ name: 'suspended', value: 15 }),
   });
   const { runId } = await response.json() as { runId: string };
   await expect.poll(async () => (await (await SELF.fetch(`https://local/runs/${runId}`, { headers })).json() as { status: string }).status,
-    { interval: 100, timeout: 15_000 }).toBe('completed');
+    { interval: 100, timeout: 25_000 }).toBe('completed');
   expect(await (await SELF.fetch(`https://local/runs/${runId}/result`, { headers })).json()).toEqual({ value: 30 });
 
   // The first invocation saved a snapshot when it suspended on the sleep.
@@ -344,7 +344,7 @@ it('returns a 12 MiB run output', async () => {
 
 // A spec 9 orchestrator stops at any refused in-band write and asks for a redelivery, which runs the
 // step again, so there the run does not fail on the first attempt.
-it.skipIf(process.env.WORKFLOW_SPEC_VERSION === '9')('fails a step whose output is over the payload limit on its first attempt', async () => {
+it.skipIf(process.env.WORKFLOW_SPEC_VERSION !== '8')('fails a step whose output is over the payload limit on its first attempt', async () => {
   const runId = await startRun('stepOutput', 20 * MiB);
   await expect.poll(() => runStatus(runId), { interval: 250, timeout: 30_000 }).toBe('failed');
   expect(await runError(runId)).toContain(`byte result is over the ${PAYLOAD_MAX_BYTES}-byte payload limit`);

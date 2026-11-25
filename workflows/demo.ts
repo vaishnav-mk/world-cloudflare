@@ -13,6 +13,13 @@ export async function delayed(value: number) {
   return double(value);
 }
 
+/** Sleeps past the SDK's 5 s wait linger, so its delivery suspends and a later one resumes it. */
+export async function suspended(value: number) {
+  'use workflow';
+  await sleep(7_000);
+  return double(value);
+}
+
 export async function longDelay(value: number) {
   'use workflow';
   await sleep(45_000);

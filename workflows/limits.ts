@@ -64,7 +64,8 @@ export async function streamBytes(totalMiB: number, chunkMiB: number) {
 export async function streamSlowly(seconds: number) {
   'use workflow';
   const stream = await slowStream(clamp(seconds, MAX_SLOW_SECONDS) * 10);
-  await sleep(1000);
+  // Past the SDK's 5 s wait linger, so the flow request ends and its background budget runs out.
+  await sleep(7_000);
   return countBytes(stream);
 }
 

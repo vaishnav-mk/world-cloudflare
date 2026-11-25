@@ -6,6 +6,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
   "vars": {
+    // These suites check spec 8 behavior; spec 9, the SDK default since 5.8, runs in the e2e suites.
+    "WORKFLOW_SPEC_VERSION": "8",
     "DEPLOYMENT_ID": "test-v1", "QUEUE_MAX_ATTEMPTS": "2",
     // workerd ignores the hint; test/location-hint.test.ts checks every object the World reaches gets it.
     "LOCATION_HINT": "weur",

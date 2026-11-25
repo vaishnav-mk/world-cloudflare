@@ -1,6 +1,6 @@
 import { EntityConflictError, WorkflowRunNotFoundError, WorkflowWorldError } from '@workflow/errors';
 import {
-  getQueueTopicPrefix, getRunQueueNamespace, isTerminalWorkflowRunStatus, requireEventSlot, ValidQueueName,
+  getQueueTopicPrefix, getRunQueueNamespace, isRateEventType, isTerminalWorkflowRunStatus, requireEventSlot, ValidQueueName,
   type AnyEventRequest, type CreateEventParams, type Event, type EventResult, type Hook, type WorkflowRun,
 } from '@workflow/world';
 import { ulid } from 'ulid';
@@ -98,6 +98,8 @@ function replayedResume(db: Db, runId: string, data: AnyEventRequest, params: Cr
 }
 
 function changeFor(tx: Tx, run: WorkflowRun, data: AnyEventRequest): Change {
+  // Rate events belong to spec 10 runs, which need `capabilities.rateLimits`; this World declares none.
+  if (isRateEventType(data.eventType)) throw new WorkflowWorldError('This World does not support rate limits', { status: 400 });
   switch (data.eventType) {
     case EventType.RunStarted:
     case EventType.RunCompleted:

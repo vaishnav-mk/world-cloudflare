@@ -5,8 +5,8 @@
   "compatibility_date": "2026-10-17",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
-  // The app test config with new runs on spec 9, the single-orchestrator model.
-  "vars": { "DEPLOYMENT_ID": "test-v1", "FLOW_BACKGROUND_BUDGET_MS": "10000", "WORKFLOW_VM": "quickjs", "WORKFLOW_COMPRESSION_CODEC": "gzip", "WORKFLOW_SPEC_VERSION": "9",
+  // The app test config with new runs on spec 8, the engine before SDK 5.8 made spec 9 the default.
+  "vars": { "DEPLOYMENT_ID": "test-v1", "FLOW_BACKGROUND_BUDGET_MS": "10000", "WORKFLOW_VM": "quickjs", "WORKFLOW_COMPRESSION_CODEC": "gzip", "WORKFLOW_SPEC_VERSION": "8",
     "WORKFLOW_SNAPSHOT_ALLOW_UNENCRYPTED": "1", "WORKFLOW_SNAPSHOT_THRESHOLD": "2",
     "WORKFLOW_EXPERIMENTAL_DYNAMIC_WORKFLOWS": "1" },
   "durable_objects": { "bindings": [

@@ -6,18 +6,18 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "test:e2e": "pnpm run build:workflow && vitest run --config vitest.app.config.ts && vitest run --config vitest.node.config.ts && vitest run --config vitest.encrypted.config.ts && vitest run --config vitest.spec9.config.ts",
+    "test:e2e": "pnpm run build:workflow && vitest run --config vitest.app.config.ts && vitest run --config vitest.node.config.ts && vitest run --config vitest.encrypted.config.ts && vitest run --config vitest.spec8.config.ts",
     "build:workflow": "rm -rf .wrangler/tmp && pnpm --filter world-cloudflare build && node packages/world-cloudflare/dist/build.js workflows",
     "typecheck": "wrangler types --config wrangler.test.jsonc worker-configuration.d.ts && tsc --noEmit",
     "build": "pnpm run build:workflow && wrangler deploy --dry-run --outdir /tmp/worlds-cloudflare-build",
     "ui": "pnpm --filter world-cloudflare build && node --env-file=.dev.vars.remote-ui node_modules/@workflow/cli/bin/run.js web"
   },
   "dependencies": {
-    "@workflow/cli": "5.1.0",
-    "@workflow/errors": "5.1.1",
-    "@workflow/world": "5.2.0",
+    "@workflow/cli": "5.3.3",
+    "@workflow/errors": "5.2.0",
+    "@workflow/world": "5.4.0",
     "world-cloudflare": "workspace:*",
-    "workflow": "5.5.0"
+    "workflow": "5.8.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.8.1",
